@@ -44,6 +44,20 @@ config :hostctl, :web_server,
   # Used to validate config syntax before reloading (nginx -t)
   nginx_validate_cmd: ["nginx", "-t"]
 
+# Let's Encrypt / Certbot integration
+# When Cloudflare is configured as the DNS provider the certbot-dns-cloudflare
+# plugin is used automatically (DNS-01 challenge). Otherwise HTTP-01 webroot
+# is used. The certbot binary and certbot-dns-cloudflare package must be
+# installed on the host (e.g. apt install certbot python3-certbot-dns-cloudflare).
+#
+# Set the account email via the CERTBOT_EMAIL environment variable or the
+# :email key below. Without an email, --register-unsafely-without-email is
+# passed to certbot.
+config :hostctl, :certbot,
+  enabled: true,
+  certbot_cmd: "certbot",
+  email: nil
+
 # Configure the endpoint
 config :hostctl, HostctlWeb.Endpoint,
   url: [host: "localhost"],

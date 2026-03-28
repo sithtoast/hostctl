@@ -1,4 +1,6 @@
 defmodule Hostctl.Hosting do
+  require Logger
+
   import Ecto.Query
 
   alias Hostctl.Repo
@@ -6,6 +8,7 @@ defmodule Hostctl.Hosting do
   alias Hostctl.Settings
   alias Hostctl.DNS.Cloudflare
   alias Hostctl.WebServer
+  alias Hostctl.CertBot
 
   alias Hostctl.Hosting.{
     Domain,
@@ -396,9 +399,16 @@ defmodule Hostctl.Hosting do
     |> SslCertificate.changeset(attrs)
     |> Repo.insert()
     |> case do
-      {:ok, _cert} = result ->
+      {:ok, cert} = result ->
         domain = Repo.get!(Domain, domain.id)
         WebServer.sync_domain(domain)
+
+        if cert.cert_type == "lets_encrypt" do
+          Task.Supervisor.start_child(Hostctl.TaskSupervisor, fn ->
+            provision_lets_encrypt_cert(domain, cert)
+          end)
+        end
+
         result
 
       error ->
@@ -411,13 +421,43 @@ defmodule Hostctl.Hosting do
     |> SslCertificate.changeset(attrs)
     |> Repo.update()
     |> case do
-      {:ok, _cert} = result ->
+      {:ok, updated_cert} = result ->
         domain = Repo.get!(Domain, cert.domain_id)
         WebServer.sync_domain(domain)
+
+        Phoenix.PubSub.broadcast(
+          Hostctl.PubSub,
+          "domain:#{cert.domain_id}:ssl",
+          {:ssl_cert_updated, updated_cert}
+        )
+
         result
 
       error ->
         error
+    end
+  end
+
+  defp provision_lets_encrypt_cert(%Domain{} = domain, %SslCertificate{} = cert) do
+    case CertBot.provision(domain, cert) do
+      {:ok, expires_at} ->
+        case update_ssl_certificate(cert, %{status: "active", expires_at: expires_at}) do
+          {:ok, _} ->
+            Logger.info("[Hosting] SSL certificate activated for #{domain.name}")
+
+          {:error, reason} ->
+            Logger.error(
+              "[Hosting] Failed to mark SSL cert active for #{domain.name}: #{inspect(reason)}"
+            )
+        end
+
+      {:error, :disabled} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "[Hosting] SSL provisioning failed for #{domain.name}: #{inspect(reason)}"
+        )
     end
   end
 

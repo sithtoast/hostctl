@@ -12,8 +12,7 @@ defmodule Hostctl.Application do
       Hostctl.Repo,
       {DNSCluster, query: Application.get_env(:hostctl, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Hostctl.PubSub},
-      # Start a worker by calling: Hostctl.Worker.start_link(arg)
-      # {Hostctl.Worker, arg},
+      {Task.Supervisor, name: Hostctl.TaskSupervisor},
       # Start to serve requests, typically the last entry
       HostctlWeb.Endpoint
     ]

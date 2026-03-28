@@ -92,7 +92,9 @@ for arg in "$@"; do
   esac
 done
 
-# Cloudflare proxy mode implies no certbot (Cloudflare terminates TLS)
+# Cloudflare proxy mode skips certbot for the panel itself (Cloudflare terminates TLS
+# for the control panel), but certbot + the dns-cloudflare plugin are still installed
+# so that hosted domains can obtain Let's Encrypt certs via DNS-01 challenge.
 [[ "$CLOUDFLARE_PROXY" == true ]] && SKIP_CERTBOT=true
 
 # ==============================================================================
@@ -369,6 +371,23 @@ if [[ "$SKIP_NGINX" == false ]]; then
 fi
 
 # 2f. PHP-FPM ------------------------------------------------------------------
+# 2g. Certbot (always installed for hosted-domain SSL) -------------------------
+step "Installing Certbot for hosted-domain SSL"
+
+if ! command -v certbot &>/dev/null; then
+  apt-get install -y --no-install-recommends certbot
+fi
+
+if [[ "$CLOUDFLARE_PROXY" == true ]]; then
+  # DNS-01 challenge plugin required when domains are behind Cloudflare proxy
+  if ! python3 -c "import certbot_dns_cloudflare" &>/dev/null 2>&1; then
+    apt-get install -y --no-install-recommends python3-certbot-dns-cloudflare
+  fi
+  success "Certbot + dns-cloudflare plugin installed"
+else
+  success "Certbot installed"
+fi
+
 if [[ "$SKIP_PHP" == false ]]; then
   step "Installing PHP-FPM (versions: $PHP_VERSIONS)"
 
@@ -506,6 +525,20 @@ if [[ "$SKIP_NGINX" == false ]]; then
   success "$SERVICE_USER can reload Nginx without a password"
 fi
 
+# 3d-5. Certbot sudoers (hosted-domain SSL provisioning) ----------------------
+CERTBOT_SUDOERS_FILE="/etc/sudoers.d/hostctl-certbot"
+CERTBOT_BIN="$(command -v certbot)"
+echo "$SERVICE_USER ALL=(root) NOPASSWD: $CERTBOT_BIN" > "$CERTBOT_SUDOERS_FILE"
+chmod 440 "$CERTBOT_SUDOERS_FILE"
+visudo -cf "$CERTBOT_SUDOERS_FILE" >/dev/null \
+  || { warn "sudoers syntax check failed — removing $CERTBOT_SUDOERS_FILE"; rm -f "$CERTBOT_SUDOERS_FILE"; }
+success "$SERVICE_USER can run certbot without a password"
+
+# Ensure /etc/letsencrypt is readable by the service user
+mkdir -p /etc/letsencrypt
+chown root:"$SERVICE_USER" /etc/letsencrypt
+chmod 750 /etc/letsencrypt
+
 # 3e. Environment file ---------------------------------------------------------
 step "Writing environment configuration"
 
@@ -574,7 +607,7 @@ StandardError=journal
 SyslogIdentifier=$APP_NAME
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl
+ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /etc/letsencrypt /tmp
 
 [Install]
 WantedBy=multi-user.target
@@ -635,12 +668,12 @@ NGINXEOF
   nginx -t && systemctl reload nginx
   success "Nginx configured for $DOMAIN"
 
-  # 3i. SSL via Certbot ----------------------------------------------------------
+  # 3i. SSL via Certbot (panel domain only) -------------------------------------
   if [[ "$SKIP_CERTBOT" == false ]]; then
-    step "Provisioning SSL certificate via Let's Encrypt"
+    step "Provisioning SSL certificate for the panel via Let's Encrypt"
 
-    if ! command -v certbot &>/dev/null; then
-      apt-get install -y --no-install-recommends certbot python3-certbot-nginx
+    if ! dpkg -l python3-certbot-nginx &>/dev/null; then
+      apt-get install -y --no-install-recommends python3-certbot-nginx
     fi
 
     certbot --nginx \

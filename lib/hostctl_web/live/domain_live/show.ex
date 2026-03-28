@@ -11,6 +11,10 @@ defmodule HostctlWeb.DomainLive.Show do
     cron_jobs = Hosting.list_cron_jobs(domain)
     ftp_accounts = Hosting.list_ftp_accounts(domain)
 
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Hostctl.PubSub, "domain:#{domain.id}:ssl")
+    end
+
     {:ok,
      socket
      |> assign(:page_title, domain.name)
@@ -28,6 +32,10 @@ defmodule HostctlWeb.DomainLive.Show do
 
   def handle_params(_params, _url, socket) do
     {:noreply, socket}
+  end
+
+  def handle_info({:ssl_cert_updated, cert}, socket) do
+    {:noreply, assign(socket, :ssl_cert, cert)}
   end
 
   def handle_event("set_section", %{"section" => section}, socket) do
@@ -403,14 +411,41 @@ defmodule HostctlWeb.DomainLive.Show do
             <%= if @ssl_cert do %>
               <div class="space-y-3">
                 <div class="flex items-center gap-3">
-                  <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-green-100 dark:bg-green-900/30">
-                    <.icon name="hero-lock-closed" class="w-5 h-5 text-green-600 dark:text-green-400" />
+                  <div class={[
+                    "flex items-center justify-center w-10 h-10 rounded-lg",
+                    if(@ssl_cert.status == "active",
+                      do: "bg-green-100 dark:bg-green-900/30",
+                      else: "bg-yellow-100 dark:bg-yellow-900/30"
+                    )
+                  ]}>
+                    <%= if @ssl_cert.status == "active" do %>
+                      <.icon
+                        name="hero-lock-closed"
+                        class="w-5 h-5 text-green-600 dark:text-green-400"
+                      />
+                    <% else %>
+                      <.icon
+                        name="hero-arrow-path"
+                        class="w-5 h-5 text-yellow-600 dark:text-yellow-400 animate-spin"
+                      />
+                    <% end %>
                   </div>
                   <div>
                     <p class="text-sm font-medium text-gray-900 dark:text-white capitalize">
                       {@ssl_cert.cert_type} certificate
                     </p>
-                    <p class="text-xs text-gray-500 capitalize">Status: {@ssl_cert.status}</p>
+                    <p class={[
+                      "text-xs capitalize",
+                      if(@ssl_cert.status == "active",
+                        do: "text-green-600 dark:text-green-400",
+                        else: "text-yellow-600 dark:text-yellow-400"
+                      )
+                    ]}>
+                      {@ssl_cert.status}
+                      <%= if @ssl_cert.status == "pending" do %>
+                        – issuing certificate, this may take a minute…
+                      <% end %>
+                    </p>
                   </div>
                 </div>
                 <%= if @ssl_cert.expires_at do %>
