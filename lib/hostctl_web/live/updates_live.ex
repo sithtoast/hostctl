@@ -138,6 +138,32 @@ defmodule HostctlWeb.UpdatesLive do
                 </div>
               </div>
             </div>
+          <% @check_status == {:error, :not_configured} -> %>
+            <%!-- Not configured --%>
+            <div class="bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-xl p-6">
+              <div class="flex items-start gap-4">
+                <div class="flex items-center justify-center w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/50 shrink-0 mt-0.5">
+                  <.icon
+                    name="hero-information-circle"
+                    class="w-5 h-5 text-blue-600 dark:text-blue-400"
+                  />
+                </div>
+                <div class="flex-1">
+                  <p class="text-base font-semibold text-blue-900 dark:text-blue-200">
+                    GitHub repository not configured
+                  </p>
+                  <p class="mt-1 text-sm text-blue-700 dark:text-blue-400">
+                    Add your repo to enable update checks.
+                  </p>
+                  <div class="mt-4 rounded-lg bg-gray-900 dark:bg-gray-950 px-4 py-3">
+                    <pre
+                      id="config-snippet"
+                      class="text-sm text-gray-100 font-mono"
+                    >{config_snippet_html()}</pre>
+                  </div>
+                </div>
+              </div>
+            </div>
           <% true -> %>
             <%!-- Error --%>
             <div class="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-xl p-6">
@@ -251,6 +277,11 @@ defmodule HostctlWeb.UpdatesLive do
     do: "Unable to reach GitHub. Check your server's internet connection."
 
   defp error_message(_), do: "An unexpected error occurred."
+
+  defp config_snippet_html do
+    ~s(# config/config.exs\nconfig :hostctl, :github_repo, "your-org/hostctl")
+    |> Phoenix.HTML.raw()
+  end
 
   defp update_commands_html do
     comment = fn text -> ~s(<span class="text-gray-500">#{text}</span>) end

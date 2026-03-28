@@ -28,8 +28,13 @@ defmodule Hostctl.Updater do
   Returns `{:error, reason}` on failure.
   """
   def check_for_updates do
-    repo = Application.get_env(:hostctl, :github_repo, "hostctl/hostctl")
+    case Application.get_env(:hostctl, :github_repo) do
+      nil -> {:error, :not_configured}
+      repo -> do_check(repo)
+    end
+  end
 
+  defp do_check(repo) do
     case fetch_latest_release(repo) do
       {:ok, release} ->
         current = current_version()
