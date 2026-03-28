@@ -7,14 +7,19 @@ defmodule Hostctl.Settings.DnsTemplateRecord do
   @doc """
   A DNS record template entry.
 
-  The `name` and `value` fields support a `{{domain}}` placeholder which is
-  substituted with the actual domain name when the template is applied.
+  The `name` and `value` fields support placeholders which are substituted
+  with actual values when the template is applied to a new domain:
+
+    - `{{domain}}`   — the domain name (e.g. `example.com`)
+    - `{{ip}}`       — the server's primary IPv4 address
+    - `{{ipv6}}`     — the server's primary IPv6 address
+    - `{{hostname}}` — the server's hostname
 
   Examples:
-    name:  "@"         → kept as-is
-    name:  "www"       → kept as-is
-    value: "{{domain}}" → replaced with "example.com"
-    value: "mail.{{domain}}" → replaced with "mail.example.com"
+    name:  "{{domain}}"          → "example.com"
+    name:  "mail.{{domain}}"     → "mail.example.com"
+    value: "{{ip}}"              → "203.0.113.10"
+    value: "v=spf1 +a +mx +a:{{hostname}} -all" → "v=spf1 +a +mx +a:myserver.example.com -all"
   """
 
   schema "dns_template_records" do

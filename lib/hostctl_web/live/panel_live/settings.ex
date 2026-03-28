@@ -221,6 +221,18 @@ defmodule HostctlWeb.PanelLive.Settings do
   end
 
   @impl true
+  def handle_event("load_default_templates", _, socket) do
+    :ok = Settings.load_default_dns_template_records()
+    records = Settings.list_dns_template_records()
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Default Plesk-style DNS template records loaded.")
+     |> assign(:template_records_empty?, records == [])
+     |> stream(:template_records, records, reset: true)}
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
@@ -563,16 +575,27 @@ defmodule HostctlWeb.PanelLive.Settings do
               <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-100 dark:bg-emerald-900/30">
                 <.icon name="hero-document-duplicate" class="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
               </div>
-              <div>
+              <div class="flex-1">
                 <h2 class="text-base font-semibold text-gray-900 dark:text-white">
                   DNS Record Templates
                 </h2>
                 <p class="text-xs text-gray-500 dark:text-gray-400">
                   These records are automatically added to every new domain. Use
-                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{domain}}"}</code>
-                  as a placeholder for the domain name.
+                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{domain}}"}</code>,
+                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ip}}"}</code>,
+                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ipv6}}"}</code>,
+                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{hostname}}"}</code>
+                  as placeholders.
                 </p>
               </div>
+              <button
+                id="load-defaults-btn"
+                phx-click="load_default_templates"
+                data-confirm="This will replace all existing template records with Plesk-style defaults. Continue?"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                <.icon name="hero-arrow-down-tray" class="w-3.5 h-3.5" /> Load Defaults
+              </button>
             </div>
           </div>
 

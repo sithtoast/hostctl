@@ -200,24 +200,100 @@ defmodule Hostctl.Settings do
   end
 
   @doc """
-  Resolves all template records for a given domain name, substituting the
-  `{{domain}}` placeholder with the actual domain name in name/value fields.
+  Resolves all template records for a given domain name, substituting placeholders
+  in `name` and `value` fields. Supported placeholders:
+
+    - `{{domain}}`  — the domain name (e.g. `example.com`)
+    - `{{ip}}`      — the server's primary IPv4 address (external IP if set)
+    - `{{ipv6}}`    — the server's primary IPv6 address (external IP if set)
+    - `{{hostname}}`— the server's hostname
+
   Returns a list of attribute maps ready to pass to `Hosting.create_dns_record/2`.
   """
   def resolve_dns_template(domain_name) do
+    {ipv4, ipv6} = primary_server_ips()
+    hostname = server_hostname()
+
     list_dns_template_records()
     |> Enum.map(fn record ->
       %{
         type: record.type,
-        name: substitute(record.name, domain_name),
-        value: substitute(record.value, domain_name),
+        name: substitute(record.name, domain_name, ipv4, ipv6, hostname),
+        value: substitute(record.value, domain_name, ipv4, ipv6, hostname),
         ttl: record.ttl,
         priority: record.priority
       }
     end)
   end
 
-  defp substitute(str, domain_name) do
-    String.replace(str, "{{domain}}", domain_name)
+  @default_template_records [
+    %{type: "NS", name: "{{domain}}", value: "ns1.{{domain}}", ttl: 86400, description: "Primary nameserver"},
+    %{type: "NS", name: "{{domain}}", value: "ns2.{{domain}}", ttl: 86400, description: "Secondary nameserver"},
+    %{type: "A", name: "{{domain}}", value: "{{ip}}", ttl: 14400, description: "Root domain A record"},
+    %{type: "AAAA", name: "{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Root domain AAAA record"},
+    %{type: "MX", name: "{{domain}}", value: "mail.{{domain}}", ttl: 14400, priority: 10, description: "Mail server"},
+    %{type: "TXT", name: "{{domain}}", value: "v=spf1 +a +mx +a:{{hostname}} -all", ttl: 300, description: "SPF record"},
+    %{type: "TXT", name: "_dmarc.{{domain}}", value: "v=DMARC1; p=quarantine; adkim=s; aspf=s", ttl: 300, description: "DMARC policy"},
+    %{type: "TXT", name: "_domainconnect.{{domain}}", value: "domainconnect.plesk.com/host/{{hostname}}/port/8443", ttl: 60, description: "Domain connect"},
+    %{type: "CNAME", name: "ftp.{{domain}}", value: "{{domain}}", ttl: 14400, description: "FTP subdomain"},
+    %{type: "A", name: "ipv4.{{domain}}", value: "{{ip}}", ttl: 14400, description: "IPv4 subdomain"},
+    %{type: "AAAA", name: "ipv6.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "IPv6 subdomain"},
+    %{type: "A", name: "mail.{{domain}}", value: "{{ip}}", ttl: 14400, description: "Mail server A record"},
+    %{type: "AAAA", name: "mail.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Mail server AAAA record"},
+    %{type: "A", name: "ns1.{{domain}}", value: "{{ip}}", ttl: 14400, description: "Primary NS A record"},
+    %{type: "AAAA", name: "ns1.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Primary NS AAAA record"},
+    %{type: "A", name: "ns2.{{domain}}", value: "{{ip}}", ttl: 14400, description: "Secondary NS A record"},
+    %{type: "AAAA", name: "ns2.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Secondary NS AAAA record"},
+    %{type: "A", name: "webmail.{{domain}}", value: "{{ip}}", ttl: 14400, description: "Webmail A record"},
+    %{type: "AAAA", name: "webmail.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Webmail AAAA record"},
+    %{type: "CNAME", name: "www.{{domain}}", value: "{{domain}}", ttl: 14400, description: "WWW subdomain"}
+  ]
+
+  @doc """
+  Deletes all existing template records and inserts the Plesk-style default set.
+  """
+  def load_default_dns_template_records do
+    Repo.delete_all(DnsTemplateRecord)
+
+    Enum.each(@default_template_records, fn attrs ->
+      %DnsTemplateRecord{}
+      |> DnsTemplateRecord.changeset(attrs)
+      |> Repo.insert!()
+    end)
+
+    :ok
+  end
+
+  defp primary_server_ips do
+    settings = list_ip_settings()
+
+    ipv4 =
+      Enum.find_value(settings, "", fn s ->
+        ip = s.external_ip || s.ip_address
+        if String.contains?(ip, ".") and not String.contains?(ip, ":"), do: ip
+      end)
+
+    ipv6 =
+      Enum.find_value(settings, "", fn s ->
+        ip = s.external_ip || s.ip_address
+        if String.contains?(ip, ":"), do: ip
+      end)
+
+    {ipv4, ipv6}
+  end
+
+  defp server_hostname do
+    case System.cmd("hostname", []) do
+      {hostname, 0} -> String.trim(hostname)
+      _ -> ""
+    end
+  end
+
+  defp substitute(str, domain, ip, ipv6, hostname) do
+    str
+    |> String.replace("{{domain}}", domain)
+    |> String.replace("{{ip}}", ip)
+    |> String.replace("{{ipv6}}", ipv6)
+    |> String.replace("{{hostname}}", hostname)
   end
 end
