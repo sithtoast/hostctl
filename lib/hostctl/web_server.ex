@@ -43,6 +43,9 @@ defmodule Hostctl.WebServer do
   """
   def sync_domain(%Domain{} = domain) do
     if enabled?() do
+      # Re-fetch domain to ensure ssl_enabled and other fields are current
+      domain = Repo.get!(Domain, domain.id)
+
       subdomains = Repo.all(from s in Subdomain, where: s.domain_id == ^domain.id)
 
       ssl_cert = Repo.get_by(SslCertificate, domain_id: domain.id)
