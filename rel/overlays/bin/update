@@ -72,11 +72,12 @@ step "3/3  Scheduling install, migrate & restart"
 HANDOFF_SCRIPT="/run/hostctl-update-install.sh"
 HANDOFF_LOG="/var/log/hostctl/update-install.log"
 
-# Write the handoff script without a heredoc to avoid delimiter issues
+# Write the handoff script without a heredoc to avoid delimiter issues.
+# IMPORTANT: variable assignments must come before any line that references
+# them (exec, echo, etc.) because set -euo pipefail treats unbound variables
+# as fatal errors.
 printf '%s\n' '#!/bin/bash' \
   'set -euo pipefail' \
-  'exec >> "$HANDOFF_LOG" 2>&1' \
-  'echo "[$(date -u +%FT%TZ)] hostctl update-install handoff started"' \
   "APP_NAME=${APP_NAME}" \
   "SOURCE_DIR=${SOURCE_DIR}" \
   "APP_DIR=${APP_DIR}" \
@@ -84,6 +85,8 @@ printf '%s\n' '#!/bin/bash' \
   "ENV_FILE=${ENV_FILE}" \
   "HANDOFF_LOG=${HANDOFF_LOG}" \
   "VERSION_TAG=${VERSION_TAG}" \
+  'exec >> "$HANDOFF_LOG" 2>&1' \
+  'echo "[$(date -u +%FT%TZ)] hostctl update-install handoff started"' \
   'sleep 3' \
   'systemctl stop "$APP_NAME" || true' \
   'cp -r "$SOURCE_DIR/_build/prod/rel/$APP_NAME/." "$APP_DIR/"' \
