@@ -10,6 +10,12 @@ defmodule Hostctl.CertBot do
   When no Cloudflare token is configured the webroot HTTP-01 challenge is used
   instead.
 
+  ## Live log streaming
+
+  Certbot output is streamed line-by-line via PubSub on the topic
+  `"domain:<domain_id>:ssl"` as `{:ssl_log, line}` messages. Subscribe from a
+  LiveView to display real-time progress.
+
   ## Configuration
 
       config :hostctl, :certbot,
@@ -33,20 +39,23 @@ defmodule Hostctl.CertBot do
   Detects whether Cloudflare DNS is configured and picks the appropriate
   challenge method automatically.
 
-  Returns `{:ok, expires_at}` on success where `expires_at` is a `DateTime`,
-  or `{:error, reason}` on failure.
+  Broadcasts each line of certbot output as `{:ssl_log, line}` on the topic
+  `"domain:<domain_id>:ssl"`.
+
+  Returns `{:ok, expires_at, full_log}` on success or `{:error, reason, full_log}`
+  on failure.
   """
-  def provision(%Domain{} = domain, %SslCertificate{cert_type: "lets_encrypt"}) do
+  def provision(%Domain{} = domain, %SslCertificate{cert_type: "lets_encrypt"} = cert) do
     if enabled?() do
       setting = Settings.get_dns_provider_setting()
-      do_provision(domain, setting)
+      do_provision(domain, cert, setting)
     else
       Logger.info("[CertBot] Certbot disabled – skipping provisioning for #{domain.name}")
-      {:error, :disabled}
+      {:error, :disabled, ""}
     end
   end
 
-  def provision(_domain, _cert), do: {:error, :not_lets_encrypt}
+  def provision(_domain, _cert), do: {:error, :not_lets_encrypt, ""}
 
   # ---------------------------------------------------------------------------
   # Challenge strategies
@@ -54,14 +63,15 @@ defmodule Hostctl.CertBot do
 
   defp do_provision(
          %Domain{} = domain,
+         cert,
          %DnsProviderSetting{provider: "cloudflare", cloudflare_api_token: token}
        )
        when is_binary(token) and token != "" do
-    Logger.info("[CertBot] Using DNS-01 challenge via Cloudflare for #{domain.name}")
+    broadcast_log(domain.id, "Using DNS-01 challenge via Cloudflare DNS provider")
     creds_file = write_cloudflare_credentials(token)
 
     try do
-      run_certbot(domain, [
+      run_certbot(domain, cert, [
         "--dns-cloudflare",
         "--dns-cloudflare-credentials",
         creds_file,
@@ -73,40 +83,75 @@ defmodule Hostctl.CertBot do
     end
   end
 
-  defp do_provision(%Domain{} = domain, _setting) do
+  defp do_provision(%Domain{} = domain, cert, _setting) do
     webroot = domain.document_root || "/var/www/#{domain.name}/public"
-    Logger.info("[CertBot] Using HTTP-01 webroot challenge for #{domain.name}")
-    run_certbot(domain, ["--webroot", "-w", webroot])
+    broadcast_log(domain.id, "Using HTTP-01 webroot challenge")
+    run_certbot(domain, cert, ["--webroot", "-w", webroot])
   end
 
   # ---------------------------------------------------------------------------
-  # Core certbot invocation
+  # Core certbot invocation — streams output line-by-line via Port
   # ---------------------------------------------------------------------------
 
-  defp run_certbot(%Domain{name: domain_name}, extra_args) do
+  defp run_certbot(%Domain{name: domain_name, id: domain_id}, _cert, extra_args) do
     cmd = certbot_cmd()
     email_args = build_email_args()
 
     args =
-      ["certonly", "--non-interactive", "--agree-tos"] ++
+      [cmd, "certonly", "--non-interactive", "--agree-tos"] ++
         email_args ++
         extra_args ++
         ["-d", domain_name, "-d", "www.#{domain_name}"]
 
-    Logger.info("[CertBot] Running: sudo #{cmd} #{Enum.join(args, " ")}")
+    broadcast_log(domain_id, "Running: sudo #{Enum.join(args, " ")}")
+    Logger.info("[CertBot] Running: sudo #{Enum.join(args, " ")}")
 
-    case System.cmd("sudo", [cmd | args], stderr_to_stdout: true) do
-      {output, 0} ->
-        Logger.info("[CertBot] Certificate obtained for #{domain_name}:\n#{output}")
-        {:ok, read_cert_expiry(domain_name)}
+    port =
+      Port.open({:spawn_executable, System.find_executable("sudo")}, [
+        :binary,
+        :stderr_to_stdout,
+        :exit_status,
+        {:line, 4096},
+        {:args, args}
+      ])
 
-      {output, exit_code} ->
-        Logger.error(
-          "[CertBot] Provisioning failed for #{domain_name} (exit #{exit_code}):\n#{String.trim(output)}"
-        )
+    {exit_code, log_lines} = collect_port_output(port, domain_id, [])
+    full_log = Enum.join(log_lines, "\n")
 
-        {:error, {:certbot_failed, exit_code, output}}
+    if exit_code == 0 do
+      Logger.info("[CertBot] Certificate obtained for #{domain_name}")
+      broadcast_log(domain_id, "Certificate successfully obtained!")
+      {:ok, read_cert_expiry(domain_name), full_log}
+    else
+      Logger.error(
+        "[CertBot] Provisioning failed for #{domain_name} (exit #{exit_code}):\n#{full_log}"
+      )
+
+      broadcast_log(domain_id, "ERROR: Certbot exited with code #{exit_code}")
+      {:error, {:certbot_failed, exit_code, full_log}, full_log}
     end
+  end
+
+  defp collect_port_output(port, domain_id, acc) do
+    receive do
+      {^port, {:data, {:eol, line}}} ->
+        broadcast_log(domain_id, line)
+        collect_port_output(port, domain_id, acc ++ [line])
+
+      {^port, {:data, {:noeol, line}}} ->
+        collect_port_output(port, domain_id, acc ++ [line])
+
+      {^port, {:exit_status, code}} ->
+        {code, acc}
+    end
+  end
+
+  defp broadcast_log(domain_id, line) do
+    Phoenix.PubSub.broadcast(
+      Hostctl.PubSub,
+      "domain:#{domain_id}:ssl",
+      {:ssl_log, line}
+    )
   end
 
   # ---------------------------------------------------------------------------

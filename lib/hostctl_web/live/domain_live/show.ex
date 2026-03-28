@@ -15,8 +15,20 @@ defmodule HostctlWeb.DomainLive.Show do
       Phoenix.PubSub.subscribe(Hostctl.PubSub, "domain:#{domain.id}:ssl")
     end
 
+    # Pre-populate log lines from any previously persisted log
+    existing_log_lines =
+      if ssl_cert && ssl_cert.log do
+        ssl_cert.log
+        |> String.split("\n")
+        |> Enum.with_index()
+        |> Enum.map(fn {line, idx} -> %{id: idx, text: line} end)
+      else
+        []
+      end
+
     {:ok,
      socket
+     |> stream(:ssl_log_lines, existing_log_lines)
      |> assign(:page_title, domain.name)
      |> assign(:active_tab, :domains)
      |> assign(:domain, domain)
@@ -36,6 +48,16 @@ defmodule HostctlWeb.DomainLive.Show do
 
   def handle_info({:ssl_cert_updated, cert}, socket) do
     {:noreply, assign(socket, :ssl_cert, cert)}
+  end
+
+  def handle_info({:ssl_log, line}, socket) do
+    idx = socket.assigns[:ssl_log_counter] || 0
+    entry = %{id: idx, text: line}
+
+    {:noreply,
+     socket
+     |> assign(:ssl_log_counter, idx + 1)
+     |> stream_insert(:ssl_log_lines, entry)}
   end
 
   def handle_event("set_section", %{"section" => section}, socket) do
@@ -64,6 +86,8 @@ defmodule HostctlWeb.DomainLive.Show do
         {:noreply,
          socket
          |> assign(:ssl_cert, cert)
+         |> assign(:ssl_log_counter, 0)
+         |> stream(:ssl_log_lines, [], reset: true)
          |> put_flash(:info, "SSL certificate request initiated for #{domain.name}.")}
 
       {:error, _} ->
@@ -409,25 +433,32 @@ defmodule HostctlWeb.DomainLive.Show do
               SSL Certificate
             </h3>
             <%= if @ssl_cert do %>
-              <div class="space-y-3">
+              <div class="space-y-4">
                 <div class="flex items-center gap-3">
                   <div class={[
                     "flex items-center justify-center w-10 h-10 rounded-lg",
-                    if(@ssl_cert.status == "active",
-                      do: "bg-green-100 dark:bg-green-900/30",
-                      else: "bg-yellow-100 dark:bg-yellow-900/30"
-                    )
+                    cond do
+                      @ssl_cert.status == "active" -> "bg-green-100 dark:bg-green-900/30"
+                      @ssl_cert.status == "expired" -> "bg-red-100 dark:bg-red-900/30"
+                      true -> "bg-yellow-100 dark:bg-yellow-900/30"
+                    end
                   ]}>
-                    <%= if @ssl_cert.status == "active" do %>
-                      <.icon
-                        name="hero-lock-closed"
-                        class="w-5 h-5 text-green-600 dark:text-green-400"
-                      />
-                    <% else %>
-                      <.icon
-                        name="hero-arrow-path"
-                        class="w-5 h-5 text-yellow-600 dark:text-yellow-400 animate-spin"
-                      />
+                    <%= cond do %>
+                      <% @ssl_cert.status == "active" -> %>
+                        <.icon
+                          name="hero-lock-closed"
+                          class="w-5 h-5 text-green-600 dark:text-green-400"
+                        />
+                      <% @ssl_cert.status == "expired" -> %>
+                        <.icon
+                          name="hero-exclamation-triangle"
+                          class="w-5 h-5 text-red-600 dark:text-red-400"
+                        />
+                      <% true -> %>
+                        <.icon
+                          name="hero-arrow-path"
+                          class="w-5 h-5 text-yellow-600 dark:text-yellow-400 animate-spin"
+                        />
                     <% end %>
                   </div>
                   <div>
@@ -436,10 +467,11 @@ defmodule HostctlWeb.DomainLive.Show do
                     </p>
                     <p class={[
                       "text-xs capitalize",
-                      if(@ssl_cert.status == "active",
-                        do: "text-green-600 dark:text-green-400",
-                        else: "text-yellow-600 dark:text-yellow-400"
-                      )
+                      cond do
+                        @ssl_cert.status == "active" -> "text-green-600 dark:text-green-400"
+                        @ssl_cert.status == "expired" -> "text-red-600 dark:text-red-400"
+                        true -> "text-yellow-600 dark:text-yellow-400"
+                      end
                     ]}>
                       {@ssl_cert.status}
                       <%= if @ssl_cert.status == "pending" do %>
@@ -453,6 +485,33 @@ defmodule HostctlWeb.DomainLive.Show do
                     Expires: {Calendar.strftime(@ssl_cert.expires_at, "%B %d, %Y")}
                   </p>
                 <% end %>
+
+                <%!-- Live / persisted log output --%>
+                  <div>
+                    <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5 uppercase tracking-wide">
+                      Certbot output
+                    </p>
+                    <div
+                      id="ssl-log"
+                      phx-update="stream"
+                      phx-hook=".SslLogScroll"
+                      class="bg-gray-950 rounded-lg p-4 font-mono text-xs text-green-400 overflow-y-auto max-h-72 space-y-0.5"
+                    >
+                      <div class="hidden only:block text-gray-600">Waiting for output…</div>
+                      <div
+                        :for={{id, entry} <- @streams.ssl_log_lines}
+                        id={id}
+                        class="whitespace-pre-wrap break-all leading-5"
+                      >
+                        {entry.text}
+                      </div>
+                    </div>
+                    <script :type={Phoenix.LiveView.ColocatedHook} name=".SslLogScroll">
+                      export default {
+                        updated() { this.el.scrollTop = this.el.scrollHeight }
+                      }
+                    </script>
+                  </div>
               </div>
             <% else %>
               <div class="text-center py-6">

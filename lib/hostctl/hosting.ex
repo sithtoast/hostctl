@@ -440,8 +440,8 @@ defmodule Hostctl.Hosting do
 
   defp provision_lets_encrypt_cert(%Domain{} = domain, %SslCertificate{} = cert) do
     case CertBot.provision(domain, cert) do
-      {:ok, expires_at} ->
-        case update_ssl_certificate(cert, %{status: "active", expires_at: expires_at}) do
+      {:ok, expires_at, log} ->
+        case update_ssl_certificate(cert, %{status: "active", expires_at: expires_at, log: log}) do
           {:ok, _} ->
             Logger.info("[Hosting] SSL certificate activated for #{domain.name}")
 
@@ -451,13 +451,12 @@ defmodule Hostctl.Hosting do
             )
         end
 
-      {:error, :disabled} ->
+      {:error, :disabled, _log} ->
         :ok
 
-      {:error, reason} ->
-        Logger.error(
-          "[Hosting] SSL provisioning failed for #{domain.name}: #{inspect(reason)}"
-        )
+      {:error, _reason, log} ->
+        update_ssl_certificate(cert, %{status: "pending", log: log})
+        Logger.error("[Hosting] SSL provisioning failed for #{domain.name}")
     end
   end
 
