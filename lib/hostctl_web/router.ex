@@ -81,6 +81,7 @@ defmodule HostctlWeb.Router do
       on_mount: [{HostctlWeb.UserAuth, :require_admin}] do
       # Panel settings (admin only)
       live "/panel/settings", PanelLive.Settings, :index
+      live "/panel/features", PanelLive.Features, :index
     end
 
     post "/users/update-password", UserSessionController, :update_password

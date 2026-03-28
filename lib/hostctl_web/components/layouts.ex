@@ -5,6 +5,8 @@ defmodule HostctlWeb.Layouts do
   """
   use HostctlWeb, :html
 
+  alias Hostctl.Settings
+
   embed_templates "layouts/*"
 
   attr :flash, :map, required: true, doc: "the map of flash messages"
@@ -59,12 +61,14 @@ defmodule HostctlWeb.Layouts do
             href={~p"/databases"}
             active={@active_tab == :databases}
           />
-          <.nav_item
-            icon="hero-folder"
-            label="FTP Accounts"
-            href={~p"/ftp"}
-            active={@active_tab == :ftp}
-          />
+          <%= if Settings.feature_enabled?("ftp") do %>
+            <.nav_item
+              icon="hero-folder"
+              label="FTP Accounts"
+              href={~p"/ftp"}
+              active={@active_tab == :ftp}
+            />
+          <% end %>
           <.nav_item
             icon="hero-clock"
             label="Cron Jobs"
@@ -81,6 +85,12 @@ defmodule HostctlWeb.Layouts do
             active={@active_tab == :updates}
           />
           <%= if @current_scope && @current_scope.user && @current_scope.user.role == "admin" do %>
+            <.nav_item
+              icon="hero-puzzle-piece"
+              label="Features"
+              href={~p"/panel/features"}
+              active={@active_tab == :panel_features}
+            />
             <.nav_item
               icon="hero-adjustments-horizontal"
               label="Panel Settings"

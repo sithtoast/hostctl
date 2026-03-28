@@ -8,6 +8,7 @@ defmodule Hostctl.Settings do
   alias Hostctl.Settings.ServerIpSetting
   alias Hostctl.Settings.DnsProviderSetting
   alias Hostctl.Settings.DnsTemplateRecord
+  alias Hostctl.Settings.FeatureSetting
 
   # ---------------------------------------------------------------------------
   # Network interface detection
@@ -383,6 +384,52 @@ defmodule Hostctl.Settings do
     end)
 
     :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # Feature settings
+  # ---------------------------------------------------------------------------
+
+  @doc "Returns all feature settings."
+  def list_feature_settings do
+    Repo.all(from f in FeatureSetting, order_by: [asc: f.key])
+  end
+
+  @doc """
+  Returns the feature setting for the given key, or creates a disabled one if
+  it doesn't exist yet.
+  """
+  def get_feature_setting(key) when is_binary(key) do
+    case Repo.get_by(FeatureSetting, key: key) do
+      nil ->
+        %FeatureSetting{key: key, enabled: false, status: "not_installed"}
+
+      setting ->
+        setting
+    end
+  end
+
+  @doc "Updates a feature setting (upsert)."
+  def save_feature_setting(key, attrs) when is_binary(key) do
+    case Repo.get_by(FeatureSetting, key: key) do
+      nil ->
+        %FeatureSetting{key: key}
+        |> FeatureSetting.changeset(attrs)
+        |> Repo.insert()
+
+      existing ->
+        existing
+        |> FeatureSetting.changeset(attrs)
+        |> Repo.update()
+    end
+  end
+
+  @doc "Returns true if the given feature key is enabled."
+  def feature_enabled?(key) when is_binary(key) do
+    case Repo.get_by(FeatureSetting, key: key) do
+      %FeatureSetting{enabled: true, status: "installed"} -> true
+      _ -> false
+    end
   end
 
   defp primary_server_ips do

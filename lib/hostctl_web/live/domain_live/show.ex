@@ -3,6 +3,7 @@ defmodule HostctlWeb.DomainLive.Show do
 
   alias Hostctl.Hosting
   alias Hostctl.Hosting.{SslCertificate, Subdomain}
+  alias Hostctl.Settings
   alias Hostctl.WebServer
 
   def mount(%{"id" => id}, _session, socket) do
@@ -295,14 +296,23 @@ defmodule HostctlWeb.DomainLive.Show do
 
         <%!-- Section tabs --%>
         <div class="flex gap-1 p-1 bg-gray-100 dark:bg-gray-800 rounded-lg w-fit">
-          <%= for {label, section, icon} <- [
-            {"Overview", :overview, "hero-home"},
-            {"Subdomains", :subdomains, "hero-link"},
-            {"DNS", :dns, "hero-server"},
-            {"SSL", :ssl, "hero-lock-closed"},
-            {"Cron Jobs", :cron, "hero-clock"},
-            {"FTP", :ftp, "hero-folder"}
-          ] do %>
+          <%
+            base_tabs = [
+              {"Overview", :overview, "hero-home"},
+              {"Subdomains", :subdomains, "hero-link"},
+              {"DNS", :dns, "hero-server"},
+              {"SSL", :ssl, "hero-lock-closed"},
+              {"Cron Jobs", :cron, "hero-clock"}
+            ]
+
+            tabs =
+              if Settings.feature_enabled?("ftp") do
+                base_tabs ++ [{"FTP", :ftp, "hero-folder"}]
+              else
+                base_tabs
+              end
+          %>
+          <%= for {label, section, icon} <- tabs do %>
             <button
               phx-click="set_section"
               phx-value-section={section}
