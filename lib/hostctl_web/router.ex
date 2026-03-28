@@ -17,19 +17,16 @@ defmodule HostctlWeb.Router do
     plug :accepts, ["json"]
   end
 
-  # Redirect root to login if not authenticated (handled by require_authenticated_user pipeline)
+  pipeline :dev_auth do
+    plug :dev_basic_auth
+  end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
   if Application.compile_env(:hostctl, :dev_routes) do
-    # If you want to use the LiveDashboard in production, you should put
-    # it behind authentication and allow only admins to access it.
-    # If your application does not have an admins-only section yet,
-    # you can use Plug.BasicAuth to set up some basic authentication
-    # as long as you are also using SSL (which you should anyway).
     import Phoenix.LiveDashboard.Router
 
     scope "/dev" do
-      pipe_through :browser
+      pipe_through [:browser, :dev_auth]
 
       live_dashboard "/dashboard", metrics: HostctlWeb.Telemetry
       forward "/mailbox", Plug.Swoosh.MailboxPreview
@@ -84,5 +81,10 @@ defmodule HostctlWeb.Router do
 
     post "/users/log-in", UserSessionController, :create
     delete "/users/log-out", UserSessionController, :delete
+  end
+
+  defp dev_basic_auth(conn, _opts) do
+    credentials = Application.get_env(:hostctl, :dev_basic_auth, username: "admin", password: "changeme!")
+    Plug.BasicAuth.basic_auth(conn, credentials)
   end
 end
