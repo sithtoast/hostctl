@@ -54,7 +54,10 @@ defmodule Hostctl.Hosting.Domain do
     name = get_field(changeset, :name)
     doc_root = get_field(changeset, :document_root)
 
-    if is_binary(name) and name != "" and (is_nil(doc_root) or doc_root == "") do
+    auto_generated? = is_nil(doc_root) or doc_root == "" or
+                      Regex.match?(~r|^/var/www/[^/]+/public$|, doc_root)
+
+    if is_binary(name) and name != "" and auto_generated? do
       put_change(changeset, :document_root, "/var/www/#{name}/public")
     else
       changeset
