@@ -20,7 +20,7 @@ SyslogIdentifier=hostctl
 # Security hardening
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/opt/hostctl /var/log/hostctl
+ReadWritePaths=/opt/hostctl /var/log/hostctl /usr/local/src/hostctl
 
 [Install]
 WantedBy=multi-user.target

@@ -468,7 +468,7 @@ StandardError=journal
 SyslogIdentifier=$APP_NAME
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR
+ReadWritePaths=$APP_DIR $SOURCE_DIR
 
 [Install]
 WantedBy=multi-user.target
