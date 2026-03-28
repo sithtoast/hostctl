@@ -32,6 +32,13 @@ if config_env() == :dev do
   end
 end
 
+# First-run admin setup token. Set INITIAL_SETUP_TOKEN to a random secret before
+# first boot. The /setup/:token route is only valid while no users exist.
+# The installer generates this automatically; clear or remove it after setup completes.
+if token = System.get_env("INITIAL_SETUP_TOKEN") do
+  config :hostctl, :initial_setup_token, token
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

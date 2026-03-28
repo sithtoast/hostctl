@@ -80,6 +80,35 @@ defmodule Hostctl.Accounts do
     |> Repo.insert()
   end
 
+  ## First-run setup
+
+  @doc """
+  Returns true if no users exist in the database (setup not yet completed).
+  """
+  def setup_needed? do
+    Repo.aggregate(User, :count) == 0
+  end
+
+  @doc """
+  Creates the first admin user during initial setup.
+  The user is immediately confirmed and given the admin role.
+  """
+  def setup_admin(attrs) do
+    %User{}
+    |> User.setup_changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc """
+  Generates and persists a magic-link login token for the given user
+  without sending an email. Used to log the admin in immediately after setup.
+  """
+  def generate_magic_link_token(user) do
+    {encoded_token, user_token} = UserToken.build_email_token(user, "login")
+    Repo.insert!(user_token)
+    encoded_token
+  end
+
   ## Settings
 
   @doc """

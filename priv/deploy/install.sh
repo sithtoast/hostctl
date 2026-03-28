@@ -378,6 +378,7 @@ chown "root:$SERVICE_USER" "$(dirname "$ENV_FILE")"
 if [[ ! -f "$ENV_FILE" || "$RECONFIGURE" == true ]]; then
   SECRET_KEY_BASE="$(cd "$SOURCE_DIR" \
     && MIX_ENV=prod mix phx.gen.secret 2>/dev/null)"
+  INITIAL_SETUP_TOKEN="$(openssl rand -hex 32)"
 
   cat > "$ENV_FILE" <<ENVEOF
 PHX_SERVER=true
@@ -385,6 +386,7 @@ PHX_HOST=${DOMAIN:-localhost}
 PORT=4000
 DATABASE_URL=ecto://$DB_USER:$DB_PASSWORD@localhost/$DB_NAME
 SECRET_KEY_BASE=$SECRET_KEY_BASE
+INITIAL_SETUP_TOKEN=$INITIAL_SETUP_TOKEN
 POOL_SIZE=10
 ENVEOF
 
@@ -510,9 +512,23 @@ echo -e "  Logs          : ${BOLD}journalctl -u $APP_NAME -f${NC}"
 echo -e "  Env file      : ${BOLD}$ENV_FILE${NC}"
 
 if [[ -n "$DOMAIN" ]]; then
-  echo -e "  URL           : ${BOLD}https://$DOMAIN${NC}   (or http:// if certbot was skipped)"
+  BASE_URL="https://$DOMAIN"
 else
-  echo -e "  URL           : ${BOLD}http://localhost:4000${NC}"
+  BASE_URL="http://localhost:4000"
+fi
+echo -e "  URL           : ${BOLD}$BASE_URL${NC}"
+
+# Read the setup token from the env file (handles both fresh install and --reconfigure)
+SETUP_TOKEN="$(grep '^INITIAL_SETUP_TOKEN=' "$ENV_FILE" | cut -d= -f2)"
+
+if [[ -n "$SETUP_TOKEN" ]]; then
+  echo ""
+  echo -e "${YELLOW}${BOLD}First-run setup:${NC}"
+  echo -e "  Open this link to create your administrator account:"
+  echo ""
+  echo -e "  ${BOLD}${GREEN}$BASE_URL/setup/$SETUP_TOKEN${NC}"
+  echo ""
+  echo -e "  ${YELLOW}This link is single-use. Keep it private.${NC}"
 fi
 
 echo ""

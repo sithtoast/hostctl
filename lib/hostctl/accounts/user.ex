@@ -15,6 +15,21 @@ defmodule Hostctl.Accounts.User do
   end
 
   @doc """
+  A changeset for the first-run admin setup.
+
+  Sets name, email, role (admin), and confirmed_at in one step.
+  """
+  def setup_changeset(user, attrs, opts \\ []) do
+    user
+    |> cast(attrs, [:name, :email])
+    |> validate_required([:name])
+    |> validate_length(:name, min: 2, max: 100)
+    |> validate_email(opts)
+    |> put_change(:role, "admin")
+    |> put_change(:confirmed_at, DateTime.utc_now(:second))
+  end
+
+  @doc """
   A user changeset for registering or changing the email.
 
   It requires the email to change otherwise an error is added.
