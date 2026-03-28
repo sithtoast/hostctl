@@ -50,12 +50,17 @@ config :hostctl, :web_server,
 # is used. The certbot binary and certbot-dns-cloudflare package must be
 # installed on the host (e.g. apt install certbot python3-certbot-dns-cloudflare).
 #
+# Certbot is run as the hostctl service user (no sudo required). Certificates
+# are stored in `letsencrypt_dir`, which must be owned and writable by the
+# service user. The install.sh script creates this directory automatically.
+#
 # Set the account email via the CERTBOT_EMAIL environment variable or the
 # :email key below. Without an email, --register-unsafely-without-email is
 # passed to certbot.
 config :hostctl, :certbot,
   enabled: true,
   certbot_cmd: "certbot",
+  letsencrypt_dir: "/var/lib/hostctl/letsencrypt",
   email: nil
 
 # Configure the endpoint

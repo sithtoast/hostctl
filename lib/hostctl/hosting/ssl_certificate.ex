@@ -11,6 +11,7 @@ defmodule Hostctl.Hosting.SslCertificate do
     field :expires_at, :utc_datetime
     field :status, :string, default: "pending"
     field :log, :string
+    field :email, :string
 
     belongs_to :domain, Domain
 
@@ -19,9 +20,12 @@ defmodule Hostctl.Hosting.SslCertificate do
 
   def changeset(ssl_certificate, attrs) do
     ssl_certificate
-    |> cast(attrs, [:cert_type, :certificate, :private_key, :expires_at, :status, :log])
+    |> cast(attrs, [:cert_type, :certificate, :private_key, :expires_at, :status, :log, :email])
     |> validate_required([:cert_type])
     |> validate_inclusion(:cert_type, ~w(lets_encrypt custom))
     |> validate_inclusion(:status, ~w(active pending expired))
+    |> validate_format(:email, ~r/^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+      message: "must be a valid email address"
+    )
   end
 end

@@ -9,7 +9,7 @@ defmodule Hostctl.WebServer.Nginx do
   SSL is supported in two modes:
 
     - `lets_encrypt` — references Certbot-managed certs under
-      `/etc/letsencrypt/live/<domain>/`
+      the configured `letsencrypt_dir` (default `/var/lib/hostctl/letsencrypt/live/<domain>/`)
     - `custom` — references PEM files written to `ssl_dir/<domain>/` on disk
       by `Hostctl.WebServer.write_ssl_cert/2` when a certificate is saved
 
@@ -182,13 +182,13 @@ defmodule Hostctl.WebServer.Nginx do
   defp ssl_active?(_, _), do: false
 
   defp cert_path(%SslCertificate{cert_type: "lets_encrypt"}, domain_name),
-    do: "/etc/letsencrypt/live/#{domain_name}/fullchain.pem"
+    do: Path.join(letsencrypt_dir(), "live/#{domain_name}/fullchain.pem")
 
   defp cert_path(%SslCertificate{cert_type: "custom"}, domain_name),
     do: Path.join(ssl_dir(), "#{domain_name}/fullchain.pem")
 
   defp key_path(%SslCertificate{cert_type: "lets_encrypt"}, domain_name),
-    do: "/etc/letsencrypt/live/#{domain_name}/privkey.pem"
+    do: Path.join(letsencrypt_dir(), "live/#{domain_name}/privkey.pem")
 
   defp key_path(%SslCertificate{cert_type: "custom"}, domain_name),
     do: Path.join(ssl_dir(), "#{domain_name}/privkey.pem")
@@ -197,6 +197,11 @@ defmodule Hostctl.WebServer.Nginx do
     do:
       Application.get_env(:hostctl, :web_server, [])
       |> Keyword.get(:ssl_dir, "/etc/ssl/hostctl")
+
+  defp letsencrypt_dir,
+    do:
+      Application.get_env(:hostctl, :certbot, [])
+      |> Keyword.get(:letsencrypt_dir, "/var/lib/hostctl/letsencrypt")
 
   defp php_fpm_socket(php_version) do
     pattern =

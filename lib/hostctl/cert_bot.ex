@@ -93,21 +93,32 @@ defmodule Hostctl.CertBot do
   # Core certbot invocation — streams output line-by-line via Port
   # ---------------------------------------------------------------------------
 
-  defp run_certbot(%Domain{name: domain_name, id: domain_id}, _cert, extra_args) do
+  defp run_certbot(%Domain{name: domain_name, id: domain_id}, cert, extra_args) do
     cmd = certbot_cmd()
-    email_args = build_email_args()
+    le_dir = letsencrypt_dir()
+    email_args = build_email_args(cert)
+
+    dir_args = [
+      "--config-dir",
+      le_dir,
+      "--work-dir",
+      Path.join(le_dir, "work"),
+      "--logs-dir",
+      Path.join(le_dir, "logs")
+    ]
 
     args =
-      [cmd, "certonly", "--non-interactive", "--agree-tos"] ++
+      ["certonly", "--non-interactive", "--agree-tos"] ++
         email_args ++
+        dir_args ++
         extra_args ++
         ["-d", domain_name, "-d", "www.#{domain_name}"]
 
-    broadcast_log(domain_id, "Running: sudo #{Enum.join(args, " ")}")
-    Logger.info("[CertBot] Running: sudo #{Enum.join(args, " ")}")
+    broadcast_log(domain_id, "Running: #{cmd} #{Enum.join(args, " ")}")
+    Logger.info("[CertBot] Running: #{cmd} #{Enum.join(args, " ")}")
 
     port =
-      Port.open({:spawn_executable, System.find_executable("sudo")}, [
+      Port.open({:spawn_executable, System.find_executable(cmd)}, [
         :binary,
         :stderr_to_stdout,
         :exit_status,
@@ -171,16 +182,20 @@ defmodule Hostctl.CertBot do
     path
   end
 
-  defp build_email_args do
-    case certbot_email() do
-      email when is_binary(email) and email != "" -> ["--email", email, "--no-eff-email"]
+  defp build_email_args(cert) do
+    email =
+      (cert.email && cert.email != "" && cert.email) ||
+        certbot_email()
+
+    case email do
+      e when is_binary(e) and e != "" -> ["--email", e, "--no-eff-email"]
       _ -> ["--register-unsafely-without-email"]
     end
   end
 
   # Reads the certificate expiry date from the cert file Certbot writes.
   defp read_cert_expiry(domain_name) do
-    cert_path = "/etc/letsencrypt/live/#{domain_name}/cert.pem"
+    cert_path = Path.join(letsencrypt_dir(), "live/#{domain_name}/cert.pem")
 
     with {output, 0} <-
            System.cmd("openssl", ["x509", "-enddate", "-noout", "-in", cert_path],
@@ -243,6 +258,9 @@ defmodule Hostctl.CertBot do
   defp certbot_config, do: Application.get_env(:hostctl, :certbot, [])
   defp enabled?, do: Keyword.get(certbot_config(), :enabled, true)
   defp certbot_cmd, do: Keyword.get(certbot_config(), :certbot_cmd, "certbot")
+
+  defp letsencrypt_dir,
+    do: Keyword.get(certbot_config(), :letsencrypt_dir, "/var/lib/hostctl/letsencrypt")
 
   defp certbot_email do
     Keyword.get(certbot_config(), :email) ||

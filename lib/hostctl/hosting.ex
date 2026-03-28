@@ -394,6 +394,10 @@ defmodule Hostctl.Hosting do
     Repo.get_by(SslCertificate, domain_id: domain.id)
   end
 
+  def change_ssl_certificate(%SslCertificate{} = cert, attrs \\ %{}) do
+    SslCertificate.changeset(cert, attrs)
+  end
+
   def create_ssl_certificate(%Domain{} = domain, attrs) do
     %SslCertificate{domain_id: domain.id}
     |> SslCertificate.changeset(attrs)

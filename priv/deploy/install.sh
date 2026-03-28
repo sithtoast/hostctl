@@ -525,19 +525,12 @@ if [[ "$SKIP_NGINX" == false ]]; then
   success "$SERVICE_USER can reload Nginx without a password"
 fi
 
-# 3d-5. Certbot sudoers (hosted-domain SSL provisioning) ----------------------
-CERTBOT_SUDOERS_FILE="/etc/sudoers.d/hostctl-certbot"
-CERTBOT_BIN="$(command -v certbot)"
-echo "$SERVICE_USER ALL=(root) NOPASSWD: $CERTBOT_BIN" > "$CERTBOT_SUDOERS_FILE"
-chmod 440 "$CERTBOT_SUDOERS_FILE"
-visudo -cf "$CERTBOT_SUDOERS_FILE" >/dev/null \
-  || { warn "sudoers syntax check failed — removing $CERTBOT_SUDOERS_FILE"; rm -f "$CERTBOT_SUDOERS_FILE"; }
-success "$SERVICE_USER can run certbot without a password"
-
-# Ensure /etc/letsencrypt is readable by the service user
-mkdir -p /etc/letsencrypt
-chown root:"$SERVICE_USER" /etc/letsencrypt
-chmod 750 /etc/letsencrypt
+# 3d-5. Certbot letsencrypt directory (owned by service user, no sudo needed) -
+LE_DIR="/var/lib/hostctl/letsencrypt"
+mkdir -p "$LE_DIR" "$LE_DIR/work" "$LE_DIR/logs"
+chown -R "$SERVICE_USER:$SERVICE_USER" "$LE_DIR"
+chmod 750 "$LE_DIR"
+success "Certbot data dir: $LE_DIR (owned by $SERVICE_USER, no sudo required)"
 
 # 3e. Environment file ---------------------------------------------------------
 step "Writing environment configuration"
@@ -607,7 +600,7 @@ StandardError=journal
 SyslogIdentifier=$APP_NAME
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /etc/letsencrypt /tmp
+ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp
 
 [Install]
 WantedBy=multi-user.target

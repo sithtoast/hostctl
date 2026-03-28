@@ -2,7 +2,7 @@ defmodule HostctlWeb.DomainLive.Show do
   use HostctlWeb, :live_view
 
   alias Hostctl.Hosting
-  alias Hostctl.Hosting.Subdomain
+  alias Hostctl.Hosting.{SslCertificate, Subdomain}
 
   def mount(%{"id" => id}, _session, socket) do
     domain = Hosting.get_domain!(socket.assigns.current_scope, id)
@@ -37,6 +37,7 @@ defmodule HostctlWeb.DomainLive.Show do
      |> stream(:subdomains, subdomains)
      |> stream(:cron_jobs, cron_jobs)
      |> stream(:ftp_accounts, ftp_accounts)
+     |> assign_ssl_form()
      |> assign_subdomain_form()
      |> assign_cron_form()
      |> assign_ftp_form()}
@@ -78,10 +79,15 @@ defmodule HostctlWeb.DomainLive.Show do
     end
   end
 
-  def handle_event("request_ssl", _params, socket) do
+  def handle_event("request_ssl", %{"ssl_certificate" => params}, socket) do
     domain = socket.assigns.domain
+    email = params["email"]
 
-    case Hosting.create_ssl_certificate(domain, %{cert_type: "lets_encrypt", status: "pending"}) do
+    case Hosting.create_ssl_certificate(domain, %{
+           cert_type: "lets_encrypt",
+           status: "pending",
+           email: email
+         }) do
       {:ok, cert} ->
         {:noreply,
          socket
@@ -203,6 +209,12 @@ defmodule HostctlWeb.DomainLive.Show do
     else
       {:noreply, socket}
     end
+  end
+
+  defp assign_ssl_form(socket) do
+    user_email = socket.assigns.current_scope.user.email
+    changeset = Hosting.change_ssl_certificate(%SslCertificate{}, %{email: user_email})
+    assign(socket, :ssl_form, to_form(changeset, as: :ssl_certificate))
   end
 
   defp assign_subdomain_form(socket) do
@@ -487,31 +499,31 @@ defmodule HostctlWeb.DomainLive.Show do
                 <% end %>
 
                 <%!-- Live / persisted log output --%>
-                  <div>
-                    <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5 uppercase tracking-wide">
-                      Certbot output
-                    </p>
+                <div>
+                  <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5 uppercase tracking-wide">
+                    Certbot output
+                  </p>
+                  <div
+                    id="ssl-log"
+                    phx-update="stream"
+                    phx-hook=".SslLogScroll"
+                    class="bg-gray-950 rounded-lg p-4 font-mono text-xs text-green-400 overflow-y-auto max-h-72 space-y-0.5"
+                  >
+                    <div class="hidden only:block text-gray-600">Waiting for output…</div>
                     <div
-                      id="ssl-log"
-                      phx-update="stream"
-                      phx-hook=".SslLogScroll"
-                      class="bg-gray-950 rounded-lg p-4 font-mono text-xs text-green-400 overflow-y-auto max-h-72 space-y-0.5"
+                      :for={{id, entry} <- @streams.ssl_log_lines}
+                      id={id}
+                      class="whitespace-pre-wrap break-all leading-5"
                     >
-                      <div class="hidden only:block text-gray-600">Waiting for output…</div>
-                      <div
-                        :for={{id, entry} <- @streams.ssl_log_lines}
-                        id={id}
-                        class="whitespace-pre-wrap break-all leading-5"
-                      >
-                        {entry.text}
-                      </div>
+                      {entry.text}
                     </div>
-                    <script :type={Phoenix.LiveView.ColocatedHook} name=".SslLogScroll">
-                      export default {
-                        updated() { this.el.scrollTop = this.el.scrollHeight }
-                      }
-                    </script>
                   </div>
+                  <script :type={Phoenix.LiveView.ColocatedHook} name=".SslLogScroll">
+                    export default {
+                      updated() { this.el.scrollTop = this.el.scrollHeight }
+                    }
+                  </script>
+                </div>
               </div>
             <% else %>
               <div class="text-center py-6">
@@ -523,12 +535,26 @@ defmodule HostctlWeb.DomainLive.Show do
                 <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
                   Secure your domain with a free Let's Encrypt certificate
                 </p>
-                <button
-                  phx-click="request_ssl"
-                  class="inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                <.form
+                  for={@ssl_form}
+                  id="ssl-request-form"
+                  phx-submit="request_ssl"
+                  class="flex flex-col items-center gap-3"
                 >
-                  <.icon name="hero-lock-closed" class="w-4 h-4" /> Request Free SSL
-                </button>
+                  <.input
+                    field={@ssl_form[:email]}
+                    type="email"
+                    placeholder="you@example.com"
+                    label="Let's Encrypt email"
+                    class="w-72 px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <button
+                    type="submit"
+                    class="inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    <.icon name="hero-lock-closed" class="w-4 h-4" /> Request Free SSL
+                  </button>
+                </.form>
               </div>
             <% end %>
           </div>

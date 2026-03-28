@@ -39,6 +39,26 @@ if token = System.get_env("INITIAL_SETUP_TOKEN") do
   config :hostctl, :initial_setup_token, token
 end
 
+# Certbot / Let's Encrypt runtime overrides
+certbot_opts =
+  []
+  |> then(fn opts ->
+    case System.get_env("CERTBOT_EMAIL") do
+      email when is_binary(email) and email != "" -> Keyword.put(opts, :email, email)
+      _ -> opts
+    end
+  end)
+  |> then(fn opts ->
+    case System.get_env("LETSENCRYPT_DIR") do
+      dir when is_binary(dir) and dir != "" -> Keyword.put(opts, :letsencrypt_dir, dir)
+      _ -> opts
+    end
+  end)
+
+unless certbot_opts == [] do
+  config :hostctl, :certbot, certbot_opts
+end
+
 if repo = System.get_env("GITHUB_REPO") do
   config :hostctl, :github_repo, repo
 end
