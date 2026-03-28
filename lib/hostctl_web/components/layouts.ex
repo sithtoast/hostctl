@@ -86,6 +86,14 @@ defmodule HostctlWeb.Layouts do
             href={~p"/panel/settings"}
             active={@active_tab == :panel_settings}
           />
+          <%= if @current_scope && @current_scope.user && @current_scope.user.role in ["admin", "reseller"] do %>
+            <.nav_item
+              icon="hero-users"
+              label="Panel Users"
+              href={~p"/panel/users"}
+              active={@active_tab == :panel_users}
+            />
+          <% end %>
           <div class="pt-4 pb-1 px-3">
             <p class="text-xs font-semibold uppercase tracking-wider text-gray-500">Account</p>
           </div>

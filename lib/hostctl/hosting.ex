@@ -451,8 +451,13 @@ defmodule Hostctl.Hosting do
           |> Domain.changeset(%{ssl_enabled: true})
           |> Repo.update()
           |> case do
-            {:ok, _} -> Logger.info("[Hosting] ssl_enabled set to true for #{domain.name}")
-            {:error, r} -> Logger.error("[Hosting] Could not set ssl_enabled for #{domain.name}: #{inspect(r)}")
+            {:ok, _} ->
+              Logger.info("[Hosting] ssl_enabled set to true for #{domain.name}")
+
+            {:error, r} ->
+              Logger.error(
+                "[Hosting] Could not set ssl_enabled for #{domain.name}: #{inspect(r)}"
+              )
           end
         end
 

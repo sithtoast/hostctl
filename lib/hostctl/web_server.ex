@@ -241,7 +241,9 @@ defmodule Hostctl.WebServer do
     [executable | args] = cmd
 
     case System.cmd(executable, args, stderr_to_stdout: true) do
-      {_, 0} -> :ok
+      {_, 0} ->
+        :ok
+
       {output, _} ->
         # nginx -t exits non-zero if it can't open /run/nginx.pid (permission denied
         # when running as a non-root service user), even when the config syntax is

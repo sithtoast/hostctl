@@ -31,6 +31,20 @@ defmodule Hostctl.Accounts.User do
   end
 
   @doc """
+  A changeset for admin-created panel users.
+
+  Captures name and email, sets role to "client".
+  """
+  def panel_user_changeset(user, attrs, opts \\ []) do
+    user
+    |> cast(attrs, [:name, :email])
+    |> validate_required([:name])
+    |> validate_length(:name, min: 2, max: 100)
+    |> validate_email(opts)
+    |> put_change(:role, "client")
+  end
+
+  @doc """
   A user changeset for registering or changing the email.
 
   It requires the email to change otherwise an error is added.

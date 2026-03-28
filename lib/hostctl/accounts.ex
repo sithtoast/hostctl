@@ -60,6 +60,39 @@ defmodule Hostctl.Accounts do
   """
   def get_user!(id), do: Repo.get!(User, id)
 
+  ## Panel user management (admin)
+
+  @doc """
+  Lists all panel users (role: "client") ordered by email.
+  """
+  def list_panel_users do
+    Repo.all(from u in User, where: u.role == "client", order_by: [asc: u.email])
+  end
+
+  @doc """
+  Creates a panel user from admin-supplied attrs (name + email).
+  Sets role to "client".
+  """
+  def create_panel_user(attrs) do
+    %User{}
+    |> User.panel_user_changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc """
+  Returns an `%Ecto.Changeset{}` for a panel user form.
+  """
+  def change_panel_user(%User{} = user, attrs \\ %{}, opts \\ []) do
+    User.panel_user_changeset(user, attrs, opts)
+  end
+
+  @doc """
+  Deletes a user and all their session tokens.
+  """
+  def delete_user(%User{} = user) do
+    Repo.delete(user)
+  end
+
   ## User registration
 
   @doc """

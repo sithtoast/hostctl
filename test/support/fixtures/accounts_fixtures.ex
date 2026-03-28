@@ -86,4 +86,16 @@ defmodule Hostctl.AccountsFixtures do
       set: [inserted_at: dt, authenticated_at: dt]
     )
   end
+
+  def admin_user_fixture(attrs \\ %{}) do
+    {:ok, user} =
+      Accounts.setup_admin(
+        Map.merge(
+          %{name: "Admin User", email: unique_user_email(), password: "adminpassword!"},
+          Map.new(attrs)
+        )
+      )
+
+    user
+  end
 end
