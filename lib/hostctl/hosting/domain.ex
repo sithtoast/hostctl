@@ -47,5 +47,17 @@ defmodule Hostctl.Hosting.Domain do
     |> validate_inclusion(:status, @valid_statuses)
     |> validate_inclusion(:php_version, @valid_php_versions)
     |> unique_constraint(:name)
+    |> maybe_set_document_root()
+  end
+
+  defp maybe_set_document_root(changeset) do
+    name = get_field(changeset, :name)
+    doc_root = get_field(changeset, :document_root)
+
+    if is_binary(name) and name != "" and (is_nil(doc_root) or doc_root == "") do
+      put_change(changeset, :document_root, "/var/www/#{name}/public")
+    else
+      changeset
+    end
   end
 end
