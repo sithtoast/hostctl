@@ -4,6 +4,9 @@ defmodule HostctlWeb.PanelLive.Users do
   alias Hostctl.Accounts
   alias Hostctl.Accounts.User
 
+  # JS hook name for clipboard copy
+  @copy_hook ".CopyToClipboard"
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -75,6 +78,49 @@ defmodule HostctlWeb.PanelLive.Users do
           </div>
         <% end %>
 
+        <%!-- Magic link banner --%>
+        <%= if @magic_link do %>
+          <div
+            id="magic-link-banner"
+            class="rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 p-4 flex flex-col gap-3"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <p class="text-sm font-medium text-indigo-900 dark:text-indigo-200">
+                  Login link for {@magic_link_name}
+                </p>
+                <p class="text-xs text-indigo-600 dark:text-indigo-400 mt-0.5">
+                  Share this link with the user. It expires after one use.
+                </p>
+              </div>
+              <button
+                phx-click="dismiss_magic_link"
+                class="text-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-300 transition-colors shrink-0"
+                aria-label="Dismiss"
+              >
+                <.icon name="hero-x-mark" class="w-4 h-4" />
+              </button>
+            </div>
+            <div class="flex items-center gap-2">
+              <input
+                id="magic-link-input"
+                type="text"
+                readonly
+                value={@magic_link}
+                class="flex-1 text-xs font-mono bg-white dark:bg-gray-900 border border-indigo-200 dark:border-indigo-700 rounded-lg px-3 py-2 text-gray-700 dark:text-gray-300 select-all focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+              <button
+                id="copy-magic-link-btn"
+                phx-hook={@copy_hook}
+                data-target="#magic-link-input"
+                class="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium transition-colors shrink-0"
+              >
+                <.icon name="hero-clipboard" class="w-3.5 h-3.5" /> Copy
+              </button>
+            </div>
+          </div>
+        <% end %>
+
         <%!-- User list --%>
         <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm overflow-hidden">
           <%= if @users_empty? do %>
@@ -117,12 +163,20 @@ defmodule HostctlWeb.PanelLive.Users do
                   Joined {Calendar.strftime(user.inserted_at, "%b %-d, %Y")}
                 </p>
                 <.link
-                  phx-click="resend_invite"
+                  phx-click="get_magic_link"
                   phx-value-id={user.id}
                   class="opacity-0 group-hover:opacity-100 text-xs text-indigo-500 hover:text-indigo-700 dark:text-indigo-400 dark:hover:text-indigo-300 transition-all"
+                  title="Get a login link to share"
+                >
+                  Get login link
+                </.link>
+                <.link
+                  phx-click="resend_invite"
+                  phx-value-id={user.id}
+                  class="opacity-0 group-hover:opacity-100 text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-all"
                   title="Resend invite email"
                 >
-                  Resend invite
+                  Resend email
                 </.link>
                 <button
                   phx-click="delete_user"
@@ -139,6 +193,23 @@ defmodule HostctlWeb.PanelLive.Users do
         </div>
       </div>
     </Layouts.app>
+
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyToClipboard">
+      export default {
+        mounted() {
+          this.el.addEventListener("click", () => {
+            const targetId = this.el.dataset.target
+            const input = document.querySelector(targetId)
+            if (!input) return
+            navigator.clipboard.writeText(input.value).then(() => {
+              const original = this.el.innerHTML
+              this.el.innerHTML = "<span class=\"hero-check w-3.5 h-3.5 inline-block\"></span> Copied!"
+              setTimeout(() => { this.el.innerHTML = original }, 2000)
+            })
+          })
+        }
+      }
+    </script>
     """
   end
 
@@ -152,6 +223,9 @@ defmodule HostctlWeb.PanelLive.Users do
       socket
       |> assign(:show_form, false)
       |> assign(:users_empty?, users == [])
+      |> assign(:magic_link, nil)
+      |> assign(:magic_link_name, nil)
+      |> assign(:copy_hook, @copy_hook)
       |> assign_form(changeset)
       |> stream(:panel_users, users)
 
@@ -197,6 +271,24 @@ defmodule HostctlWeb.PanelLive.Users do
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign_form(socket, changeset)}
     end
+  end
+
+  def handle_event("get_magic_link", %{"id" => id}, socket) do
+    user = Accounts.get_user!(id)
+    token = Accounts.generate_magic_link_token(user)
+    link = url(~p"/users/log-in/#{token}")
+    name = if user.name && user.name != "", do: user.name, else: user.email
+
+    socket =
+      socket
+      |> assign(:magic_link, link)
+      |> assign(:magic_link_name, name)
+
+    {:noreply, socket}
+  end
+
+  def handle_event("dismiss_magic_link", _params, socket) do
+    {:noreply, assign(socket, magic_link: nil, magic_link_name: nil)}
   end
 
   def handle_event("resend_invite", %{"id" => id}, socket) do
