@@ -11,14 +11,7 @@ defmodule HostctlWeb.UserLive.Registration do
       <div class="mx-auto max-w-sm">
         <div class="text-center">
           <.header>
-            Register for an account
-            <:subtitle>
-              Already registered?
-              <.link navigate={~p"/users/log-in"} class="font-semibold text-brand hover:underline">
-                Log in
-              </.link>
-              to your account now.
-            </:subtitle>
+            Create a new user account
           </.header>
         </div>
 
@@ -34,7 +27,7 @@ defmodule HostctlWeb.UserLive.Registration do
           />
 
           <.button phx-disable-with="Creating account..." class="btn btn-primary w-full">
-            Create an account
+            Create account
           </.button>
         </.form>
       </div>
@@ -43,11 +36,6 @@ defmodule HostctlWeb.UserLive.Registration do
   end
 
   @impl true
-  def mount(_params, _session, %{assigns: %{current_scope: %{user: user}}} = socket)
-      when not is_nil(user) do
-    {:ok, redirect(socket, to: HostctlWeb.UserAuth.signed_in_path(socket))}
-  end
-
   def mount(_params, _session, socket) do
     changeset = Accounts.change_user_email(%User{}, %{}, validate_unique: false)
 

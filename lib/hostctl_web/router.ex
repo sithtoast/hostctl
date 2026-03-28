@@ -69,6 +69,11 @@ defmodule HostctlWeb.Router do
       live "/updates", UpdatesLive, :index
     end
 
+    live_session :require_admin_or_reseller,
+      on_mount: [{HostctlWeb.UserAuth, :require_admin_or_reseller}] do
+      live "/users/new", UserLive.Registration, :new
+    end
+
     post "/users/update-password", UserSessionController, :update_password
   end
 
@@ -77,7 +82,6 @@ defmodule HostctlWeb.Router do
 
     live_session :current_user,
       on_mount: [{HostctlWeb.UserAuth, :mount_current_scope}] do
-      live "/users/register", UserLive.Registration, :new
       live "/users/log-in", UserLive.Login, :new
       live "/users/log-in/:token", UserLive.Confirmation, :new
       live "/setup/:token", SetupLive, :new
