@@ -72,6 +72,7 @@ step "3/3  Scheduling install, migrate & restart"
 HANDOFF_SCRIPT="/run/hostctl/update-install.sh"
 HANDOFF_LOG="/var/log/hostctl/update-install.log"
 
+mkdir -p "$(dirname "$HANDOFF_SCRIPT")"
 mkdir -p "$(dirname "$HANDOFF_LOG")"
 touch "$HANDOFF_LOG"
 
