@@ -87,7 +87,7 @@ defmodule Hostctl.Updater do
            ]
          ) do
       {:ok, %{status: 200, body: [_ | _] = releases}} ->
-        release = Enum.max_by(releases, &(&1["published_at"] || ""))
+        release = Enum.max_by(releases, fn r -> parse_semver(strip_v_prefix(r["tag_name"] || "")) end)
         {:ok, release}
 
       {:ok, %{status: 200, body: []}} ->
