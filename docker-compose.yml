@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hostctl
+      POSTGRES_PASSWORD: hostctl
+      POSTGRES_DB: hostctl_prod
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hostctl -d hostctl_prod"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+    environment:
+      PHX_SERVER: "true"
+      PHX_HOST: "localhost"
+      PORT: "4000"
+      DATABASE_URL: "ecto://hostctl:hostctl@postgres/hostctl_prod"
+      SECRET_KEY_BASE: "run_mix_phx_gen_secret_and_replace_this_value_before_production_use"
+      POOL_SIZE: "5"
+    command: >
+      sh -c "/app/bin/migrate && /app/bin/server"
+
+volumes:
+  postgres_data:
