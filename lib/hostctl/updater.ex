@@ -68,15 +68,17 @@ defmodule Hostctl.Updater do
 
   # --- Private helpers ---
 
-  # When prereleases are included, use the list endpoint and take the first entry.
-  # The list is returned newest-first so index 0 is always the most recent release.
   defp fetch_latest_release(repo, _prereleases? = false) do
     url = "#{@github_api}/repos/#{repo}/releases/latest"
     get_release(url)
   end
 
+  # When prereleases are included, fetch a page of releases and pick the most recently
+  # *published* one. GitHub sorts the list by created_at (when the release record was
+  # first saved, possibly as a draft), so per_page=1 can return a stale stable release
+  # instead of a freshly-published pre-release. Sorting client-side by published_at fixes this.
   defp fetch_latest_release(repo, _prereleases? = true) do
-    url = "#{@github_api}/repos/#{repo}/releases?per_page=1"
+    url = "#{@github_api}/repos/#{repo}/releases?per_page=10"
 
     case Req.get(url,
            headers: [
@@ -84,7 +86,10 @@ defmodule Hostctl.Updater do
              {"x-github-api-version", "2022-11-28"}
            ]
          ) do
-      {:ok, %{status: 200, body: [release | _]}} -> {:ok, release}
+      {:ok, %{status: 200, body: [_ | _] = releases}} ->
+        release = Enum.max_by(releases, &(&1["published_at"] || ""))
+        {:ok, release}
+
       {:ok, %{status: 200, body: []}} -> {:error, :no_releases}
       {:ok, %{status: 404}} -> {:error, :no_releases}
       {:ok, %{status: 403}} -> {:error, :rate_limited}
