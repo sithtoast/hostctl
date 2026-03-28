@@ -90,11 +90,20 @@ defmodule Hostctl.Updater do
         release = Enum.max_by(releases, &(&1["published_at"] || ""))
         {:ok, release}
 
-      {:ok, %{status: 200, body: []}} -> {:error, :no_releases}
-      {:ok, %{status: 404}} -> {:error, :no_releases}
-      {:ok, %{status: 403}} -> {:error, :rate_limited}
-      {:ok, %{status: status}} -> {:error, {:unexpected_status, status}}
-      {:error, exception} -> {:error, exception}
+      {:ok, %{status: 200, body: []}} ->
+        {:error, :no_releases}
+
+      {:ok, %{status: 404}} ->
+        {:error, :no_releases}
+
+      {:ok, %{status: 403}} ->
+        {:error, :rate_limited}
+
+      {:ok, %{status: status}} ->
+        {:error, {:unexpected_status, status}}
+
+      {:error, exception} ->
+        {:error, exception}
     end
   end
 

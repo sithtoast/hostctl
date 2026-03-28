@@ -80,6 +80,12 @@ defmodule HostctlWeb.Layouts do
             href={~p"/updates"}
             active={@active_tab == :updates}
           />
+          <.nav_item
+            icon="hero-adjustments-horizontal"
+            label="Panel Settings"
+            href={~p"/panel/settings"}
+            active={@active_tab == :panel_settings}
+          />
           <div class="pt-4 pb-1 px-3">
             <p class="text-xs font-semibold uppercase tracking-wider text-gray-500">Account</p>
           </div>

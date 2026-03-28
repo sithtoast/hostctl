@@ -72,6 +72,9 @@ defmodule HostctlWeb.Router do
     live_session :require_admin_or_reseller,
       on_mount: [{HostctlWeb.UserAuth, :require_admin_or_reseller}] do
       live "/users/new", UserLive.Registration, :new
+
+      # Panel settings (admin/reseller only)
+      live "/panel/settings", PanelLive.Settings, :index
     end
 
     post "/users/update-password", UserSessionController, :update_password
