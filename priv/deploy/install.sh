@@ -16,6 +16,7 @@
 #   --skip-nginx          Skip nginx installation and configuration
 #   --skip-certbot        Skip SSL certificate provisioning
 #   --skip-postgres       Skip PostgreSQL installation (use existing)
+#   --skip-php            Skip PHP-FPM installation
 #   --reconfigure         Re-run only the configuration/service steps (no build)
 #   --cloudflare          Configure nginx for Cloudflare proxy (HTTP-only origin,
 #                         forces X-Forwarded-Proto: https, skips certbot)
@@ -26,6 +27,8 @@ set -euo pipefail
 POSTGRES_MAJOR="17"
 OTP_MAJOR="27"
 ELIXIR_VERSION="1.18.3"  # must match OTP_MAJOR above
+# PHP versions to install for hosted sites (space-separated, first is default)
+PHP_VERSIONS="8.3 8.2 8.1"
 
 # --- Defaults -----------------------------------------------------------------
 APP_NAME="hostctl"
@@ -41,6 +44,7 @@ REPO_BRANCH="main"
 SKIP_NGINX=false
 SKIP_CERTBOT=false
 SKIP_POSTGRES=false
+SKIP_PHP=false
 RECONFIGURE=false
 CLOUDFLARE_PROXY=false
 
@@ -77,6 +81,7 @@ for arg in "$@"; do
     --skip-nginx)     SKIP_NGINX=true ;;
     --skip-certbot)   SKIP_CERTBOT=true ;;
     --skip-postgres)  SKIP_POSTGRES=true ;;
+    --skip-php)       SKIP_PHP=true ;;
     --reconfigure)    RECONFIGURE=true ;;
     --cloudflare)     CLOUDFLARE_PROXY=true ;;
     --help|-h)
@@ -179,6 +184,7 @@ echo -e "  Database      : $DB_NAME"
 [[ "$CLOUDFLARE_PROXY" == true ]] && echo -e "  Nginx mode    : ${CYAN}Cloudflare proxy (HTTP-only origin, no certbot)${NC}"
 [[ "$SKIP_CERTBOT" == true && "$CLOUDFLARE_PROXY" == false ]] && echo -e "  SSL/Certbot   : ${YELLOW}skipped${NC}"
 [[ "$SKIP_POSTGRES" == true ]]    && echo -e "  PostgreSQL    : ${YELLOW}skipped (using existing)${NC}"
+[[ "$SKIP_PHP" == true ]]         && echo -e "  PHP-FPM       : ${YELLOW}skipped${NC}"
 echo ""
 read -rp "$(echo -e "${BOLD}Proceed? [Y/n] ${NC}")" _proceed
 _proceed="${_proceed:-Y}"
@@ -235,6 +241,30 @@ apt-get install -y --no-install-recommends \
 
 if [[ "$SKIP_NGINX" == false ]] && ! command -v nginx &>/dev/null; then
   apt-get install -y --no-install-recommends --download-only nginx >/dev/null
+fi
+
+if [[ "$SKIP_PHP" == false ]]; then
+  info "Pre-downloading PHP-FPM packages..."
+  # ondrej/php PPA provides all PHP versions on Ubuntu/Debian
+  add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 \
+    || error "Failed to add ondrej/php PPA. Check network connectivity."
+  apt-get update -qq
+  for _ver in $PHP_VERSIONS; do
+    apt-get install -y --no-install-recommends --download-only \
+      "php${_ver}-fpm" \
+      "php${_ver}-cli" \
+      "php${_ver}-common" \
+      "php${_ver}-mbstring" \
+      "php${_ver}-xml" \
+      "php${_ver}-curl" \
+      "php${_ver}-pgsql" \
+      "php${_ver}-mysql" \
+      "php${_ver}-zip" \
+      "php${_ver}-gd" \
+      "php${_ver}-intl" \
+      >/dev/null 2>&1 || warn "Some PHP ${_ver} packages unavailable — continuing"
+  done
+  success "PHP-FPM packages cached"
 fi
 
 success "All prerequisites downloaded. No system changes made yet -- starting installation."
@@ -338,6 +368,34 @@ if [[ "$SKIP_NGINX" == false ]]; then
   fi
 fi
 
+# 2f. PHP-FPM ------------------------------------------------------------------
+if [[ "$SKIP_PHP" == false ]]; then
+  step "Installing PHP-FPM (versions: $PHP_VERSIONS)"
+
+  for _ver in $PHP_VERSIONS; do
+    if ! command -v "php${_ver}" &>/dev/null; then
+      apt-get install -y --no-install-recommends \
+        "php${_ver}-fpm" \
+        "php${_ver}-cli" \
+        "php${_ver}-common" \
+        "php${_ver}-mbstring" \
+        "php${_ver}-xml" \
+        "php${_ver}-curl" \
+        "php${_ver}-pgsql" \
+        "php${_ver}-mysql" \
+        "php${_ver}-zip" \
+        "php${_ver}-gd" \
+        "php${_ver}-intl" \
+        2>/dev/null || warn "Some PHP ${_ver} packages unavailable — continuing"
+      systemctl enable "php${_ver}-fpm" 2>/dev/null || true
+      systemctl start "php${_ver}-fpm" 2>/dev/null || true
+      success "PHP ${_ver}-FPM installed"
+    else
+      success "PHP ${_ver} already installed"
+    fi
+  done
+fi
+
 # ==============================================================================
 # PHASE 3 - APP: clone, build, install, configure
 # ==============================================================================
@@ -404,7 +462,30 @@ chown "root:$SERVICE_USER" "/var/log/$APP_NAME"
 chmod 775 "/var/log/$APP_NAME"
 success "Log directory: /var/log/$APP_NAME"
 
-# 3d-2. Update script sudoers --------------------------------------------------
+# 3d-2. Webroot directory -----------------------------------------------------
+step "Setting up webroot and Nginx site config directories"
+
+# /var/www — where hosted sites live (e.g. /var/www/example.com/public)
+mkdir -p /var/www
+chown "root:$SERVICE_USER" /var/www
+chmod 775 /var/www
+success "Webroot: /var/www"
+
+if [[ "$SKIP_NGINX" == false ]]; then
+  # Allow the hostctl service user to write vhost configs without root
+  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+  chown "root:$SERVICE_USER" /etc/nginx/sites-available /etc/nginx/sites-enabled
+  chmod 775 /etc/nginx/sites-available /etc/nginx/sites-enabled
+  success "Nginx sites dirs writable by $SERVICE_USER"
+
+  # Custom SSL cert storage (Let's Encrypt certs stay under /etc/letsencrypt)
+  mkdir -p /etc/ssl/hostctl
+  chown "root:$SERVICE_USER" /etc/ssl/hostctl
+  chmod 750 /etc/ssl/hostctl
+  success "SSL cert dir: /etc/ssl/hostctl"
+fi
+
+# 3d-3. Update script sudoers --------------------------------------------------
 step "Configuring one-click update permissions"
 
 chmod +x "$APP_DIR/bin/update" 2>/dev/null || true
@@ -414,6 +495,16 @@ chmod 440 "$SUDOERS_FILE"
 visudo -cf "$SUDOERS_FILE" >/dev/null \
   || { warn "sudoers syntax check failed — removing $SUDOERS_FILE"; rm -f "$SUDOERS_FILE"; }
 success "Update script can be triggered from the web UI by admins"
+
+# 3d-4. Nginx reload sudoers ---------------------------------------------------
+if [[ "$SKIP_NGINX" == false ]]; then
+  NGINX_SUDOERS_FILE="/etc/sudoers.d/hostctl-nginx"
+  echo "$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx" > "$NGINX_SUDOERS_FILE"
+  chmod 440 "$NGINX_SUDOERS_FILE"
+  visudo -cf "$NGINX_SUDOERS_FILE" >/dev/null \
+    || { warn "sudoers syntax check failed — removing $NGINX_SUDOERS_FILE"; rm -f "$NGINX_SUDOERS_FILE"; }
+  success "$SERVICE_USER can reload Nginx without a password"
+fi
 
 # 3e. Environment file ---------------------------------------------------------
 step "Writing environment configuration"
@@ -483,7 +574,7 @@ StandardError=journal
 SyslogIdentifier=$APP_NAME
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME
+ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl
 
 [Install]
 WantedBy=multi-user.target

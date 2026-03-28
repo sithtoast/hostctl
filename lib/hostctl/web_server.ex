@@ -1,23 +1,30 @@
 defmodule Hostctl.WebServer do
   @moduledoc """
-  Manages Caddy web server configuration for hosted domains.
+  Manages Nginx virtual host configuration for hosted domains.
 
   When domains or subdomains are created, updated, or deleted via the
-  `Hostctl.Hosting` context, these functions write per-domain Caddy config
-  files and reload the web server.
+  `Hostctl.Hosting` context, these functions write per-domain Nginx vhost
+  files to `sites-available`, symlink them into `sites-enabled`, and reload
+  Nginx.
 
-  Operations are best-effort: if writing a config file or reloading Caddy
-  fails, the error is logged but the database operation is not rolled back.
+  Custom SSL certificates stored in the database are written to disk so Nginx
+  can serve them. Let's Encrypt certificates are managed by Certbot and only
+  referenced by path.
+
+  Operations are best-effort: failures are logged but do not roll back database
+  changes.
 
   ## Configuration
 
       config :hostctl, :web_server,
         enabled: true,
-        caddy_sites_dir: "/etc/caddy/sites-enabled",
-        caddy_reload_cmd: ["caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
+        nginx_sites_available_dir: "/etc/nginx/sites-available",
+        nginx_sites_enabled_dir: "/etc/nginx/sites-enabled",
+        nginx_reload_cmd: ["systemctl", "reload", "nginx"],
+        ssl_dir: "/etc/ssl/hostctl",
         php_fpm_socket_pattern: "/run/php/php{version}-fpm.sock"
 
-  Set `enabled: false` in test/dev environments to skip all file system and
+  Set `enabled: false` in test/dev environments to skip all filesystem and
   process operations.
   """
 
@@ -26,25 +33,36 @@ defmodule Hostctl.WebServer do
   import Ecto.Query
 
   alias Hostctl.Repo
-  alias Hostctl.Hosting.{Domain, Subdomain}
-  alias Hostctl.WebServer.Caddy
+  alias Hostctl.Hosting.{Domain, Subdomain, SslCertificate}
+  alias Hostctl.WebServer.Nginx
 
   @doc """
-  Writes (or overwrites) the Caddy config for the given domain, then reloads
-  Caddy. Subdomains are fetched automatically from the database.
+  Writes (or overwrites) the Nginx vhost config for the given domain, then
+  reloads Nginx. Subdomains and the SSL certificate are fetched from the
+  database automatically.
   """
   def sync_domain(%Domain{} = domain) do
     if enabled?() do
       subdomains = Repo.all(from s in Subdomain, where: s.domain_id == ^domain.id)
-      config = Caddy.generate_config(domain, subdomains)
 
-      case write_config(domain, config) do
+      ssl_cert =
+        if domain.ssl_enabled,
+          do: Repo.get_by(SslCertificate, domain_id: domain.id),
+          else: nil
+
+      if ssl_cert && ssl_cert.cert_type == "custom" && ssl_cert.status == "active" do
+        write_ssl_cert(domain.name, ssl_cert)
+      end
+
+      config = Nginx.generate_config(domain, subdomains, ssl_cert)
+
+      case write_vhost(domain, config) do
         :ok ->
           reload()
 
         {:error, reason} ->
           Logger.error(
-            "[WebServer] Failed to write Caddy config for #{domain.name}: #{inspect(reason)}"
+            "[WebServer] Failed to write Nginx config for #{domain.name}: #{inspect(reason)}"
           )
 
           {:error, reason}
@@ -55,58 +73,76 @@ defmodule Hostctl.WebServer do
   end
 
   @doc """
-  Removes the Caddy config file for the given domain, then reloads Caddy.
+  Removes the Nginx vhost config files (sites-available and sites-enabled
+  symlink) for the given domain, then reloads Nginx.
+
+  Also removes custom SSL cert files from disk if they exist.
   """
   def remove_domain(%Domain{} = domain) do
     if enabled?() do
-      path = config_path(domain)
+      available_path = sites_available_path(domain)
+      enabled_path = sites_enabled_path(domain)
 
-      case File.rm(path) do
-        :ok ->
-          reload()
+      for path <- [enabled_path, available_path] do
+        case File.rm(path) do
+          :ok ->
+            :ok
 
-        {:error, :enoent} ->
-          # Config file never existed — nothing to do.
-          :ok
+          {:error, :enoent} ->
+            :ok
 
-        {:error, reason} ->
-          Logger.error(
-            "[WebServer] Failed to remove Caddy config for #{domain.name}: #{inspect(reason)}"
-          )
-
-          {:error, reason}
+          {:error, reason} ->
+            Logger.warning("[WebServer] Could not remove #{path}: #{inspect(reason)}")
+        end
       end
+
+      remove_ssl_cert(domain.name)
+      reload()
     else
       :ok
     end
   end
 
   @doc """
-  Sends a reload signal to Caddy so it picks up any config changes without
-  dropping existing connections.
+  Writes custom SSL certificate PEM files to `ssl_dir/<domain_name>/` so
+  Nginx can reference them. Called automatically from `sync_domain/1` when a
+  custom cert is active.
+  """
+  def write_ssl_cert(domain_name, %SslCertificate{certificate: cert, private_key: key})
+      when is_binary(cert) and is_binary(key) do
+    dir = Path.join(ssl_dir(), domain_name)
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.write(Path.join(dir, "fullchain.pem"), cert),
+         :ok <- File.write(Path.join(dir, "privkey.pem"), key) do
+      # Restrict private key so only the service user can read it
+      File.chmod(Path.join(dir, "privkey.pem"), 0o640)
+      :ok
+    end
+  end
+
+  def write_ssl_cert(_domain_name, _cert), do: :ok
+
+  @doc """
+  Reloads Nginx without dropping active connections. Uses the configured
+  `nginx_reload_cmd` (default: `["systemctl", "reload", "nginx"]`).
   """
   def reload do
     if enabled?() do
-      config = web_server_config()
-
       cmd =
-        Keyword.get(config, :caddy_reload_cmd, [
-          "caddy",
-          "reload",
-          "--config",
-          "/etc/caddy/Caddyfile"
-        ])
+        web_server_config()
+        |> Keyword.get(:nginx_reload_cmd, ["systemctl", "reload", "nginx"])
 
       [executable | args] = cmd
 
       case System.cmd(executable, args, stderr_to_stdout: true) do
         {_, 0} ->
-          Logger.info("[WebServer] Caddy reloaded successfully")
+          Logger.info("[WebServer] Nginx reloaded successfully")
           :ok
 
         {output, exit_code} ->
           Logger.error(
-            "[WebServer] Caddy reload failed (exit #{exit_code}): #{String.trim(output)}"
+            "[WebServer] Nginx reload failed (exit #{exit_code}): #{String.trim(output)}"
           )
 
           {:error, {:reload_failed, exit_code, output}}
@@ -120,29 +156,49 @@ defmodule Hostctl.WebServer do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  defp write_config(%Domain{} = domain, config) do
-    path = config_path(domain)
-    dir = Path.dirname(path)
+  defp write_vhost(%Domain{} = domain, config) do
+    available = sites_available_path(domain)
+    enabled = sites_enabled_path(domain)
 
-    with :ok <- File.mkdir_p(dir) do
-      File.write(path, config)
+    with :ok <- File.mkdir_p(Path.dirname(available)),
+         :ok <- File.mkdir_p(Path.dirname(enabled)),
+         :ok <- File.write(available, config) do
+      # Remove any stale symlink before (re-)creating it
+      File.rm(enabled)
+      File.ln_s(available, enabled)
     end
   end
 
-  defp config_path(%Domain{} = domain) do
-    sites_dir =
-      web_server_config()
-      |> Keyword.get(:caddy_sites_dir, "/etc/caddy/sites-enabled")
+  defp remove_ssl_cert(domain_name) do
+    dir = Path.join(ssl_dir(), domain_name)
 
-    Path.join(sites_dir, Caddy.config_filename(domain))
+    case File.rm_rf(dir) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason, _} ->
+        Logger.warning("[WebServer] Could not remove SSL dir #{dir}: #{inspect(reason)}")
+    end
   end
 
-  defp enabled? do
-    web_server_config()
-    |> Keyword.get(:enabled, true)
+  defp sites_available_path(%Domain{} = domain) do
+    dir =
+      web_server_config() |> Keyword.get(:nginx_sites_available_dir, "/etc/nginx/sites-available")
+
+    Path.join(dir, Nginx.config_filename(domain))
   end
 
-  defp web_server_config do
-    Application.get_env(:hostctl, :web_server, [])
+  defp sites_enabled_path(%Domain{} = domain) do
+    dir = web_server_config() |> Keyword.get(:nginx_sites_enabled_dir, "/etc/nginx/sites-enabled")
+    Path.join(dir, Nginx.config_filename(domain))
   end
+
+  defp ssl_dir,
+    do: web_server_config() |> Keyword.get(:ssl_dir, "/etc/ssl/hostctl")
+
+  defp enabled?,
+    do: web_server_config() |> Keyword.get(:enabled, true)
+
+  defp web_server_config,
+    do: Application.get_env(:hostctl, :web_server, [])
 end

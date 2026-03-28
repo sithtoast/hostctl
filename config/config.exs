@@ -23,14 +23,23 @@ config :hostctl,
   ecto_repos: [Hostctl.Repo],
   generators: [timestamp_type: :utc_datetime]
 
-# Web server (Caddy) integration
-# Each domain gets a config file written to `caddy_sites_dir`.
-# The main Caddyfile should contain: import sites-enabled/*
+# Web server (Nginx) integration
+# Each domain gets a vhost file written to `nginx_sites_available_dir` and
+# symlinked into `nginx_sites_enabled_dir`. The main nginx.conf should already
+# contain: include /etc/nginx/sites-enabled/*;
+#
+# The `hostctl` service user needs write access to both sites-available and
+# sites-enabled, and a sudoers rule to run `systemctl reload nginx`.
+# The install.sh script sets this up automatically.
 config :hostctl, :web_server,
   enabled: true,
-  caddy_sites_dir: "/etc/caddy/sites-enabled",
-  caddy_reload_cmd: ["caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
-  # Ubuntu/Debian path; replace {version} with domain's php_version
+  nginx_sites_available_dir: "/etc/nginx/sites-available",
+  nginx_sites_enabled_dir: "/etc/nginx/sites-enabled",
+  # Requires: hostctl ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
+  nginx_reload_cmd: ["sudo", "systemctl", "reload", "nginx"],
+  # Directory for custom SSL certs (Let's Encrypt certs stay under /etc/letsencrypt)
+  ssl_dir: "/etc/ssl/hostctl",
+  # Ubuntu/Debian path; {version} is replaced with the domain's php_version
   php_fpm_socket_pattern: "/run/php/php{version}-fpm.sock"
 
 # Configure the endpoint

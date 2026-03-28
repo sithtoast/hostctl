@@ -395,12 +395,30 @@ defmodule Hostctl.Hosting do
     %SslCertificate{domain_id: domain.id}
     |> SslCertificate.changeset(attrs)
     |> Repo.insert()
+    |> case do
+      {:ok, _cert} = result ->
+        domain = Repo.get!(Domain, domain.id)
+        WebServer.sync_domain(domain)
+        result
+
+      error ->
+        error
+    end
   end
 
   def update_ssl_certificate(%SslCertificate{} = cert, attrs) do
     cert
     |> SslCertificate.changeset(attrs)
     |> Repo.update()
+    |> case do
+      {:ok, _cert} = result ->
+        domain = Repo.get!(Domain, cert.domain_id)
+        WebServer.sync_domain(domain)
+        result
+
+      error ->
+        error
+    end
   end
 
   # ---------------------------------------------------------------------------
