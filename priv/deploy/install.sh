@@ -11,7 +11,7 @@
 #   --domain=DOMAIN       Hostname for the panel (required for nginx/certbot)
 #   --db-password=PASS    PostgreSQL password for the hostctl user (auto-generated if omitted)
 #   --app-dir=PATH        Install path (default: /opt/hostctl)
-#   --repo=URL            Git repository URL (default: current repo)
+#   --repo=URL            Git repository URL
 #   --branch=BRANCH       Git branch (default: main)
 #   --skip-nginx          Skip nginx installation and configuration
 #   --skip-certbot        Skip SSL certificate provisioning
@@ -20,7 +20,15 @@
 
 set -euo pipefail
 
-# ─── Defaults ─────────────────────────────────────────────────────────────────
+# --- Pinned dependency versions -----------------------------------------------
+# Update these together; ELIXIR_OTP_TAG must match OTP_MAJOR.
+OTP_MAJOR="27"
+OTP_VERSION="27.3.1"      # exact erlang-solutions package version
+ELIXIR_VERSION="1.18.3"   # exact Elixir GitHub release
+ELIXIR_OTP_TAG="otp-27"   # precompiled variant on GitHub
+POSTGRES_MAJOR="17"
+
+# --- Defaults -----------------------------------------------------------------
 APP_NAME="hostctl"
 APP_VERSION="0.1.0"
 APP_DIR="/opt/hostctl"
@@ -36,13 +44,12 @@ SKIP_CERTBOT=false
 SKIP_POSTGRES=false
 RECONFIGURE=false
 
-ELIXIR_VERSION="1.18.3"
-OTP_VERSION="27"   # major version for erlang-solutions package
-
 ENV_FILE="/etc/$APP_NAME/env"
 SERVICE_FILE="/etc/systemd/system/$APP_NAME.service"
+DOWNLOAD_DIR="/tmp/hostctl-install-$$"
+SOURCE_DIR="/usr/local/src/$APP_NAME"
 
-# ─── Colours ──────────────────────────────────────────────────────────────────
+# --- Colours ------------------------------------------------------------------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -56,7 +63,10 @@ warn()    { echo -e "${YELLOW}[warn]${NC}  $*"; }
 error()   { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
 step()    { echo -e "\n${BOLD}==> $*${NC}"; }
 
-# ─── Argument parsing ─────────────────────────────────────────────────────────
+cleanup() { rm -rf "$DOWNLOAD_DIR"; }
+trap cleanup EXIT
+
+# --- Argument parsing ---------------------------------------------------------
 for arg in "$@"; do
   case "$arg" in
     --domain=*)       DOMAIN="${arg#*=}" ;;
@@ -76,106 +86,250 @@ for arg in "$@"; do
   esac
 done
 
-# ─── Pre-flight checks ────────────────────────────────────────────────────────
+# ==============================================================================
+# PHASE 0 - PRE-FLIGHT: verify the system before touching anything
+# ==============================================================================
+
+step "Pre-flight checks"
+
 [[ $EUID -eq 0 ]] || error "This installer must be run as root (use sudo)."
 
+[[ -f /etc/os-release ]] || error "Cannot detect OS (/etc/os-release not found)."
 . /etc/os-release
-case "$ID-$VERSION_ID" in
-  ubuntu-22.04|ubuntu-24.04|debian-12) ;;
-  *) warn "Untested OS: $PRETTY_NAME. Proceeding anyway, but Ubuntu 22.04/24.04 or Debian 12 is recommended." ;;
-esac
+OS_ID="$ID"
+OS_VERSION="$VERSION_ID"
+OS_CODENAME="${VERSION_CODENAME:-}"
 
-# Prompt for domain if not provided and not skipping nginx
+case "$OS_ID-$OS_VERSION" in
+  ubuntu-22.04) OS_CODENAME="jammy"    ;;
+  ubuntu-24.04) OS_CODENAME="noble"    ;;
+  debian-12)    OS_CODENAME="bookworm" ;;
+  *)
+    warn "Untested OS: ${PRETTY_NAME:-$OS_ID $OS_VERSION}"
+    warn "Only Ubuntu 22.04/24.04 and Debian 12 are officially supported."
+    read -rp "Continue anyway? [y/N] " _cont
+    [[ "$_cont" =~ ^[Yy]$ ]] || exit 1
+    ;;
+esac
+info "Detected OS: ${PRETTY_NAME:-$OS_ID $OS_VERSION} ($OS_CODENAME)"
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64)  DEB_ARCH="amd64" ;;
+  aarch64) DEB_ARCH="arm64" ;;
+  *) error "Unsupported CPU architecture: $ARCH. Only x86_64 and arm64 are supported." ;;
+esac
+info "Architecture: $ARCH ($DEB_ARCH)"
+
+# Check disk space - need at least 3 GB free for source + build + release
+AVAIL_KB="$(df -k / | awk 'NR==2 {print $4}')"
+if (( AVAIL_KB < 3145728 )); then
+  warn "Less than 3 GB free on / ($(( AVAIL_KB / 1024 ))MB available). The build may fail."
+  read -rp "Continue anyway? [y/N] " _cont
+  [[ "$_cont" =~ ^[Yy]$ ]] || exit 1
+fi
+info "Disk space: $(( AVAIL_KB / 1024 ))MB available"
+
+# Check RAM - warn below 1 GB
+RAM_KB="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+(( RAM_KB >= 1048576 )) || warn "Less than 1 GB RAM available. Build may be slow or fail."
+info "RAM: $(( RAM_KB / 1024 ))MB"
+
 if [[ -z "$DOMAIN" && "$SKIP_NGINX" == false ]]; then
   read -rp "$(echo -e "${BOLD}Enter the domain / hostname for the panel (e.g. panel.example.com): ${NC}")" DOMAIN
-  [[ -n "$DOMAIN" ]] || error "Domain is required for nginx configuration. Use --skip-nginx to skip."
+  [[ -n "$DOMAIN" ]] || error "Domain is required for nginx. Use --skip-nginx to skip."
 fi
 
-# Generate a random DB password if not provided
 if [[ -z "$DB_PASSWORD" ]]; then
   DB_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
 fi
 
-SOURCE_DIR="/usr/local/src/$APP_NAME"
+echo ""
+echo -e "${BOLD}Installation plan:${NC}"
+echo -e "  Erlang/OTP    : $OTP_VERSION  (erlang-solutions)"
+echo -e "  Elixir        : $ELIXIR_VERSION  (github precompiled, $ELIXIR_OTP_TAG)"
+echo -e "  PostgreSQL    : $POSTGRES_MAJOR  (postgresql.org apt repo)"
+echo -e "  App directory : $APP_DIR"
+echo -e "  System user   : $SERVICE_USER"
+echo -e "  Database      : $DB_NAME"
+[[ -n "$DOMAIN" ]]             && echo -e "  Domain        : $DOMAIN"
+[[ "$SKIP_NGINX" == true ]]    && echo -e "  Nginx         : ${YELLOW}skipped${NC}"
+[[ "$SKIP_CERTBOT" == true ]]  && echo -e "  SSL/Certbot   : ${YELLOW}skipped${NC}"
+[[ "$SKIP_POSTGRES" == true ]] && echo -e "  PostgreSQL    : ${YELLOW}skipped (using existing)${NC}"
+echo ""
+read -rp "$(echo -e "${BOLD}Proceed? [Y/n] ${NC}")" _proceed
+_proceed="${_proceed:-Y}"
+[[ "$_proceed" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
 
-# ─── Step 1: System packages ──────────────────────────────────────────────────
-step "Installing system dependencies"
+# ==============================================================================
+# PHASE 1 - DOWNLOAD: fetch every package before making any system changes
+# ==============================================================================
+
+step "Downloading all prerequisites (before making any system changes)"
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Bootstrap: only the absolute minimum tools required for downloading
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-  curl wget gnupg2 apt-transport-https ca-certificates lsb-release \
-  git build-essential libssl-dev libncurses5-dev \
-  unzip locales
+  curl gnupg2 ca-certificates lsb-release wget
 
-# Ensure UTF-8 locale
+mkdir -p "$DOWNLOAD_DIR"
+
+# 1a. Erlang: add repo so we can resolve the exact package version ---------------
+info "Resolving Erlang/OTP $OTP_VERSION package..."
+
+wget -q -O "$DOWNLOAD_DIR/erlang-solutions.deb" \
+  "https://packages.erlang-solutions.com/erlang-solutions_2.0_all.deb" \
+  || error "Failed to fetch erlang-solutions repo package. Check your network connection."
+
+dpkg -i "$DOWNLOAD_DIR/erlang-solutions.deb" >/dev/null
+apt-get update -qq
+
+# Resolve exact versioned package matching OTP_VERSION (or nearest OTP_MAJOR)
+ERLANG_PKG_VERSION="$(apt-cache show esl-erlang 2>/dev/null \
+  | awk '/^Version:/ {print $2}' \
+  | grep "^1:${OTP_VERSION}" \
+  | sort -V | tail -1)"
+
+if [[ -z "$ERLANG_PKG_VERSION" ]]; then
+  ERLANG_PKG_VERSION="$(apt-cache show esl-erlang 2>/dev/null \
+    | awk '/^Version:/ {print $2}' \
+    | grep "^1:${OTP_MAJOR}\\." \
+    | sort -V | tail -1)"
+  [[ -n "$ERLANG_PKG_VERSION" ]] \
+    || error "Could not find esl-erlang OTP ${OTP_MAJOR}.x in the erlang-solutions apt repo."
+  warn "Exact OTP $OTP_VERSION not found -- will install $ERLANG_PKG_VERSION instead."
+fi
+
+# Pre-cache the Erlang deb and all its dependencies without installing
+apt-get install -y --no-install-recommends \
+  --download-only "esl-erlang=$ERLANG_PKG_VERSION"
+success "Erlang $ERLANG_PKG_VERSION cached"
+
+# 1b. Elixir: precompiled binary from GitHub ------------------------------------
+info "Downloading Elixir $ELIXIR_VERSION ($ELIXIR_OTP_TAG)..."
+
+ELIXIR_ZIP="$DOWNLOAD_DIR/elixir-${ELIXIR_VERSION}-${ELIXIR_OTP_TAG}.zip"
+ELIXIR_URL="https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-${ELIXIR_OTP_TAG}.zip"
+
+curl -fsSL -o "$ELIXIR_ZIP" "$ELIXIR_URL" \
+  || error "Failed to download Elixir from GitHub. Check your network connection."
+
+unzip -t "$ELIXIR_ZIP" >/dev/null \
+  || error "Elixir zip archive appears corrupt. Try re-running the installer."
+success "Elixir $ELIXIR_VERSION cached"
+
+# 1c. PostgreSQL: signing key ---------------------------------------------------
+if [[ "$SKIP_POSTGRES" == false ]] && ! command -v psql &>/dev/null; then
+  info "Fetching PostgreSQL $POSTGRES_MAJOR signing key..."
+  curl -fsSL -o "$DOWNLOAD_DIR/postgresql.asc" \
+    "https://www.postgresql.org/media/keys/ACCC4CF8.asc" \
+    || error "Failed to download PostgreSQL signing key."
+  success "PostgreSQL signing key cached"
+fi
+
+# 1d. Pre-cache remaining apt packages ------------------------------------------
+info "Pre-downloading build tools and dependencies..."
+apt-get install -y --no-install-recommends \
+  --download-only \
+  build-essential git libssl-dev libncurses5-dev unzip locales >/dev/null
+
+if [[ "$SKIP_NGINX" == false ]] && ! command -v nginx &>/dev/null; then
+  apt-get install -y --no-install-recommends --download-only nginx >/dev/null
+fi
+
+success "All prerequisites downloaded. No system changes made yet -- starting installation."
+
+# ==============================================================================
+# PHASE 2 - INSTALL: everything is in the apt cache; fast and offline-safe
+# ==============================================================================
+
+# 2a. System packages -----------------------------------------------------------
+step "Installing system packages"
+
+apt-get install -y --no-install-recommends \
+  build-essential git libssl-dev libncurses5-dev unzip locales
+
 if ! locale -a 2>/dev/null | grep -q "en_US.utf8"; then
   locale-gen en_US.UTF-8
 fi
 update-locale LANG=en_US.UTF-8
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-
 success "System packages installed"
 
-# ─── Step 2: Erlang + Elixir ──────────────────────────────────────────────────
-step "Installing Erlang/OTP and Elixir"
+# 2b. Erlang -------------------------------------------------------------------
+step "Installing Erlang/OTP $ERLANG_PKG_VERSION"
 
-if command -v elixir &>/dev/null && elixir --version | grep -q "Elixir 1\.1[89]"; then
-  success "Elixir already installed ($(elixir --version | head -1))"
+if command -v erl &>/dev/null \
+    && erl -noshell -eval 'io:fwrite("~s~n",[erlang:system_info(otp_release)]),halt().' \
+       2>/dev/null | grep -q "^${OTP_MAJOR}"; then
+  success "Erlang OTP ${OTP_MAJOR} already installed"
 else
-  # erlang-solutions provides recent Erlang + Elixir packages for Debian/Ubuntu
-  CODENAME="$(lsb_release -sc)"
-  wget -q -O /tmp/erlang-solutions.deb \
-    "https://packages.erlang-solutions.com/erlang-solutions_2.0_all.deb"
-  dpkg -i /tmp/erlang-solutions.deb
-  rm /tmp/erlang-solutions.deb
+  apt-get install -y --no-install-recommends "esl-erlang=$ERLANG_PKG_VERSION"
+  INSTALLED_OTP="$(erl -noshell \
+    -eval 'io:fwrite("~s~n",[erlang:system_info(otp_release)]),halt().' 2>/dev/null)"
+  success "Erlang installed: OTP $INSTALLED_OTP"
+fi
 
-  apt-get update -qq
-  apt-get install -y --no-install-recommends \
-    "esl-erlang=1:$OTP_VERSION.*" elixir
+# 2c. Elixir (from cached precompiled zip) -------------------------------------
+step "Installing Elixir $ELIXIR_VERSION"
 
-  success "Erlang/Elixir installed: $(elixir --version | head -1)"
+ELIXIR_INSTALL_DIR="/usr/local/elixir-${ELIXIR_VERSION}"
+
+if command -v elixir &>/dev/null \
+    && elixir --version 2>/dev/null | grep -q "$ELIXIR_VERSION"; then
+  success "Elixir $ELIXIR_VERSION already installed"
+else
+  rm -rf "$ELIXIR_INSTALL_DIR"
+  mkdir -p "$ELIXIR_INSTALL_DIR"
+  unzip -q "$ELIXIR_ZIP" -d "$ELIXIR_INSTALL_DIR"
+
+  # Symlink all Elixir binaries; replaces any older version symlinks
+  for bin in elixir elixirc mix iex; do
+    ln -sf "$ELIXIR_INSTALL_DIR/bin/$bin" "/usr/local/bin/$bin"
+  done
+
+  success "Elixir installed: $(elixir --version | head -1)"
 fi
 
 mix local.hex --force --quiet
 mix local.rebar --force --quiet
+success "Hex and Rebar up to date"
 
-# ─── Step 3: PostgreSQL ───────────────────────────────────────────────────────
+# 2d. PostgreSQL ---------------------------------------------------------------
 if [[ "$SKIP_POSTGRES" == false ]]; then
-  step "Installing PostgreSQL"
+  step "Installing PostgreSQL $POSTGRES_MAJOR"
 
   if ! command -v psql &>/dev/null; then
-    # Use the official PostgreSQL apt repo for the latest stable release
-    wget -q -O /usr/share/keyrings/postgresql.asc \
-      "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
-    echo "deb [signed-by=/usr/share/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -sc)-pgdg main" \
+    install -m 644 "$DOWNLOAD_DIR/postgresql.asc" /usr/share/keyrings/postgresql.asc
+    echo "deb [signed-by=/usr/share/keyrings/postgresql.asc] \
+https://apt.postgresql.org/pub/repos/apt ${OS_CODENAME}-pgdg main" \
       > /etc/apt/sources.list.d/postgresql.list
     apt-get update -qq
-    apt-get install -y --no-install-recommends postgresql postgresql-contrib
+    apt-get install -y --no-install-recommends \
+      "postgresql-$POSTGRES_MAJOR" postgresql-contrib
     systemctl enable --now postgresql
-    success "PostgreSQL installed"
+    success "PostgreSQL $POSTGRES_MAJOR installed"
   else
-    success "PostgreSQL already installed"
+    success "PostgreSQL already installed ($(psql --version))"
   fi
 
   step "Configuring PostgreSQL user and database"
 
-  # Create DB user (idempotent)
-  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
+  if ! sudo -u postgres psql -tAc \
+      "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
     sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';"
     info "Created PostgreSQL user: $DB_USER"
   else
-    # Update password in case it changed
     sudo -u postgres psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_PASSWORD';"
-    info "PostgreSQL user $DB_USER already exists — password updated"
+    info "PostgreSQL user $DB_USER already exists -- password updated"
   fi
-
-  # Enable citext extension in the template to allow the migration to succeed
-  sudo -u postgres psql -c "CREATE EXTENSION IF NOT EXISTS citext;" 2>/dev/null || true
 
   if ! sudo -u postgres psql -lqt | cut -d\| -f1 | grep -qw "$DB_NAME"; then
     sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
-    sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS citext;" 2>/dev/null || true
+    sudo -u postgres psql -d "$DB_NAME" \
+      -c "CREATE EXTENSION IF NOT EXISTS citext;" >/dev/null 2>&1 || true
     info "Created database: $DB_NAME"
   else
     info "Database $DB_NAME already exists"
@@ -184,7 +338,7 @@ if [[ "$SKIP_POSTGRES" == false ]]; then
   success "PostgreSQL ready"
 fi
 
-# ─── Step 4: Nginx ────────────────────────────────────────────────────────────
+# 2e. Nginx --------------------------------------------------------------------
 if [[ "$SKIP_NGINX" == false ]]; then
   step "Installing Nginx"
 
@@ -197,19 +351,24 @@ if [[ "$SKIP_NGINX" == false ]]; then
   fi
 fi
 
-# ─── Step 5: System user ──────────────────────────────────────────────────────
+# ==============================================================================
+# PHASE 3 - APP: clone, build, install, configure
+# ==============================================================================
+
+# 3a. System user --------------------------------------------------------------
 step "Setting up system user '$SERVICE_USER'"
 
 if ! id -u "$SERVICE_USER" &>/dev/null; then
-  useradd --system --shell /bin/false --home-dir "$APP_DIR" --create-home "$SERVICE_USER"
+  useradd --system --shell /bin/false \
+    --home-dir "$APP_DIR" --create-home "$SERVICE_USER"
   success "Created user: $SERVICE_USER"
 else
   success "User $SERVICE_USER already exists"
 fi
 
-# ─── Step 6: Clone / update source ────────────────────────────────────────────
+# 3b. Clone / update source ----------------------------------------------------
 if [[ "$RECONFIGURE" == false ]]; then
-  step "Fetching source code"
+  step "Fetching source code ($REPO_BRANCH)"
 
   if [[ -d "$SOURCE_DIR/.git" ]]; then
     git -C "$SOURCE_DIR" fetch --quiet origin
@@ -222,11 +381,10 @@ if [[ "$RECONFIGURE" == false ]]; then
 
   chown -R root:root "$SOURCE_DIR"
 
-  # ─── Step 7: Build release ──────────────────────────────────────────────────
+  # 3c. Build release ----------------------------------------------------------
   step "Building release (this may take a few minutes)"
 
   cd "$SOURCE_DIR"
-
   MIX_ENV=prod mix deps.get --only prod
   MIX_ENV=prod mix assets.setup
   MIX_ENV=prod mix assets.deploy
@@ -236,7 +394,7 @@ if [[ "$RECONFIGURE" == false ]]; then
   success "Release built"
 fi
 
-# ─── Step 8: Install release to APP_DIR ───────────────────────────────────────
+# 3d. Install release ----------------------------------------------------------
 step "Installing release to $APP_DIR"
 
 mkdir -p "$APP_DIR"
@@ -246,9 +404,9 @@ if [[ "$RECONFIGURE" == false ]]; then
 fi
 
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
-success "Release installed to $APP_DIR"
+success "Release installed"
 
-# ─── Step 9: Environment file ─────────────────────────────────────────────────
+# 3e. Environment file ---------------------------------------------------------
 step "Writing environment configuration"
 
 mkdir -p "$(dirname "$ENV_FILE")"
@@ -256,37 +414,39 @@ chmod 750 "$(dirname "$ENV_FILE")"
 chown "root:$SERVICE_USER" "$(dirname "$ENV_FILE")"
 
 if [[ ! -f "$ENV_FILE" || "$RECONFIGURE" == true ]]; then
-  SECRET_KEY_BASE="$(cd "$SOURCE_DIR" && MIX_ENV=prod mix phx.gen.secret 2>/dev/null)"
+  SECRET_KEY_BASE="$(cd "$SOURCE_DIR" \
+    && MIX_ENV=prod mix phx.gen.secret 2>/dev/null)"
 
-  cat > "$ENV_FILE" <<EOF
+  cat > "$ENV_FILE" <<ENVEOF
 PHX_SERVER=true
 PHX_HOST=${DOMAIN:-localhost}
 PORT=4000
 DATABASE_URL=ecto://$DB_USER:$DB_PASSWORD@localhost/$DB_NAME
 SECRET_KEY_BASE=$SECRET_KEY_BASE
 POOL_SIZE=10
-EOF
+ENVEOF
 
   chmod 640 "$ENV_FILE"
   chown "root:$SERVICE_USER" "$ENV_FILE"
   success "Environment file written to $ENV_FILE"
 else
-  info "Environment file already exists — skipping (use --reconfigure to overwrite)"
+  info "Environment file already exists -- skipping (use --reconfigure to overwrite)"
 fi
 
-# ─── Step 10: Database migrations ─────────────────────────────────────────────
+# 3f. Database migrations ------------------------------------------------------
 step "Running database migrations"
 
+# shellcheck disable=SC1090
 source "$ENV_FILE"
 export PHX_SERVER DATABASE_URL SECRET_KEY_BASE
 
 sudo -u "$SERVICE_USER" "$APP_DIR/bin/migrate"
 success "Migrations complete"
 
-# ─── Step 11: Systemd service ─────────────────────────────────────────────────
+# 3g. Systemd service ----------------------------------------------------------
 step "Configuring systemd service"
 
-cat > "$SERVICE_FILE" <<EOF
+cat > "$SERVICE_FILE" <<SVCEOF
 [Unit]
 Description=Hostctl Phoenix Server
 After=network.target postgresql.service
@@ -312,21 +472,22 @@ ReadWritePaths=$APP_DIR /var/log/$APP_NAME
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SVCEOF
 
 systemctl daemon-reload
 systemctl enable "$APP_NAME"
 systemctl restart "$APP_NAME"
 success "Service enabled and started"
 
-# ─── Step 12: Nginx config ────────────────────────────────────────────────────
+# 3h. Nginx config -------------------------------------------------------------
 if [[ "$SKIP_NGINX" == false ]]; then
   step "Configuring Nginx for $DOMAIN"
 
   NGINX_CONF="/etc/nginx/sites-available/$APP_NAME"
 
-  cat > "$NGINX_CONF" <<EOF
-upstream $APP_NAME {
+  # Literal heredoc + sed substitution avoids nginx $variable conflicts
+  cat > "$NGINX_CONF" <<'NGINXEOF'
+upstream APPNAME {
     server 127.0.0.1:4000;
     keepalive 64;
 }
@@ -334,24 +495,25 @@ upstream $APP_NAME {
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN;
+    server_name SERVERNAME;
 
     client_max_body_size 50M;
 
     location / {
-        proxy_pass http://$APP_NAME;
+        proxy_pass http://APPNAME;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host $host;
         proxy_redirect off;
         proxy_read_timeout 60s;
     }
 }
-EOF
+NGINXEOF
+  sed -i "s/APPNAME/$APP_NAME/g; s/SERVERNAME/$DOMAIN/g" "$NGINX_CONF"
 
   ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/$APP_NAME"
   rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
@@ -359,7 +521,7 @@ EOF
   nginx -t && systemctl reload nginx
   success "Nginx configured for $DOMAIN"
 
-  # ─── Step 13: Certbot / Let's Encrypt ─────────────────────────────────────
+  # 3i. SSL via Certbot ----------------------------------------------------------
   if [[ "$SKIP_CERTBOT" == false ]]; then
     step "Provisioning SSL certificate via Let's Encrypt"
 
@@ -372,13 +534,14 @@ EOF
       --agree-tos \
       --redirect \
       --email "admin@$DOMAIN" \
-      -d "$DOMAIN" || warn "Certbot failed (DNS may not be pointing here yet). Run 'certbot --nginx -d $DOMAIN' manually after DNS propagates."
+      -d "$DOMAIN" \
+      || warn "Certbot failed -- DNS may not point here yet. Run 'certbot --nginx -d $DOMAIN' manually once DNS propagates."
   fi
 fi
 
-# ─── Done ─────────────────────────────────────────────────────────────────────
+# --- Done ---------------------------------------------------------------------
 echo ""
-echo -e "${GREEN}${BOLD}✓ Hostctl installation complete!${NC}"
+echo -e "${GREEN}${BOLD}Hostctl installation complete!${NC}"
 echo ""
 echo -e "  App directory : ${BOLD}$APP_DIR${NC}"
 echo -e "  Service       : ${BOLD}systemctl status $APP_NAME${NC}"
@@ -386,11 +549,11 @@ echo -e "  Logs          : ${BOLD}journalctl -u $APP_NAME -f${NC}"
 echo -e "  Env file      : ${BOLD}$ENV_FILE${NC}"
 
 if [[ -n "$DOMAIN" ]]; then
-  echo -e "  URL           : ${BOLD}https://$DOMAIN${NC}   (or http if certbot was skipped)"
+  echo -e "  URL           : ${BOLD}https://$DOMAIN${NC}   (or http:// if certbot was skipped)"
 else
   echo -e "  URL           : ${BOLD}http://localhost:4000${NC}"
 fi
 
 echo ""
-echo -e "${YELLOW}${BOLD}Security reminder:${NC} Edit $ENV_FILE and review all values before exposing this server to the internet."
+echo -e "${YELLOW}${BOLD}Security reminder:${NC} Review $ENV_FILE before exposing this server to the internet."
 echo ""
