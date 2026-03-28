@@ -201,11 +201,21 @@ defmodule HostctlWeb.PanelLive.Users do
             const targetId = this.el.dataset.target
             const input = document.querySelector(targetId)
             if (!input) return
-            navigator.clipboard.writeText(input.value).then(() => {
+
+            const done = () => {
               const original = this.el.innerHTML
               this.el.innerHTML = "<span class=\"hero-check w-3.5 h-3.5 inline-block\"></span> Copied!"
               setTimeout(() => { this.el.innerHTML = original }, 2000)
-            })
+            }
+
+            if (navigator.clipboard && window.isSecureContext) {
+              navigator.clipboard.writeText(input.value).then(done)
+            } else {
+              input.select()
+              input.setSelectionRange(0, 99999)
+              document.execCommand("copy")
+              done()
+            }
           })
         }
       }
