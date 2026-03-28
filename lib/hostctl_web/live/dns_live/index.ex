@@ -301,10 +301,11 @@ defmodule HostctlWeb.DnsLive.Index do
             <h2 class="text-base font-semibold text-gray-900 dark:text-white">DNS Records</h2>
             <span class="text-sm text-gray-500 dark:text-gray-400">TTL: {@zone.ttl}s</span>
           </div>
-          <div id="dns-records" phx-update="stream">
-            <div class="hidden only:flex items-center justify-center py-12 text-sm text-gray-400">
+          <%= if @zone.dns_records == [] do %>
+            <div class="flex items-center justify-center py-12 text-sm text-gray-400">
               No DNS records yet. Add your first record above.
             </div>
+          <% else %>
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-800">
               <thead>
                 <tr class="bg-gray-50 dark:bg-gray-800/50">
@@ -331,7 +332,7 @@ defmodule HostctlWeb.DnsLive.Index do
                   <th class="relative px-4 py-3 w-24"><span class="sr-only">Actions</span></th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
+              <tbody id="dns-records" phx-update="stream" class="divide-y divide-gray-100 dark:divide-gray-800">
                 <tr
                   :for={{dom_id, record} <- @streams.dns_records}
                   id={dom_id}
@@ -448,7 +449,7 @@ defmodule HostctlWeb.DnsLive.Index do
                 </tr>
               </tbody>
             </table>
-          </div>
+          <% end %>
         </div>
 
         <%!-- Cloudflare footer (zone is linked) --%>
