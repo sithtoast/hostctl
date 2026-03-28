@@ -12,6 +12,7 @@ defmodule Hostctl.Hosting.DnsRecord do
     field :value, :string
     field :ttl, :integer, default: 3600
     field :priority, :integer
+    field :cloudflare_record_id, :string
 
     belongs_to :dns_zone, DnsZone
 

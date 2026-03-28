@@ -3,6 +3,8 @@ defmodule Hostctl.Hosting do
 
   alias Hostctl.Repo
   alias Hostctl.Accounts.Scope
+  alias Hostctl.Settings
+  alias Hostctl.DNS.Cloudflare
 
   alias Hostctl.Hosting.{
     Domain,
@@ -145,25 +147,121 @@ defmodule Hostctl.Hosting do
     %{zone | dns_records: records}
   end
 
-  def create_dns_record(%DnsZone{} = zone, attrs) do
-    %DnsRecord{dns_zone_id: zone.id}
-    |> DnsRecord.changeset(attrs)
-    |> Repo.insert()
-  end
-
-  def update_dns_record(%DnsRecord{} = record, attrs) do
-    record
-    |> DnsRecord.changeset(attrs)
+  def update_dns_zone(%DnsZone{} = zone, attrs) do
+    zone
+    |> DnsZone.changeset(attrs)
     |> Repo.update()
   end
 
+  @doc """
+  Attempts to link a DNS zone to a Cloudflare zone by looking up the domain name.
+  Requires Cloudflare to be configured in DNS provider settings.
+  """
+  def link_zone_to_cloudflare(%DnsZone{} = zone) do
+    with %{provider: "cloudflare", cloudflare_api_token: token}
+         when is_binary(token) and token != "" <-
+           Settings.get_dns_provider_setting(),
+         domain <- Repo.preload(zone, :domain).domain,
+         {:ok, cloudflare_zone_id} <- Cloudflare.find_zone(token, domain.name) do
+      update_dns_zone(zone, %{cloudflare_zone_id: cloudflare_zone_id})
+    else
+      %{provider: "local"} -> {:error, :cloudflare_not_configured}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :cloudflare_not_configured}
+    end
+  end
+
+  def create_dns_record(%DnsZone{} = zone, attrs) do
+    result =
+      %DnsRecord{dns_zone_id: zone.id}
+      |> DnsRecord.changeset(attrs)
+      |> Repo.insert()
+
+    case result do
+      {:ok, record} ->
+        record = maybe_sync_create_to_cloudflare(zone, record)
+        {:ok, record}
+
+      error ->
+        error
+    end
+  end
+
+  def update_dns_record(%DnsRecord{} = record, attrs) do
+    result =
+      record
+      |> DnsRecord.changeset(attrs)
+      |> Repo.update()
+
+    case result do
+      {:ok, updated_record} ->
+        zone = Repo.get!(DnsZone, updated_record.dns_zone_id)
+        updated_record = maybe_sync_update_to_cloudflare(zone, updated_record)
+        {:ok, updated_record}
+
+      error ->
+        error
+    end
+  end
+
   def delete_dns_record(%DnsRecord{} = record) do
+    maybe_sync_delete_to_cloudflare(record)
     Repo.delete(record)
   end
 
   def change_dns_record(%DnsRecord{} = record, attrs \\ %{}) do
     DnsRecord.changeset(record, attrs)
   end
+
+  defp maybe_sync_create_to_cloudflare(%DnsZone{cloudflare_zone_id: cf_zone_id} = _zone, record)
+       when is_binary(cf_zone_id) do
+    with %{provider: "cloudflare", cloudflare_api_token: token}
+         when is_binary(token) and token != "" <-
+           Settings.get_dns_provider_setting(),
+         {:ok, cf_record_id} <- Cloudflare.create_record(token, cf_zone_id, record),
+         {:ok, updated} <-
+           Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_record_id)) do
+      updated
+    else
+      _ -> record
+    end
+  end
+
+  defp maybe_sync_create_to_cloudflare(_zone, record), do: record
+
+  defp maybe_sync_update_to_cloudflare(
+         %DnsZone{cloudflare_zone_id: cf_zone_id},
+         %DnsRecord{cloudflare_record_id: cf_record_id} = record
+       )
+       when is_binary(cf_zone_id) and is_binary(cf_record_id) do
+    with %{provider: "cloudflare", cloudflare_api_token: token}
+         when is_binary(token) and token != "" <-
+           Settings.get_dns_provider_setting() do
+      Cloudflare.update_record(token, cf_zone_id, cf_record_id, record)
+    end
+
+    record
+  end
+
+  defp maybe_sync_update_to_cloudflare(_zone, record), do: record
+
+  defp maybe_sync_delete_to_cloudflare(%DnsRecord{
+         cloudflare_record_id: cf_record_id,
+         dns_zone_id: zone_id
+       })
+       when is_binary(cf_record_id) do
+    with %{provider: "cloudflare", cloudflare_api_token: token}
+         when is_binary(token) and token != "" <-
+           Settings.get_dns_provider_setting(),
+         %DnsZone{cloudflare_zone_id: cf_zone_id} when is_binary(cf_zone_id) <-
+           Repo.get!(DnsZone, zone_id) do
+      Cloudflare.delete_record(token, cf_zone_id, cf_record_id)
+    end
+
+    :ok
+  end
+
+  defp maybe_sync_delete_to_cloudflare(_record), do: :ok
 
   # ---------------------------------------------------------------------------
   # Email Accounts

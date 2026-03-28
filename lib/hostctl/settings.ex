@@ -6,6 +6,7 @@ defmodule Hostctl.Settings do
   import Ecto.Query
   alias Hostctl.Repo
   alias Hostctl.Settings.ServerIpSetting
+  alias Hostctl.Settings.DnsProviderSetting
 
   # ---------------------------------------------------------------------------
   # Network interface detection
@@ -111,5 +112,53 @@ defmodule Hostctl.Settings do
   @doc "Returns a changeset for an IP setting."
   def change_ip_setting(%ServerIpSetting{} = setting, attrs \\ %{}) do
     ServerIpSetting.changeset(setting, attrs)
+  end
+
+  # ---------------------------------------------------------------------------
+  # DNS provider settings
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Returns the current DNS provider setting, or a default struct if none exists.
+  """
+  def get_dns_provider_setting do
+    Repo.one(from s in DnsProviderSetting, order_by: [asc: s.id], limit: 1) ||
+      %DnsProviderSetting{}
+  end
+
+  @doc """
+  Upserts the DNS provider setting. Only one row is maintained globally.
+  """
+  def save_dns_provider_setting(attrs) do
+    case get_dns_provider_setting() do
+      %DnsProviderSetting{id: nil} = new ->
+        new
+        |> DnsProviderSetting.changeset(attrs)
+        |> Repo.insert()
+
+      existing ->
+        existing
+        |> DnsProviderSetting.changeset(attrs)
+        |> Repo.update()
+    end
+  end
+
+  @doc "Returns a changeset for the DNS provider setting."
+  def change_dns_provider_setting(%DnsProviderSetting{} = setting, attrs \\ %{}) do
+    DnsProviderSetting.changeset(setting, attrs)
+  end
+
+  @doc """
+  Returns true if Cloudflare is configured as the active DNS provider.
+  """
+  def cloudflare_enabled? do
+    case get_dns_provider_setting() do
+      %DnsProviderSetting{provider: "cloudflare", cloudflare_api_token: token}
+      when is_binary(token) and token != "" ->
+        true
+
+      _ ->
+        false
+    end
   end
 end

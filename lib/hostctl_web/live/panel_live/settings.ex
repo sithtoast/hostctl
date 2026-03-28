@@ -2,10 +2,13 @@ defmodule HostctlWeb.PanelLive.Settings do
   use HostctlWeb, :live_view
 
   alias Hostctl.Settings
+  alias Hostctl.DNS.Cloudflare
 
   @impl true
   def mount(_params, _session, socket) do
     ip_settings = Settings.sync_and_list_ip_settings()
+    dns_setting = Settings.get_dns_provider_setting()
+    dns_form = to_form(Settings.change_dns_provider_setting(dns_setting), as: :dns_provider)
 
     {:ok,
      socket
@@ -13,6 +16,9 @@ defmodule HostctlWeb.PanelLive.Settings do
      |> assign(:active_tab, :panel_settings)
      |> assign(:editing_id, nil)
      |> assign(:edit_form, nil)
+     |> assign(:dns_setting, dns_setting)
+     |> assign(:dns_form, dns_form)
+     |> assign(:dns_test_status, nil)
      |> stream(:ip_settings, ip_settings)}
   end
 
@@ -66,6 +72,51 @@ defmodule HostctlWeb.PanelLive.Settings do
      socket
      |> put_flash(:info, "IP list refreshed.")
      |> stream(:ip_settings, ip_settings, reset: true)}
+  end
+
+  @impl true
+  def handle_event("validate_dns", %{"dns_provider" => params}, socket) do
+    dns_setting = socket.assigns.dns_setting
+    form = to_form(Settings.change_dns_provider_setting(dns_setting, params), as: :dns_provider)
+    {:noreply, assign(socket, :dns_form, form)}
+  end
+
+  @impl true
+  def handle_event("save_dns", %{"dns_provider" => params}, socket) do
+    case Settings.save_dns_provider_setting(params) do
+      {:ok, updated} ->
+        dns_form = to_form(Settings.change_dns_provider_setting(updated), as: :dns_provider)
+
+        {:noreply,
+         socket
+         |> assign(:dns_setting, updated)
+         |> assign(:dns_form, dns_form)
+         |> assign(:dns_test_status, nil)
+         |> put_flash(:info, "DNS provider settings saved.")}
+
+      {:error, changeset} ->
+        {:noreply, assign(socket, :dns_form, to_form(changeset, as: :dns_provider))}
+    end
+  end
+
+  @impl true
+  def handle_event("test_cloudflare", _, socket) do
+    dns_setting = socket.assigns.dns_setting
+
+    status =
+      case dns_setting do
+        %{provider: "cloudflare", cloudflare_api_token: token}
+        when is_binary(token) and token != "" ->
+          case Cloudflare.verify_token(token) do
+            {:ok, :valid} -> :ok
+            {:error, reason} -> {:error, reason}
+          end
+
+        _ ->
+          {:error, "No API token configured"}
+      end
+
+    {:noreply, assign(socket, :dns_test_status, status)}
   end
 
   @impl true
@@ -253,6 +304,154 @@ defmodule HostctlWeb.PanelLive.Settings do
               used as the default value. This is useful when the server sits behind NAT and has a
               different public IP than the detected interface address.
             </p>
+          </div>
+        </div>
+
+        <%!-- DNS Provider Settings --%>
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+          <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
+            <div class="flex items-center gap-3">
+              <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-orange-100 dark:bg-orange-900/30">
+                <.icon name="hero-globe-alt" class="w-4 h-4 text-orange-600 dark:text-orange-400" />
+              </div>
+              <div>
+                <h2 class="text-base font-semibold text-gray-900 dark:text-white">DNS Provider</h2>
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  Choose how DNS records are managed — locally or via Cloudflare.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="p-6">
+            <.form
+              for={@dns_form}
+              id="dns-provider-form"
+              phx-change="validate_dns"
+              phx-submit="save_dns"
+              class="space-y-6"
+            >
+              <%!-- Provider selection cards --%>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label class={[
+                  "relative flex items-start gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all",
+                  if(@dns_form[:provider].value == "local" || is_nil(@dns_form[:provider].value),
+                    do:
+                      "border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 dark:border-indigo-500",
+                    else:
+                      "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
+                  )
+                ]}>
+                  <input
+                    type="radio"
+                    name="dns_provider[provider]"
+                    value="local"
+                    checked={
+                      @dns_form[:provider].value == "local" ||
+                        is_nil(@dns_form[:provider].value)
+                    }
+                    class="mt-0.5 text-indigo-600"
+                  />
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <.icon name="hero-server" class="w-4 h-4 text-gray-600 dark:text-gray-400" />
+                      <span class="text-sm font-semibold text-gray-900 dark:text-white">
+                        Local DNS
+                      </span>
+                    </div>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                      Records are stored in the database only. Use this for manual zone file exports or bind integration.
+                    </p>
+                  </div>
+                </label>
+
+                <label class={[
+                  "relative flex items-start gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all",
+                  if(@dns_form[:provider].value == "cloudflare",
+                    do:
+                      "border-orange-500 bg-orange-50/50 dark:bg-orange-950/20 dark:border-orange-500",
+                    else:
+                      "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
+                  )
+                ]}>
+                  <input
+                    type="radio"
+                    name="dns_provider[provider]"
+                    value="cloudflare"
+                    checked={@dns_form[:provider].value == "cloudflare"}
+                    class="mt-0.5 text-orange-500"
+                  />
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <.icon
+                        name="hero-cloud"
+                        class="w-4 h-4 text-orange-500 dark:text-orange-400"
+                      />
+                      <span class="text-sm font-semibold text-gray-900 dark:text-white">
+                        Cloudflare
+                      </span>
+                    </div>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                      Automatically sync DNS records to Cloudflare when records are created, updated, or deleted.
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              <%!-- Cloudflare config (shown when cloudflare selected) --%>
+              <%= if @dns_form[:provider].value == "cloudflare" do %>
+                <div class="space-y-4 p-4 rounded-xl bg-orange-50/50 dark:bg-orange-950/20 border border-orange-200 dark:border-orange-800">
+                  <div>
+                    <.input
+                      field={@dns_form[:cloudflare_api_token]}
+                      type="password"
+                      label="Cloudflare API Token"
+                      placeholder="Paste your API token here"
+                    />
+                    <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                      Create a token at
+                      <span class="font-mono">dash.cloudflare.com → My Profile → API Tokens</span>
+                      with <span class="font-semibold">Zone → DNS → Edit</span>
+                      permission.
+                    </p>
+                  </div>
+
+                  <%!-- Test connection result --%>
+                  <%= if @dns_test_status != nil do %>
+                    <%= if @dns_test_status == :ok do %>
+                      <div class="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 font-medium">
+                        <.icon name="hero-check-circle" class="w-4 h-4" /> Token is valid and active.
+                      </div>
+                    <% else %>
+                      <div class="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
+                        <.icon name="hero-x-circle" class="w-4 h-4" />
+                        {elem(@dns_test_status, 1)}
+                      </div>
+                    <% end %>
+                  <% end %>
+                </div>
+              <% end %>
+
+              <div class="flex items-center gap-3">
+                <button
+                  type="submit"
+                  id="save-dns-btn"
+                  class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+                >
+                  <.icon name="hero-check" class="w-4 h-4" /> Save DNS Settings
+                </button>
+                <%= if @dns_form[:provider].value == "cloudflare" do %>
+                  <button
+                    type="button"
+                    id="test-cloudflare-btn"
+                    phx-click="test_cloudflare"
+                    class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-orange-100 dark:bg-orange-900/30 hover:bg-orange-200 dark:hover:bg-orange-900/50 text-orange-700 dark:text-orange-400 text-sm font-medium transition-colors"
+                  >
+                    <.icon name="hero-beaker" class="w-4 h-4" /> Test Connection
+                  </button>
+                <% end %>
+              </div>
+            </.form>
           </div>
         </div>
       </div>

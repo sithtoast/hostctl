@@ -33,7 +33,7 @@ defmodule Hostctl.Updater do
         {:ok, contents} -> contents |> String.trim() |> strip_v_prefix()
         {:error, _} -> nil
       end
-    end) || (Application.spec(:hostctl, :vsn) |> to_string())
+    end) || Application.spec(:hostctl, :vsn) |> to_string()
   end
 
   @doc """
@@ -103,7 +103,9 @@ defmodule Hostctl.Updater do
            ]
          ) do
       {:ok, %{status: 200, body: [_ | _] = releases}} ->
-        release = Enum.max_by(releases, fn r -> parse_semver(strip_v_prefix(r["tag_name"] || "")) end)
+        release =
+          Enum.max_by(releases, fn r -> parse_semver(strip_v_prefix(r["tag_name"] || "")) end)
+
         {:ok, release}
 
       {:ok, %{status: 200, body: []}} ->
