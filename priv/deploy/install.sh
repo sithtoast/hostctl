@@ -398,7 +398,13 @@ fi
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
 success "Release installed"
 
-# 3d-1. Update script sudoers --------------------------------------------------
+# 3d-1. Log directory ---------------------------------------------------------
+mkdir -p "/var/log/$APP_NAME"
+chown "root:$SERVICE_USER" "/var/log/$APP_NAME"
+chmod 775 "/var/log/$APP_NAME"
+success "Log directory: /var/log/$APP_NAME"
+
+# 3d-2. Update script sudoers --------------------------------------------------
 step "Configuring one-click update permissions"
 
 chmod +x "$APP_DIR/bin/update" 2>/dev/null || true
@@ -477,7 +483,7 @@ StandardError=journal
 SyslogIdentifier=$APP_NAME
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR $SOURCE_DIR
+ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME
 
 [Install]
 WantedBy=multi-user.target
