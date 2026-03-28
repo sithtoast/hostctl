@@ -9,6 +9,7 @@ defmodule Hostctl.Hosting do
   alias Hostctl.DNS.Cloudflare
   alias Hostctl.WebServer
   alias Hostctl.CertBot
+  alias Hostctl.FtpServer
 
   alias Hostctl.Hosting.{
     Domain,
@@ -517,19 +518,48 @@ defmodule Hostctl.Hosting do
   end
 
   def create_ftp_account(%Domain{} = domain, attrs) do
-    %FtpAccount{domain_id: domain.id}
-    |> FtpAccount.changeset(attrs)
-    |> Repo.insert()
+    result =
+      %FtpAccount{domain_id: domain.id}
+      |> FtpAccount.changeset(attrs)
+      |> Repo.insert()
+
+    case result do
+      {:ok, account} ->
+        raw_password = attrs["password"] || attrs[:password]
+        FtpServer.provision_account(account, raw_password)
+        {:ok, account}
+
+      error ->
+        error
+    end
   end
 
   def update_ftp_account(%FtpAccount{} = account, attrs) do
-    account
-    |> FtpAccount.changeset(attrs)
-    |> Repo.update()
+    result =
+      account
+      |> FtpAccount.changeset(attrs)
+      |> Repo.update()
+
+    case result do
+      {:ok, updated} ->
+        raw_password = attrs["password"] || attrs[:password]
+        FtpServer.provision_account(updated, raw_password)
+        {:ok, updated}
+
+      error ->
+        error
+    end
   end
 
   def delete_ftp_account(%FtpAccount{} = account) do
-    Repo.delete(account)
+    case Repo.delete(account) do
+      {:ok, deleted} ->
+        FtpServer.remove_account(deleted)
+        {:ok, deleted}
+
+      error ->
+        error
+    end
   end
 
   def change_ftp_account(%FtpAccount{} = account, attrs \\ %{}) do

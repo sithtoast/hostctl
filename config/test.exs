@@ -35,6 +35,9 @@ config :hostctl, :web_server, enabled: false
 # Disable certbot integration during tests
 config :hostctl, :certbot, enabled: false
 
+# Disable FTP server integration during tests
+config :hostctl, :ftp_server, enabled: false
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

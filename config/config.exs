@@ -44,6 +44,26 @@ config :hostctl, :web_server,
   # Used to validate config syntax before reloading (nginx -t)
   nginx_validate_cmd: ["nginx", "-t"]
 
+# FTP server (vsftpd) integration
+# Virtual users are stored in a Berkeley DB file built from a plaintext list.
+# vsftpd must be configured with PAM (`pam_userdb`) pointing at `virtual_users_db`.
+# The per-user config directory (`vsftpd_user_conf_dir`) must be referenced in
+# vsftpd.conf via `user_config_dir=<dir>`.
+#
+# The `hostctl` service user needs write access to the vsftpd config directories
+# and `db_load` (from the `db-util` / `db5.3-util` package) must be installed.
+# A sudoers rule is required to reload vsftpd:
+#   hostctl ALL=(root) NOPASSWD: /usr/bin/systemctl reload vsftpd
+config :hostctl, :ftp_server,
+  enabled: true,
+  vsftpd_user_conf_dir: "/etc/vsftpd/vsftpd_user_conf",
+  virtual_users_file: "/etc/vsftpd/virtual_users.txt",
+  # Path WITHOUT the .db extension – PAM and db_load append it automatically.
+  virtual_users_db: "/etc/vsftpd/virtual_users",
+  db_load_cmd: "db_load",
+  # Requires: hostctl ALL=(root) NOPASSWD: /usr/bin/systemctl reload vsftpd
+  vsftpd_reload_cmd: ["sudo", "systemctl", "reload", "vsftpd"]
+
 # Let's Encrypt / Certbot integration
 # When Cloudflare is configured as the DNS provider the certbot-dns-cloudflare
 # plugin is used automatically (DNS-01 challenge). Otherwise HTTP-01 webroot
