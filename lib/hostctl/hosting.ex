@@ -49,10 +49,14 @@ defmodule Hostctl.Hosting do
     |> Repo.insert()
     |> case do
       {:ok, domain} ->
-        # Auto-create a DNS zone for every new domain
-        %DnsZone{domain_id: domain.id}
-        |> DnsZone.changeset(%{})
-        |> Repo.insert()
+        {:ok, zone} =
+          %DnsZone{domain_id: domain.id}
+          |> DnsZone.changeset(%{})
+          |> Repo.insert()
+
+        if domain.apply_dns_template do
+          apply_dns_template(zone, domain.name)
+        end
 
         {:ok, domain}
 
@@ -262,6 +266,19 @@ defmodule Hostctl.Hosting do
   end
 
   defp maybe_sync_delete_to_cloudflare(_record), do: :ok
+
+  defp apply_dns_template(%DnsZone{} = zone, domain_name) do
+    Settings.resolve_dns_template(domain_name)
+    |> Enum.each(fn attrs ->
+      %DnsRecord{dns_zone_id: zone.id}
+      |> DnsRecord.changeset(attrs)
+      |> Repo.insert()
+      |> case do
+        {:ok, record} -> maybe_sync_create_to_cloudflare(zone, record)
+        _ -> :ok
+      end
+    end)
+  end
 
   # ---------------------------------------------------------------------------
   # Email Accounts

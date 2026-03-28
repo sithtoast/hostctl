@@ -7,6 +7,7 @@ defmodule Hostctl.Settings do
   alias Hostctl.Repo
   alias Hostctl.Settings.ServerIpSetting
   alias Hostctl.Settings.DnsProviderSetting
+  alias Hostctl.Settings.DnsTemplateRecord
 
   # ---------------------------------------------------------------------------
   # Network interface detection
@@ -160,5 +161,63 @@ defmodule Hostctl.Settings do
       _ ->
         false
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # DNS template records
+  # ---------------------------------------------------------------------------
+
+  @doc "Returns all DNS template records ordered by type then name."
+  def list_dns_template_records do
+    Repo.all(from t in DnsTemplateRecord, order_by: [asc: t.type, asc: t.name])
+  end
+
+  @doc "Gets a single DNS template record by id, raises if not found."
+  def get_dns_template_record!(id), do: Repo.get!(DnsTemplateRecord, id)
+
+  @doc "Creates a DNS template record."
+  def create_dns_template_record(attrs) do
+    %DnsTemplateRecord{}
+    |> DnsTemplateRecord.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc "Updates a DNS template record."
+  def update_dns_template_record(%DnsTemplateRecord{} = record, attrs) do
+    record
+    |> DnsTemplateRecord.changeset(attrs)
+    |> Repo.update()
+  end
+
+  @doc "Deletes a DNS template record."
+  def delete_dns_template_record(%DnsTemplateRecord{} = record) do
+    Repo.delete(record)
+  end
+
+  @doc "Returns a changeset for a DNS template record."
+  def change_dns_template_record(%DnsTemplateRecord{} = record, attrs \\ %{}) do
+    DnsTemplateRecord.changeset(record, attrs)
+  end
+
+  @doc """
+  Resolves all template records for a given domain name, substituting the
+  `{{domain}}` placeholder with the actual domain name in name/value fields.
+  Returns a list of attribute maps ready to pass to `Hosting.create_dns_record/2`.
+  """
+  def resolve_dns_template(domain_name) do
+    list_dns_template_records()
+    |> Enum.map(fn record ->
+      %{
+        type: record.type,
+        name: substitute(record.name, domain_name),
+        value: substitute(record.value, domain_name),
+        ttl: record.ttl,
+        priority: record.priority
+      }
+    end)
+  end
+
+  defp substitute(str, domain_name) do
+    String.replace(str, "{{domain}}", domain_name)
   end
 end

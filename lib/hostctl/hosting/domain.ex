@@ -21,6 +21,7 @@ defmodule Hostctl.Hosting.Domain do
     field :status, :string, default: "active"
     field :ssl_enabled, :boolean, default: false
     field :disk_usage_mb, :integer, default: 0
+    field :apply_dns_template, :boolean, default: true
 
     belongs_to :user, User
     has_many :subdomains, Subdomain
@@ -39,7 +40,7 @@ defmodule Hostctl.Hosting.Domain do
 
   def changeset(domain, attrs) do
     domain
-    |> cast(attrs, [:name, :document_root, :php_version, :status, :ssl_enabled])
+    |> cast(attrs, [:name, :document_root, :php_version, :status, :ssl_enabled, :apply_dns_template])
     |> validate_required([:name])
     |> validate_format(:name, ~r/^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?(\.[a-z]{2,})+$/i,
       message: "must be a valid domain name"
