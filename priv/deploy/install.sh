@@ -135,6 +135,17 @@ RAM_KB="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
 (( RAM_KB >= 1048576 )) || warn "Less than 1 GB RAM available. Build may be slow or fail."
 info "RAM: $(( RAM_KB / 1024 ))MB"
 
+# Check git is available or can be installed
+if ! command -v git &>/dev/null; then
+  info "git not found -- will install it in Phase 1"
+  # Verify apt can reach it now, so we fail early rather than mid-install
+  apt-get update -qq
+  apt-cache show git >/dev/null 2>&1 \
+    || error "git is not installed and could not be found in apt. Install git and retry."
+else
+  info "git: $(git --version)"
+fi
+
 if [[ -z "$DOMAIN" && "$SKIP_NGINX" == false ]]; then
   read -rp "$(echo -e "${BOLD}Enter the domain / hostname for the panel (e.g. panel.example.com): ${NC}")" DOMAIN
   [[ -n "$DOMAIN" ]] || error "Domain is required for nginx. Use --skip-nginx to skip."
@@ -370,12 +381,17 @@ fi
 if [[ "$RECONFIGURE" == false ]]; then
   step "Fetching source code ($REPO_BRANCH)"
 
+  command -v git &>/dev/null \
+    || error "git is not installed. It should have been installed in Phase 2 -- check the logs above."
+
   if [[ -d "$SOURCE_DIR/.git" ]]; then
-    git -C "$SOURCE_DIR" fetch --quiet origin
+    git -C "$SOURCE_DIR" fetch --quiet origin \
+      || error "Failed to fetch from $REPO_URL. Check the URL and your network/SSH access."
     git -C "$SOURCE_DIR" reset --hard "origin/$REPO_BRANCH" --quiet
     info "Updated source from branch: $REPO_BRANCH"
   else
-    git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$SOURCE_DIR"
+    git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$SOURCE_DIR" \
+      || error "Failed to clone $REPO_URL. Check the URL and your network/SSH access."
     info "Cloned from $REPO_URL"
   fi
 
