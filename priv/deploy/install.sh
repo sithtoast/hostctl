@@ -17,6 +17,8 @@
 #   --skip-certbot        Skip SSL certificate provisioning
 #   --skip-postgres       Skip PostgreSQL installation (use existing)
 #   --reconfigure         Re-run only the configuration/service steps (no build)
+#   --cloudflare          Configure nginx for Cloudflare proxy (HTTP-only origin,
+#                         forces X-Forwarded-Proto: https, skips certbot)
 
 set -euo pipefail
 
@@ -40,6 +42,7 @@ SKIP_NGINX=false
 SKIP_CERTBOT=false
 SKIP_POSTGRES=false
 RECONFIGURE=false
+CLOUDFLARE_PROXY=false
 
 ENV_FILE="/etc/$APP_NAME/env"
 SERVICE_FILE="/etc/systemd/system/$APP_NAME.service"
@@ -75,6 +78,7 @@ for arg in "$@"; do
     --skip-certbot)   SKIP_CERTBOT=true ;;
     --skip-postgres)  SKIP_POSTGRES=true ;;
     --reconfigure)    RECONFIGURE=true ;;
+    --cloudflare)     CLOUDFLARE_PROXY=true ;;
     --help|-h)
       grep '^#' "$0" | grep -v '#!/' | sed 's/^# \{0,1\}//'
       exit 0
@@ -82,6 +86,9 @@ for arg in "$@"; do
     *) error "Unknown option: $arg" ;;
   esac
 done
+
+# Cloudflare proxy mode implies no certbot (Cloudflare terminates TLS)
+[[ "$CLOUDFLARE_PROXY" == true ]] && SKIP_CERTBOT=true
 
 # ==============================================================================
 # PHASE 0 - PRE-FLIGHT: verify the system before touching anything
@@ -168,9 +175,10 @@ echo -e "  App directory : $APP_DIR"
 echo -e "  System user   : $SERVICE_USER"
 echo -e "  Database      : $DB_NAME"
 [[ -n "$DOMAIN" ]]             && echo -e "  Domain        : $DOMAIN"
-[[ "$SKIP_NGINX" == true ]]    && echo -e "  Nginx         : ${YELLOW}skipped${NC}"
-[[ "$SKIP_CERTBOT" == true ]]  && echo -e "  SSL/Certbot   : ${YELLOW}skipped${NC}"
-[[ "$SKIP_POSTGRES" == true ]] && echo -e "  PostgreSQL    : ${YELLOW}skipped (using existing)${NC}"
+[[ "$SKIP_NGINX" == true ]]       && echo -e "  Nginx         : ${YELLOW}skipped${NC}"
+[[ "$CLOUDFLARE_PROXY" == true ]] && echo -e "  Nginx mode    : ${CYAN}Cloudflare proxy (HTTP-only origin, no certbot)${NC}"
+[[ "$SKIP_CERTBOT" == true && "$CLOUDFLARE_PROXY" == false ]] && echo -e "  SSL/Certbot   : ${YELLOW}skipped${NC}"
+[[ "$SKIP_POSTGRES" == true ]]    && echo -e "  PostgreSQL    : ${YELLOW}skipped (using existing)${NC}"
 echo ""
 read -rp "$(echo -e "${BOLD}Proceed? [Y/n] ${NC}")" _proceed
 _proceed="${_proceed:-Y}"
@@ -491,14 +499,19 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto XFWDPROTO;
         proxy_set_header Host $host;
         proxy_redirect off;
         proxy_read_timeout 60s;
     }
 }
 NGINXEOF
-  sed -i "s/APPNAME/$APP_NAME/g; s/SERVERNAME/$DOMAIN/g" "$NGINX_CONF"
+  if [[ "$CLOUDFLARE_PROXY" == true ]]; then
+    sed -i "s/APPNAME/$APP_NAME/g; s/SERVERNAME/$DOMAIN/g; s/XFWDPROTO/https/g" "$NGINX_CONF"
+  else
+    sed -i "s/APPNAME/$APP_NAME/g; s/SERVERNAME/$DOMAIN/g" "$NGINX_CONF"
+    sed -i 's/XFWDPROTO/$scheme/' "$NGINX_CONF"
+  fi
 
   ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/$APP_NAME"
   rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
