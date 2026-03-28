@@ -72,6 +72,15 @@ defmodule HostctlWeb.Layouts do
             active={@active_tab == :cron}
           />
           <div class="pt-4 pb-1 px-3">
+            <p class="text-xs font-semibold uppercase tracking-wider text-gray-500">System</p>
+          </div>
+          <.nav_item
+            icon="hero-arrow-up-circle"
+            label="Updates"
+            href={~p"/updates"}
+            active={@active_tab == :updates}
+          />
+          <div class="pt-4 pb-1 px-3">
             <p class="text-xs font-semibold uppercase tracking-wider text-gray-500">Account</p>
           </div>
           <.nav_item

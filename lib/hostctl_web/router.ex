@@ -64,6 +64,9 @@ defmodule HostctlWeb.Router do
 
       # Cron
       live "/cron", DomainLive.Index, :index
+
+      # Updates
+      live "/updates", UpdatesLive, :index
     end
 
     post "/users/update-password", UserSessionController, :update_password
@@ -85,7 +88,9 @@ defmodule HostctlWeb.Router do
   end
 
   defp dev_basic_auth(conn, _opts) do
-    credentials = Application.get_env(:hostctl, :dev_basic_auth, username: "admin", password: "changeme!")
+    credentials =
+      Application.get_env(:hostctl, :dev_basic_auth, username: "admin", password: "changeme!")
+
     Plug.BasicAuth.basic_auth(conn, credentials)
   end
 end
