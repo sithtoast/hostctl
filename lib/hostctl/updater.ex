@@ -158,14 +158,34 @@ defmodule Hostctl.Updater do
     parse_semver(a) > parse_semver(b)
   end
 
+  # Parses a semver string into a comparable list of integers.
+  #
+  # Build metadata (+build.N) is ignored per semver. Pre-release suffixes
+  # (-alpha, -α, etc.) cause a -1 to be appended so that pre-releases sort
+  # below their stable counterpart, e.g. [0,0,1,-1] < [0,0,1,0].
   defp parse_semver(version) do
-    version
-    |> String.split(".")
-    |> Enum.map(fn part ->
-      case Integer.parse(part) do
-        {n, _} -> n
-        :error -> 0
+    # 1. Drop build metadata
+    [version | _] = String.split(version, "+")
+
+    # 2. Split base from optional pre-release identifier
+    {base, prerelease?} =
+      case String.split(version, "-", parts: 2) do
+        [base, _pre] -> {base, true}
+        [base] -> {base, false}
       end
-    end)
+
+    # 3. Parse the numeric base segments
+    segments =
+      base
+      |> String.split(".")
+      |> Enum.map(fn part ->
+        case Integer.parse(part) do
+          {n, _} -> n
+          :error -> 0
+        end
+      end)
+
+    # 4. Append release-type sentinel: -1 for pre-releases, 0 for stable
+    if prerelease?, do: segments ++ [-1], else: segments ++ [0]
   end
 end
