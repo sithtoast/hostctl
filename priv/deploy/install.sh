@@ -22,6 +22,8 @@ set -euo pipefail
 
 # --- Pinned dependency versions -----------------------------------------------
 POSTGRES_MAJOR="17"
+OTP_MAJOR="27"
+ELIXIR_VERSION="1.18.3"  # must match OTP_MAJOR above
 
 # --- Defaults -----------------------------------------------------------------
 APP_NAME="hostctl"
@@ -159,8 +161,8 @@ fi
 
 echo ""
 echo -e "${BOLD}Installation plan:${NC}"
-echo -e "  Erlang/OTP    : latest  (rabbitmq/rabbitmq-erlang PPA)"
-echo -e "  Elixir        : latest  (rabbitmq/rabbitmq-erlang PPA)"
+echo -e "  Erlang/OTP    : $OTP_MAJOR  (rabbitmq/rabbitmq-erlang PPA)"
+echo -e "  Elixir        : $ELIXIR_VERSION  (github.com/elixir-lang/elixir)"
 echo -e "  PostgreSQL    : $POSTGRES_MAJOR  (postgresql.org apt repo)"
 echo -e "  App directory : $APP_DIR"
 echo -e "  System user   : $SERVICE_USER"
@@ -195,10 +197,18 @@ add-apt-repository -y ppa:rabbitmq/rabbitmq-erlang \
   || error "Failed to add rabbitmq PPA. Check network connectivity to Launchpad."
 apt-get update -q
 
-info "Pre-downloading Erlang and Elixir (erlang is large, this may take several minutes)..."
-apt-get install -y --no-install-recommends --download-only erlang elixir \
-  || error "Failed to pre-cache erlang/elixir packages from the PPA."
-success "Erlang and Elixir cached"
+info "Pre-downloading Erlang (large, this may take several minutes)..."
+apt-get install -y --no-install-recommends --download-only erlang \
+  || error "Failed to pre-cache erlang packages from the PPA."
+success "Erlang cached"
+
+# 1b. Elixir: official GitHub release (OTP-matched, avoids Ubuntu apt mismatch) ---
+ELIXIR_ZIP="elixir-otp-${OTP_MAJOR}.zip"
+ELIXIR_URL="https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/${ELIXIR_ZIP}"
+info "Downloading Elixir ${ELIXIR_VERSION} (OTP ${OTP_MAJOR})..."
+curl -fsSL -o "$DOWNLOAD_DIR/elixir.zip" "$ELIXIR_URL" \
+  || error "Failed to download Elixir ${ELIXIR_VERSION} from GitHub. Check network connectivity."
+success "Elixir ${ELIXIR_VERSION} downloaded"
 
 # 1b. PostgreSQL: signing key ---------------------------------------------------
 if [[ "$SKIP_POSTGRES" == false ]] && ! command -v psql &>/dev/null; then
@@ -238,16 +248,28 @@ update-locale LANG=en_US.UTF-8
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 success "System packages installed"
 
-# 2b. Erlang + Elixir (from PPA cache) ----------------------------------------
+# 2b. Erlang (from PPA cache) + Elixir (from downloaded zip) ------------------
 step "Installing Erlang and Elixir"
 
-if command -v erl &>/dev/null && command -v elixir &>/dev/null; then
-  success "Erlang and Elixir already installed"
+if command -v erl &>/dev/null; then
+  success "Erlang already installed ($(erl -noshell -eval 'io:fwrite("~s~n",[erlang:system_info(otp_release)]),halt().' 2>/dev/null | head -1))"
 else
-  apt-get install -y erlang elixir
+  apt-get install -y erlang
   INSTALLED_OTP="$(erl -noshell \
     -eval 'io:fwrite("~s~n",[erlang:system_info(otp_release)]),halt().' 2>/dev/null)"
-  success "Erlang OTP $INSTALLED_OTP and $(elixir --version | head -1) installed"
+  success "Erlang OTP $INSTALLED_OTP installed"
+fi
+
+if command -v elixir &>/dev/null; then
+  success "Elixir already installed ($(elixir --version 2>/dev/null | head -1))"
+else
+  info "Installing Elixir ${ELIXIR_VERSION}..."
+  unzip -qo "$DOWNLOAD_DIR/elixir.zip" -d /usr/local/elixir
+  # Add symlinks so elixir/mix/iex are on PATH system-wide
+  for bin in elixir elixirc iex mix; do
+    ln -sf "/usr/local/elixir/bin/$bin" "/usr/local/bin/$bin"
+  done
+  success "Elixir ${ELIXIR_VERSION} installed"
 fi
 
 mix local.hex --force --quiet
