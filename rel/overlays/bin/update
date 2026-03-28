@@ -25,7 +25,7 @@ info() { echo "    $*"; }
 ok()   { echo "    [done]"; }
 
 # ── 1/5  Fetch ──────────────────────────────────────────────────────────────
-step "1/5  Fetching latest source"
+step "1/3  Fetching latest source"
 
 [[ -d "$SOURCE_DIR/.git" ]] \
   || { echo "error: source directory not found: $SOURCE_DIR"; exit 1; }
@@ -36,7 +36,7 @@ info "branch: $BRANCH @ $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
 ok
 
 # ── 2/5  Build ──────────────────────────────────────────────────────────────
-step "2/5  Building release (this may take a few minutes)"
+step "2/3  Building release (this may take a few minutes)"
 
 cd "$SOURCE_DIR"
 export HOME=/root
@@ -48,29 +48,39 @@ mix compile
 mix release --overwrite
 ok
 
-# ── 3/5  Install ────────────────────────────────────────────────────────────
-step "3/5  Installing release"
+# ── 3/3  Schedule install, migrate & restart ────────────────────────────────
+step "3/3  Scheduling install, migrate & restart"
 
-# Stop the service first so the ERTS binaries are not "text file busy"
-systemctl stop "$APP_NAME" || true
+# We cannot stop the service from within its own systemd cgroup — the kernel
+# would kill this script along with the rest of the cgroup. Instead, we write
+# the destructive steps into a small script and hand it off to a detached
+# transient systemd unit that lives outside the hostctl cgroup.
+#
+# /run is a tmpfs visible to all processes (unlike PrivateTmp=/tmp) so the
+# script file is reachable by the new unit.
 
-cp -r "$SOURCE_DIR/_build/prod/rel/$APP_NAME/." "$APP_DIR/"
-chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
-info "installed to $APP_DIR"
+HANDOFF_SCRIPT="/run/hostctl-update-install.sh"
+cat > "$HANDOFF_SCRIPT" <<HANDOFF
+#!/bin/bash
+set -euo pipefail
+# wait for the parent script to flush its output before we stop the service
+sleep 2
+systemctl stop $APP_NAME || true
+cp -r $SOURCE_DIR/_build/prod/rel/$APP_NAME/. $APP_DIR/
+chown -R $SERVICE_USER:$SERVICE_USER $APP_DIR
+ENV_VARS="\$(grep -v '^#' $ENV_FILE | grep -v '^\s*\$' | xargs)"
+sudo -u $SERVICE_USER env \$ENV_VARS $APP_DIR/bin/migrate
+systemctl start $APP_NAME
+rm -f "\$0"
+HANDOFF
+chmod 700 "$HANDOFF_SCRIPT"
+
+systemd-run --no-block --unit=hostctl-update-install \
+  --description="Hostctl: install release, migrate, restart" \
+  /bin/bash "$HANDOFF_SCRIPT"
+
+info "Service is stopping to swap the release — migrations will run, then it restarts."
+info "Your browser will reconnect automatically in ~30 seconds."
 ok
 
-# ── 4/5  Migrate ────────────────────────────────────────────────────────────
-step "4/5  Running database migrations"
-
-ENV_VARS="$(grep -v '^#' "$ENV_FILE" | grep -v '^[[:space:]]*$' | xargs)"
-sudo -u "$SERVICE_USER" env $ENV_VARS "$APP_DIR/bin/migrate"
-ok
-
-# ── 5/5  Restart ────────────────────────────────────────────────────────────
-step "5/5  Restarting service"
-info "The panel will reconnect automatically after restart..."
-systemctl restart "$APP_NAME"
-ok
-
-echo ""
-echo "=== Update complete ==="
+echo "=== Update queued — service will restart momentarily ==="
