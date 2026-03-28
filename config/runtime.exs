@@ -54,6 +54,18 @@ certbot_opts =
       _ -> opts
     end
   end)
+  |> then(fn opts ->
+    case System.get_env("DNS_PROPAGATION_SECONDS") do
+      secs when is_binary(secs) and secs != "" ->
+        case Integer.parse(secs) do
+          {n, ""} when n > 0 -> Keyword.put(opts, :dns_propagation_seconds, n)
+          _ -> opts
+        end
+
+      _ ->
+        opts
+    end
+  end)
 
 unless certbot_opts == [] do
   config :hostctl, :certbot, certbot_opts

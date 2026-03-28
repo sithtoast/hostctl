@@ -30,6 +30,7 @@ defmodule Hostctl.CertBot do
 
   alias Hostctl.Settings
   alias Hostctl.Settings.DnsProviderSetting
+  alias Hostctl.Hosting
   alias Hostctl.Hosting.Domain
   alias Hostctl.Hosting.SslCertificate
 
@@ -76,7 +77,7 @@ defmodule Hostctl.CertBot do
         "--dns-cloudflare-credentials",
         creds_file,
         "--dns-cloudflare-propagation-seconds",
-        "20"
+        Integer.to_string(dns_propagation_seconds())
       ])
     after
       File.rm(creds_file)
@@ -107,12 +108,14 @@ defmodule Hostctl.CertBot do
       Path.join(le_dir, "logs")
     ]
 
+    domain_args = build_domain_args(domain_name, domain_id)
+
     args =
       ["certonly", "--non-interactive", "--agree-tos"] ++
         email_args ++
         dir_args ++
         extra_args ++
-        ["-d", domain_name, "-d", "www.#{domain_name}"]
+        domain_args
 
     broadcast_log(domain_id, "Running: #{cmd} #{Enum.join(args, " ")}")
     Logger.info("[CertBot] Running: #{cmd} #{Enum.join(args, " ")}")
@@ -255,12 +258,34 @@ defmodule Hostctl.CertBot do
   # Config helpers
   # ---------------------------------------------------------------------------
 
+  defp build_domain_args(domain_name, domain_id) do
+    # Fetch subdomains to check if www is explicitly configured
+    subdomains =
+      try do
+        domain = %Domain{id: domain_id, name: domain_name}
+        Hosting.list_subdomains(domain)
+      rescue
+        _ -> []
+      end
+
+    has_www? = Enum.any?(subdomains, fn s -> s.name == "www" end)
+
+    if has_www? do
+      ["-d", domain_name, "-d", "www.#{domain_name}"]
+    else
+      ["-d", domain_name]
+    end
+  end
+
   defp certbot_config, do: Application.get_env(:hostctl, :certbot, [])
   defp enabled?, do: Keyword.get(certbot_config(), :enabled, true)
   defp certbot_cmd, do: Keyword.get(certbot_config(), :certbot_cmd, "certbot")
 
   defp letsencrypt_dir,
     do: Keyword.get(certbot_config(), :letsencrypt_dir, "/var/lib/hostctl/letsencrypt")
+
+  defp dns_propagation_seconds,
+    do: Keyword.get(certbot_config(), :dns_propagation_seconds, 60)
 
   defp certbot_email do
     Keyword.get(certbot_config(), :email) ||

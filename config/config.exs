@@ -61,6 +61,9 @@ config :hostctl, :certbot,
   enabled: true,
   certbot_cmd: "certbot",
   letsencrypt_dir: "/var/lib/hostctl/letsencrypt",
+  # Seconds to wait for DNS TXT record propagation (DNS-01 challenge only).
+  # Increase if Let's Encrypt reports the DNS record is not yet visible.
+  dns_propagation_seconds: 60,
   email: nil
 
 # Configure the endpoint
