@@ -51,6 +51,9 @@ ok
 # ── 3/5  Install ────────────────────────────────────────────────────────────
 step "3/5  Installing release"
 
+# Stop the service first so the ERTS binaries are not "text file busy"
+systemctl stop "$APP_NAME" || true
+
 cp -r "$SOURCE_DIR/_build/prod/rel/$APP_NAME/." "$APP_DIR/"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
 info "installed to $APP_DIR"
