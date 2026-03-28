@@ -3,6 +3,7 @@ defmodule HostctlWeb.DomainLive.Show do
 
   alias Hostctl.Hosting
   alias Hostctl.Hosting.{SslCertificate, Subdomain}
+  alias Hostctl.WebServer
 
   def mount(%{"id" => id}, _session, socket) do
     domain = Hosting.get_domain!(socket.assigns.current_scope, id)
@@ -65,6 +66,16 @@ defmodule HostctlWeb.DomainLive.Show do
 
   def handle_event("set_section", %{"section" => section}, socket) do
     {:noreply, assign(socket, :active_section, String.to_existing_atom(section))}
+  end
+
+  def handle_event("sync_nginx", _params, socket) do
+    case WebServer.sync_domain(socket.assigns.domain) do
+      :ok ->
+        {:noreply, put_flash(socket, :info, "Nginx config rebuilt and reloaded.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Nginx sync failed: #{inspect(reason)}")}
+    end
   end
 
   def handle_event("toggle_ssl", _params, socket) do
@@ -352,6 +363,15 @@ defmodule HostctlWeb.DomainLive.Show do
                 <.icon name="hero-lock-closed" class="w-5 h-5 text-gray-500 dark:text-gray-400" />
                 <span class="text-xs font-medium text-gray-700 dark:text-gray-300">
                   SSL Certificate
+                </span>
+              </button>
+              <button
+                phx-click="sync_nginx"
+                class="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-orange-300 dark:hover:border-orange-700 hover:bg-orange-50 dark:hover:bg-orange-950/30 transition-colors"
+              >
+                <.icon name="hero-arrow-path" class="w-5 h-5 text-gray-500 dark:text-gray-400" />
+                <span class="text-xs font-medium text-gray-700 dark:text-gray-300">
+                  Rebuild Config
                 </span>
               </button>
             </div>
