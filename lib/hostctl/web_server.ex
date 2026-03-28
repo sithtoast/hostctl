@@ -239,7 +239,15 @@ defmodule Hostctl.WebServer do
 
     case System.cmd(executable, args, stderr_to_stdout: true) do
       {_, 0} -> :ok
-      {output, _} -> {:error, String.trim(output)}
+      {output, _} ->
+        # nginx -t exits non-zero if it can't open /run/nginx.pid (permission denied
+        # when running as a non-root service user), even when the config syntax is
+        # fine. Treat it as valid if the output explicitly says "syntax is ok".
+        if String.contains?(output, "syntax is ok") do
+          :ok
+        else
+          {:error, String.trim(output)}
+        end
     end
   end
 
