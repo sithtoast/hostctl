@@ -227,26 +227,147 @@ defmodule Hostctl.Settings do
   end
 
   @default_template_records [
-    %{type: "NS", name: "{{domain}}", value: "ns1.{{domain}}", ttl: 86400, description: "Primary nameserver"},
-    %{type: "NS", name: "{{domain}}", value: "ns2.{{domain}}", ttl: 86400, description: "Secondary nameserver"},
-    %{type: "A", name: "{{domain}}", value: "{{ip}}", ttl: 14400, description: "Root domain A record"},
-    %{type: "AAAA", name: "{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Root domain AAAA record"},
-    %{type: "MX", name: "{{domain}}", value: "mail.{{domain}}", ttl: 14400, priority: 10, description: "Mail server"},
-    %{type: "TXT", name: "{{domain}}", value: "v=spf1 +a +mx +a:{{hostname}} -all", ttl: 300, description: "SPF record"},
-    %{type: "TXT", name: "_dmarc.{{domain}}", value: "v=DMARC1; p=quarantine; adkim=s; aspf=s", ttl: 300, description: "DMARC policy"},
-    %{type: "TXT", name: "_domainconnect.{{domain}}", value: "domainconnect.plesk.com/host/{{hostname}}/port/8443", ttl: 60, description: "Domain connect"},
-    %{type: "CNAME", name: "ftp.{{domain}}", value: "{{domain}}", ttl: 14400, description: "FTP subdomain"},
-    %{type: "A", name: "ipv4.{{domain}}", value: "{{ip}}", ttl: 14400, description: "IPv4 subdomain"},
-    %{type: "AAAA", name: "ipv6.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "IPv6 subdomain"},
-    %{type: "A", name: "mail.{{domain}}", value: "{{ip}}", ttl: 14400, description: "Mail server A record"},
-    %{type: "AAAA", name: "mail.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Mail server AAAA record"},
-    %{type: "A", name: "ns1.{{domain}}", value: "{{ip}}", ttl: 14400, description: "Primary NS A record"},
-    %{type: "AAAA", name: "ns1.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Primary NS AAAA record"},
-    %{type: "A", name: "ns2.{{domain}}", value: "{{ip}}", ttl: 14400, description: "Secondary NS A record"},
-    %{type: "AAAA", name: "ns2.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Secondary NS AAAA record"},
-    %{type: "A", name: "webmail.{{domain}}", value: "{{ip}}", ttl: 14400, description: "Webmail A record"},
-    %{type: "AAAA", name: "webmail.{{domain}}", value: "{{ipv6}}", ttl: 14400, description: "Webmail AAAA record"},
-    %{type: "CNAME", name: "www.{{domain}}", value: "{{domain}}", ttl: 14400, description: "WWW subdomain"}
+    %{
+      type: "NS",
+      name: "{{domain}}",
+      value: "ns1.{{domain}}",
+      ttl: 86400,
+      description: "Primary nameserver"
+    },
+    %{
+      type: "NS",
+      name: "{{domain}}",
+      value: "ns2.{{domain}}",
+      ttl: 86400,
+      description: "Secondary nameserver"
+    },
+    %{
+      type: "A",
+      name: "{{domain}}",
+      value: "{{ip}}",
+      ttl: 14400,
+      description: "Root domain A record"
+    },
+    %{
+      type: "AAAA",
+      name: "{{domain}}",
+      value: "{{ipv6}}",
+      ttl: 14400,
+      description: "Root domain AAAA record"
+    },
+    %{
+      type: "MX",
+      name: "{{domain}}",
+      value: "mail.{{domain}}",
+      ttl: 14400,
+      priority: 10,
+      description: "Mail server"
+    },
+    %{
+      type: "TXT",
+      name: "{{domain}}",
+      value: "v=spf1 +a +mx +a:{{hostname}} -all",
+      ttl: 300,
+      description: "SPF record"
+    },
+    %{
+      type: "TXT",
+      name: "_dmarc.{{domain}}",
+      value: "v=DMARC1; p=quarantine; adkim=s; aspf=s",
+      ttl: 300,
+      description: "DMARC policy"
+    },
+    %{
+      type: "TXT",
+      name: "_domainconnect.{{domain}}",
+      value: "domainconnect.plesk.com/host/{{hostname}}/port/8443",
+      ttl: 60,
+      description: "Domain connect"
+    },
+    %{
+      type: "CNAME",
+      name: "ftp.{{domain}}",
+      value: "{{domain}}",
+      ttl: 14400,
+      description: "FTP subdomain"
+    },
+    %{
+      type: "A",
+      name: "ipv4.{{domain}}",
+      value: "{{ip}}",
+      ttl: 14400,
+      description: "IPv4 subdomain"
+    },
+    %{
+      type: "AAAA",
+      name: "ipv6.{{domain}}",
+      value: "{{ipv6}}",
+      ttl: 14400,
+      description: "IPv6 subdomain"
+    },
+    %{
+      type: "A",
+      name: "mail.{{domain}}",
+      value: "{{ip}}",
+      ttl: 14400,
+      description: "Mail server A record"
+    },
+    %{
+      type: "AAAA",
+      name: "mail.{{domain}}",
+      value: "{{ipv6}}",
+      ttl: 14400,
+      description: "Mail server AAAA record"
+    },
+    %{
+      type: "A",
+      name: "ns1.{{domain}}",
+      value: "{{ip}}",
+      ttl: 14400,
+      description: "Primary NS A record"
+    },
+    %{
+      type: "AAAA",
+      name: "ns1.{{domain}}",
+      value: "{{ipv6}}",
+      ttl: 14400,
+      description: "Primary NS AAAA record"
+    },
+    %{
+      type: "A",
+      name: "ns2.{{domain}}",
+      value: "{{ip}}",
+      ttl: 14400,
+      description: "Secondary NS A record"
+    },
+    %{
+      type: "AAAA",
+      name: "ns2.{{domain}}",
+      value: "{{ipv6}}",
+      ttl: 14400,
+      description: "Secondary NS AAAA record"
+    },
+    %{
+      type: "A",
+      name: "webmail.{{domain}}",
+      value: "{{ip}}",
+      ttl: 14400,
+      description: "Webmail A record"
+    },
+    %{
+      type: "AAAA",
+      name: "webmail.{{domain}}",
+      value: "{{ipv6}}",
+      ttl: 14400,
+      description: "Webmail AAAA record"
+    },
+    %{
+      type: "CNAME",
+      name: "www.{{domain}}",
+      value: "{{domain}}",
+      ttl: 14400,
+      description: "WWW subdomain"
+    }
   ]
 
   @doc """

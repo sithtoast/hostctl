@@ -40,7 +40,14 @@ defmodule Hostctl.Hosting.Domain do
 
   def changeset(domain, attrs) do
     domain
-    |> cast(attrs, [:name, :document_root, :php_version, :status, :ssl_enabled, :apply_dns_template])
+    |> cast(attrs, [
+      :name,
+      :document_root,
+      :php_version,
+      :status,
+      :ssl_enabled,
+      :apply_dns_template
+    ])
     |> validate_required([:name])
     |> validate_format(:name, ~r/^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?(\.[a-z]{2,})+$/i,
       message: "must be a valid domain name"
@@ -55,8 +62,9 @@ defmodule Hostctl.Hosting.Domain do
     name = get_field(changeset, :name)
     doc_root = get_field(changeset, :document_root)
 
-    auto_generated? = is_nil(doc_root) or doc_root == "" or
-                      Regex.match?(~r|^/var/www/[^/]+/public$|, doc_root)
+    auto_generated? =
+      is_nil(doc_root) or doc_root == "" or
+        Regex.match?(~r|^/var/www/[^/]+/public$|, doc_root)
 
     if is_binary(name) and name != "" and auto_generated? do
       put_change(changeset, :document_root, "/var/www/#{name}/public")

@@ -12,7 +12,9 @@ defmodule HostctlWeb.PanelLive.Settings do
     dns_form = to_form(Settings.change_dns_provider_setting(dns_setting), as: :dns_provider)
 
     template_records = Settings.list_dns_template_records()
-    template_form = to_form(Settings.change_dns_template_record(%DnsTemplateRecord{}), as: :template_record)
+
+    template_form =
+      to_form(Settings.change_dns_template_record(%DnsTemplateRecord{}), as: :template_record)
 
     {:ok,
      socket
@@ -149,7 +151,12 @@ defmodule HostctlWeb.PanelLive.Settings do
         {:noreply,
          socket
          |> assign(:template_records_empty?, false)
-         |> assign(:template_form, to_form(Settings.change_dns_template_record(%DnsTemplateRecord{}), as: :template_record))
+         |> assign(
+           :template_form,
+           to_form(Settings.change_dns_template_record(%DnsTemplateRecord{}),
+             as: :template_record
+           )
+         )
          |> stream_insert(:template_records, record)
          |> put_flash(:info, "Template record added.")}
 
@@ -573,18 +580,20 @@ defmodule HostctlWeb.PanelLive.Settings do
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
             <div class="flex items-center gap-3">
               <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-100 dark:bg-emerald-900/30">
-                <.icon name="hero-document-duplicate" class="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <.icon
+                  name="hero-document-duplicate"
+                  class="w-4 h-4 text-emerald-600 dark:text-emerald-400"
+                />
               </div>
               <div class="flex-1">
                 <h2 class="text-base font-semibold text-gray-900 dark:text-white">
                   DNS Record Templates
                 </h2>
                 <p class="text-xs text-gray-500 dark:text-gray-400">
-                  These records are automatically added to every new domain. Use
-                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{domain}}"}</code>,
-                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ip}}"}</code>,
-                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ipv6}}"}</code>,
-                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{hostname}}"}</code>
+                  These records are automatically added to every new domain. Use <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{domain}}"}</code>, <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ip}}"}</code>, <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ipv6}}"}</code>,
+                  <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">
+                    {"{{hostname}}"}
+                  </code>
                   as placeholders.
                 </p>
               </div>
@@ -685,7 +694,11 @@ defmodule HostctlWeb.PanelLive.Settings do
                   <th class="relative px-4 py-3 w-24"><span class="sr-only">Actions</span></th>
                 </tr>
               </thead>
-              <tbody id="template-records" phx-update="stream" class="divide-y divide-gray-100 dark:divide-gray-800">
+              <tbody
+                id="template-records"
+                phx-update="stream"
+                class="divide-y divide-gray-100 dark:divide-gray-800"
+              >
                 <tr
                   :for={{dom_id, record} <- @streams.template_records}
                   id={dom_id}

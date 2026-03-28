@@ -29,6 +29,9 @@ config :hostctl, Hostctl.Mailer, adapter: Swoosh.Adapters.Test
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false
 
+# Disable web server (Caddy) integration during tests
+config :hostctl, :web_server, enabled: false
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

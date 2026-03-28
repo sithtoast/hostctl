@@ -5,6 +5,7 @@ defmodule Hostctl.Hosting do
   alias Hostctl.Accounts.Scope
   alias Hostctl.Settings
   alias Hostctl.DNS.Cloudflare
+  alias Hostctl.WebServer
 
   alias Hostctl.Hosting.{
     Domain,
@@ -58,6 +59,8 @@ defmodule Hostctl.Hosting do
           apply_dns_template(zone, domain.name)
         end
 
+        WebServer.sync_domain(domain)
+
         {:ok, domain}
 
       error ->
@@ -71,11 +74,27 @@ defmodule Hostctl.Hosting do
     domain
     |> Domain.changeset(attrs)
     |> Repo.update()
+    |> case do
+      {:ok, updated_domain} = result ->
+        WebServer.sync_domain(updated_domain)
+        result
+
+      error ->
+        error
+    end
   end
 
   def delete_domain(%Scope{} = scope, %Domain{} = domain) do
     true = domain.user_id == scope.user.id
-    Repo.delete(domain)
+
+    case Repo.delete(domain) do
+      {:ok, _} = result ->
+        WebServer.remove_domain(domain)
+        result
+
+      error ->
+        error
+    end
   end
 
   def change_domain(%Domain{} = domain, attrs \\ %{}) do
@@ -114,16 +133,42 @@ defmodule Hostctl.Hosting do
     %Subdomain{domain_id: domain.id}
     |> Subdomain.changeset(attrs)
     |> Repo.insert()
+    |> case do
+      {:ok, _subdomain} = result ->
+        WebServer.sync_domain(domain)
+        result
+
+      error ->
+        error
+    end
   end
 
   def update_subdomain(%Subdomain{} = subdomain, attrs) do
     subdomain
     |> Subdomain.changeset(attrs)
     |> Repo.update()
+    |> case do
+      {:ok, _updated} = result ->
+        domain = Repo.get!(Domain, subdomain.domain_id)
+        WebServer.sync_domain(domain)
+        result
+
+      error ->
+        error
+    end
   end
 
   def delete_subdomain(%Subdomain{} = subdomain) do
-    Repo.delete(subdomain)
+    domain = Repo.get!(Domain, subdomain.domain_id)
+
+    case Repo.delete(subdomain) do
+      {:ok, _} = result ->
+        WebServer.sync_domain(domain)
+        result
+
+      error ->
+        error
+    end
   end
 
   def change_subdomain(%Subdomain{} = subdomain, attrs \\ %{}) do

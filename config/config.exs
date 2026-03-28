@@ -23,6 +23,16 @@ config :hostctl,
   ecto_repos: [Hostctl.Repo],
   generators: [timestamp_type: :utc_datetime]
 
+# Web server (Caddy) integration
+# Each domain gets a config file written to `caddy_sites_dir`.
+# The main Caddyfile should contain: import sites-enabled/*
+config :hostctl, :web_server,
+  enabled: true,
+  caddy_sites_dir: "/etc/caddy/sites-enabled",
+  caddy_reload_cmd: ["caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
+  # Ubuntu/Debian path; replace {version} with domain's php_version
+  php_fpm_socket_pattern: "/run/php/php{version}-fpm.sock"
+
 # Configure the endpoint
 config :hostctl, HostctlWeb.Endpoint,
   url: [host: "localhost"],

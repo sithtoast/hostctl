@@ -332,7 +332,11 @@ defmodule HostctlWeb.DnsLive.Index do
                   <th class="relative px-4 py-3 w-24"><span class="sr-only">Actions</span></th>
                 </tr>
               </thead>
-              <tbody id="dns-records" phx-update="stream" class="divide-y divide-gray-100 dark:divide-gray-800">
+              <tbody
+                id="dns-records"
+                phx-update="stream"
+                class="divide-y divide-gray-100 dark:divide-gray-800"
+              >
                 <tr
                   :for={{dom_id, record} <- @streams.dns_records}
                   id={dom_id}
