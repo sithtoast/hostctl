@@ -39,6 +39,10 @@ if token = System.get_env("INITIAL_SETUP_TOKEN") do
   config :hostctl, :initial_setup_token, token
 end
 
+if repo = System.get_env("GITHUB_REPO") do
+  config :hostctl, :github_repo, repo
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
