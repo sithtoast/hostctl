@@ -21,11 +21,6 @@
 set -euo pipefail
 
 # --- Pinned dependency versions -----------------------------------------------
-# Update these together; ELIXIR_OTP_TAG must match OTP_MAJOR.
-OTP_MAJOR="27"
-OTP_VERSION="27.3.1"      # exact erlang-solutions package version
-ELIXIR_VERSION="1.18.3"   # exact Elixir GitHub release
-ELIXIR_OTP_TAG="otp-27"   # precompiled variant on GitHub
 POSTGRES_MAJOR="17"
 
 # --- Defaults -----------------------------------------------------------------
@@ -152,13 +147,20 @@ if [[ -z "$DOMAIN" && "$SKIP_NGINX" == false ]]; then
 fi
 
 if [[ -z "$DB_PASSWORD" ]]; then
-  DB_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+  if [[ -f "$ENV_FILE" ]]; then
+    # Re-use the password already stored in the env file so the DB and env stay in sync
+    DB_PASSWORD="$(grep '^DATABASE_URL=' "$ENV_FILE" | sed 's|.*://[^:]*:\([^@]*\)@.*|\1|')"
+    [[ -n "$DB_PASSWORD" ]] || error "Could not extract DB password from existing $ENV_FILE. Pass --db-password= explicitly."
+    info "Re-using existing DB password from $ENV_FILE"
+  else
+    DB_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)"
+  fi
 fi
 
 echo ""
 echo -e "${BOLD}Installation plan:${NC}"
-echo -e "  Erlang/OTP    : $OTP_VERSION  (erlang-solutions)"
-echo -e "  Elixir        : $ELIXIR_VERSION  (github precompiled, $ELIXIR_OTP_TAG)"
+echo -e "  Erlang/OTP    : latest  (rabbitmq/rabbitmq-erlang PPA)"
+echo -e "  Elixir        : latest  (rabbitmq/rabbitmq-erlang PPA)"
 echo -e "  PostgreSQL    : $POSTGRES_MAJOR  (postgresql.org apt repo)"
 echo -e "  App directory : $APP_DIR"
 echo -e "  System user   : $SERVICE_USER"
@@ -180,58 +182,25 @@ step "Downloading all prerequisites (before making any system changes)"
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Bootstrap: only the absolute minimum tools required for downloading
+# Bootstrap: minimum tools required for adding PPAs and downloading
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-  curl gnupg2 ca-certificates lsb-release wget
+  curl gnupg2 ca-certificates lsb-release wget software-properties-common
 
 mkdir -p "$DOWNLOAD_DIR"
 
-# 1a. Erlang: add repo so we can resolve the exact package version ---------------
-info "Resolving Erlang/OTP $OTP_VERSION package..."
+# 1a. Erlang + Elixir: rabbitmq/rabbitmq-erlang PPA ----------------------------
+info "Adding rabbitmq/rabbitmq-erlang PPA (may take a minute)..."
+add-apt-repository -y ppa:rabbitmq/rabbitmq-erlang \
+  || error "Failed to add rabbitmq PPA. Check network connectivity to Launchpad."
+apt-get update -q
 
-wget -q -O "$DOWNLOAD_DIR/erlang-solutions.deb" \
-  "https://packages.erlang-solutions.com/erlang-solutions_2.0_all.deb" \
-  || error "Failed to fetch erlang-solutions repo package. Check your network connection."
+info "Pre-downloading Erlang and Elixir (erlang is large, this may take several minutes)..."
+apt-get install -y --no-install-recommends --download-only erlang elixir \
+  || error "Failed to pre-cache erlang/elixir packages from the PPA."
+success "Erlang and Elixir cached"
 
-dpkg -i "$DOWNLOAD_DIR/erlang-solutions.deb" >/dev/null
-apt-get update -qq
-
-# Resolve exact versioned package matching OTP_VERSION (or nearest OTP_MAJOR)
-ERLANG_PKG_VERSION="$(apt-cache show esl-erlang 2>/dev/null \
-  | awk '/^Version:/ {print $2}' \
-  | grep "^1:${OTP_VERSION}" \
-  | sort -V | tail -1)"
-
-if [[ -z "$ERLANG_PKG_VERSION" ]]; then
-  ERLANG_PKG_VERSION="$(apt-cache show esl-erlang 2>/dev/null \
-    | awk '/^Version:/ {print $2}' \
-    | grep "^1:${OTP_MAJOR}\\." \
-    | sort -V | tail -1)"
-  [[ -n "$ERLANG_PKG_VERSION" ]] \
-    || error "Could not find esl-erlang OTP ${OTP_MAJOR}.x in the erlang-solutions apt repo."
-  warn "Exact OTP $OTP_VERSION not found -- will install $ERLANG_PKG_VERSION instead."
-fi
-
-# Pre-cache the Erlang deb and all its dependencies without installing
-apt-get install -y --no-install-recommends \
-  --download-only "esl-erlang=$ERLANG_PKG_VERSION"
-success "Erlang $ERLANG_PKG_VERSION cached"
-
-# 1b. Elixir: precompiled binary from GitHub ------------------------------------
-info "Downloading Elixir $ELIXIR_VERSION ($ELIXIR_OTP_TAG)..."
-
-ELIXIR_ZIP="$DOWNLOAD_DIR/elixir-${ELIXIR_VERSION}-${ELIXIR_OTP_TAG}.zip"
-ELIXIR_URL="https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-${ELIXIR_OTP_TAG}.zip"
-
-curl -fsSL -o "$ELIXIR_ZIP" "$ELIXIR_URL" \
-  || error "Failed to download Elixir from GitHub. Check your network connection."
-
-unzip -t "$ELIXIR_ZIP" >/dev/null \
-  || error "Elixir zip archive appears corrupt. Try re-running the installer."
-success "Elixir $ELIXIR_VERSION cached"
-
-# 1c. PostgreSQL: signing key ---------------------------------------------------
+# 1b. PostgreSQL: signing key ---------------------------------------------------
 if [[ "$SKIP_POSTGRES" == false ]] && ! command -v psql &>/dev/null; then
   info "Fetching PostgreSQL $POSTGRES_MAJOR signing key..."
   curl -fsSL -o "$DOWNLOAD_DIR/postgresql.asc" \
@@ -244,7 +213,7 @@ fi
 info "Pre-downloading build tools and dependencies..."
 apt-get install -y --no-install-recommends \
   --download-only \
-  build-essential git libssl-dev libncurses5-dev unzip locales >/dev/null
+  build-essential git libssl-dev unzip locales >/dev/null
 
 if [[ "$SKIP_NGINX" == false ]] && ! command -v nginx &>/dev/null; then
   apt-get install -y --no-install-recommends --download-only nginx >/dev/null
@@ -260,7 +229,7 @@ success "All prerequisites downloaded. No system changes made yet -- starting in
 step "Installing system packages"
 
 apt-get install -y --no-install-recommends \
-  build-essential git libssl-dev libncurses5-dev unzip locales
+  build-essential git libssl-dev unzip locales
 
 if ! locale -a 2>/dev/null | grep -q "en_US.utf8"; then
   locale-gen en_US.UTF-8
@@ -269,39 +238,16 @@ update-locale LANG=en_US.UTF-8
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 success "System packages installed"
 
-# 2b. Erlang -------------------------------------------------------------------
-step "Installing Erlang/OTP $ERLANG_PKG_VERSION"
+# 2b. Erlang + Elixir (from PPA cache) ----------------------------------------
+step "Installing Erlang and Elixir"
 
-if command -v erl &>/dev/null \
-    && erl -noshell -eval 'io:fwrite("~s~n",[erlang:system_info(otp_release)]),halt().' \
-       2>/dev/null | grep -q "^${OTP_MAJOR}"; then
-  success "Erlang OTP ${OTP_MAJOR} already installed"
+if command -v erl &>/dev/null && command -v elixir &>/dev/null; then
+  success "Erlang and Elixir already installed"
 else
-  apt-get install -y --no-install-recommends "esl-erlang=$ERLANG_PKG_VERSION"
+  apt-get install -y erlang elixir
   INSTALLED_OTP="$(erl -noshell \
     -eval 'io:fwrite("~s~n",[erlang:system_info(otp_release)]),halt().' 2>/dev/null)"
-  success "Erlang installed: OTP $INSTALLED_OTP"
-fi
-
-# 2c. Elixir (from cached precompiled zip) -------------------------------------
-step "Installing Elixir $ELIXIR_VERSION"
-
-ELIXIR_INSTALL_DIR="/usr/local/elixir-${ELIXIR_VERSION}"
-
-if command -v elixir &>/dev/null \
-    && elixir --version 2>/dev/null | grep -q "$ELIXIR_VERSION"; then
-  success "Elixir $ELIXIR_VERSION already installed"
-else
-  rm -rf "$ELIXIR_INSTALL_DIR"
-  mkdir -p "$ELIXIR_INSTALL_DIR"
-  unzip -q "$ELIXIR_ZIP" -d "$ELIXIR_INSTALL_DIR"
-
-  # Symlink all Elixir binaries; replaces any older version symlinks
-  for bin in elixir elixirc mix iex; do
-    ln -sf "$ELIXIR_INSTALL_DIR/bin/$bin" "/usr/local/bin/$bin"
-  done
-
-  success "Elixir installed: $(elixir --version | head -1)"
+  success "Erlang OTP $INSTALLED_OTP and $(elixir --version | head -1) installed"
 fi
 
 mix local.hex --force --quiet
@@ -403,8 +349,8 @@ if [[ "$RECONFIGURE" == false ]]; then
   cd "$SOURCE_DIR"
   MIX_ENV=prod mix deps.get --only prod
   MIX_ENV=prod mix assets.setup
-  MIX_ENV=prod mix assets.deploy
   MIX_ENV=prod mix compile
+  MIX_ENV=prod mix assets.deploy
   MIX_ENV=prod mix release --overwrite
 
   success "Release built"
@@ -452,11 +398,7 @@ fi
 # 3f. Database migrations ------------------------------------------------------
 step "Running database migrations"
 
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-export PHX_SERVER DATABASE_URL SECRET_KEY_BASE
-
-sudo -u "$SERVICE_USER" "$APP_DIR/bin/migrate"
+sudo -u "$SERVICE_USER" env $(grep -v '^#' "$ENV_FILE" | xargs) "$APP_DIR/bin/migrate"
 success "Migrations complete"
 
 # 3g. Systemd service ----------------------------------------------------------
@@ -484,7 +426,7 @@ SyslogIdentifier=$APP_NAME
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR /var/log/$APP_NAME
+ReadWritePaths=$APP_DIR
 
 [Install]
 WantedBy=multi-user.target
@@ -492,7 +434,10 @@ SVCEOF
 
 systemctl daemon-reload
 systemctl enable "$APP_NAME"
-systemctl restart "$APP_NAME"
+systemctl restart "$APP_NAME" || {
+  echo ""
+  error "Service failed to start. Logs:\n$(journalctl -u "$APP_NAME" -n 50 --no-pager 2>/dev/null)"
+}
 success "Service enabled and started"
 
 # 3h. Nginx config -------------------------------------------------------------
