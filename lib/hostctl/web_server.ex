@@ -54,6 +54,17 @@ defmodule Hostctl.WebServer do
         write_ssl_cert(domain.name, ssl_cert)
       end
 
+      # Ensure the document root exists before nginx tries to serve from it
+      provision_webroot(domain.document_root || "/var/www/#{domain.name}/public")
+
+      Enum.each(subdomains, fn sub ->
+        sub_root =
+          sub.document_root ||
+            "/var/www/#{domain.name}/subdomains/#{sub.name}/public"
+
+        provision_webroot(sub_root)
+      end)
+
       config = Nginx.generate_config(domain, subdomains, ssl_cert)
 
       case write_vhost(domain, config) do
@@ -129,23 +140,30 @@ defmodule Hostctl.WebServer do
   """
   def reload do
     if enabled?() do
-      cmd =
-        web_server_config()
-        |> Keyword.get(:nginx_reload_cmd, ["systemctl", "reload", "nginx"])
+      case validate_config() do
+        :ok ->
+          cmd =
+            web_server_config()
+            |> Keyword.get(:nginx_reload_cmd, ["sudo", "systemctl", "reload", "nginx"])
 
-      [executable | args] = cmd
+          [executable | args] = cmd
 
-      case System.cmd(executable, args, stderr_to_stdout: true) do
-        {_, 0} ->
-          Logger.info("[WebServer] Nginx reloaded successfully")
-          :ok
+          case System.cmd(executable, args, stderr_to_stdout: true) do
+            {_, 0} ->
+              Logger.info("[WebServer] Nginx reloaded successfully")
+              :ok
 
-        {output, exit_code} ->
-          Logger.error(
-            "[WebServer] Nginx reload failed (exit #{exit_code}): #{String.trim(output)}"
-          )
+            {output, exit_code} ->
+              Logger.error(
+                "[WebServer] Nginx reload failed (exit #{exit_code}): #{String.trim(output)}"
+              )
 
-          {:error, {:reload_failed, exit_code, output}}
+              {:error, {:reload_failed, exit_code, output}}
+          end
+
+        {:error, reason} ->
+          Logger.error("[WebServer] Nginx config invalid — skipping reload: #{reason}")
+          {:error, {:config_invalid, reason}}
       end
     else
       :ok
@@ -166,6 +184,65 @@ defmodule Hostctl.WebServer do
       # Remove any stale symlink before (re-)creating it
       File.rm(enabled)
       File.ln_s(available, enabled)
+    end
+  end
+
+  # Creates a webroot directory and writes a default index.html if neither the
+  # dir nor any index file already exists. This ensures nginx can serve the site
+  # immediately after a domain is added, rather than returning 403/404.
+  defp provision_webroot(path) do
+    case File.mkdir_p(path) do
+      :ok ->
+        index = Path.join(path, "index.html")
+
+        unless File.exists?(index) do
+          File.write(index, default_index_html())
+        end
+
+      {:error, reason} ->
+        Logger.warning("[WebServer] Could not create webroot #{path}: #{inspect(reason)}")
+    end
+  end
+
+  defp default_index_html do
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Site coming soon</title>
+      <style>
+        body { font-family: system-ui, sans-serif; display: flex; align-items: center;
+               justify-content: center; min-height: 100vh; margin: 0;
+               background: #f9fafb; color: #374151; }
+        .card { text-align: center; padding: 2rem 3rem; background: white;
+                border-radius: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+        h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
+        p  { margin: 0; color: #6b7280; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>Site coming soon</h1>
+        <p>Upload your files to get started.</p>
+      </div>
+    </body>
+    </html>
+    """
+  end
+
+  # Runs `nginx -t` to verify the full config before a reload.
+  defp validate_config do
+    cmd =
+      web_server_config()
+      |> Keyword.get(:nginx_validate_cmd, ["nginx", "-t"])
+
+    [executable | args] = cmd
+
+    case System.cmd(executable, args, stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      {output, _} -> {:error, String.trim(output)}
     end
   end
 

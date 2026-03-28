@@ -40,7 +40,9 @@ config :hostctl, :web_server,
   # Directory for custom SSL certs (Let's Encrypt certs stay under /etc/letsencrypt)
   ssl_dir: "/etc/ssl/hostctl",
   # Ubuntu/Debian path; {version} is replaced with the domain's php_version
-  php_fpm_socket_pattern: "/run/php/php{version}-fpm.sock"
+  php_fpm_socket_pattern: "/run/php/php{version}-fpm.sock",
+  # Used to validate config syntax before reloading (nginx -t)
+  nginx_validate_cmd: ["nginx", "-t"]
 
 # Configure the endpoint
 config :hostctl, HostctlWeb.Endpoint,

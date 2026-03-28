@@ -78,6 +78,8 @@ config :hostctl, :dev_basic_auth,
   password: System.get_env("DEV_AUTH_PASSWORD", "changeme!")
 
 # Do not include metadata nor timestamps in development logs
+# Disable web server (Nginx) integration in development — no nginx running locally
+config :hostctl, :web_server, enabled: false
 config :logger, :default_formatter, format: "[$level] $message\n"
 
 # Set a higher stacktrace during development. Avoid configuring such
