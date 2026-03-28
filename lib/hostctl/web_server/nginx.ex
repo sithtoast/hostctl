@@ -125,9 +125,8 @@ defmodule Hostctl.WebServer.Nginx do
     }
 
     server {
-        listen 443 ssl;
-        listen [::]:443 ssl;
-        http2 on;
+        listen 443 ssl http2;
+        listen [::]:443 ssl http2;
         server_name #{server_names};
 
         ssl_certificate #{ssl_cert_path};
