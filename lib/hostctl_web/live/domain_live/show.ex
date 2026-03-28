@@ -12,6 +12,18 @@ defmodule HostctlWeb.DomainLive.Show do
     cron_jobs = Hosting.list_cron_jobs(domain)
     ftp_accounts = Hosting.list_ftp_accounts(domain)
 
+    # If an active cert exists but ssl_enabled is still false (e.g. cert was
+    # provisioned before the auto-enable logic was added), fix it now.
+    domain =
+      if ssl_cert && ssl_cert.status == "active" && !domain.ssl_enabled do
+        case Hosting.update_domain(socket.assigns.current_scope, domain, %{ssl_enabled: true}) do
+          {:ok, updated} -> updated
+          _ -> domain
+        end
+      else
+        domain
+      end
+
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Hostctl.PubSub, "domain:#{domain.id}:ssl")
     end
@@ -323,7 +335,14 @@ defmodule HostctlWeb.DomainLive.Show do
             />
             <.info_card
               label="SSL Certificate"
-              value={if @domain.ssl_enabled, do: "Active", else: "Disabled"}
+              value={
+                cond do
+                  @ssl_cert && @ssl_cert.status == "active" -> "Active"
+                  @ssl_cert && @ssl_cert.status == "pending" -> "Issuing…"
+                  @ssl_cert && @ssl_cert.status == "expired" -> "Expired"
+                  true -> "None"
+                end
+              }
               icon="hero-lock-closed"
             />
           </div>
