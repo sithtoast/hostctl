@@ -60,19 +60,24 @@ step "3/3  Scheduling install, migrate & restart"
 # script file is reachable by the new unit.
 
 HANDOFF_SCRIPT="/run/hostctl-update-install.sh"
-cat > "$HANDOFF_SCRIPT" <<HANDOFF
-#!/bin/bash
-set -euo pipefail
-# wait for the parent script to flush its output before we stop the service
-sleep 2
-systemctl stop $APP_NAME || true
-cp -r $SOURCE_DIR/_build/prod/rel/$APP_NAME/. $APP_DIR/
-chown -R $SERVICE_USER:$SERVICE_USER $APP_DIR
-ENV_VARS="\$(grep -v '^#' $ENV_FILE | grep -v '^\s*\$' | xargs)"
-sudo -u $SERVICE_USER env \$ENV_VARS $APP_DIR/bin/migrate
-systemctl start $APP_NAME
-rm -f "\$0"
-HANDOFF
+
+# Write the handoff script without a heredoc to avoid delimiter issues
+printf '%s\n' '#!/bin/bash' \
+  'set -euo pipefail' \
+  "APP_NAME=${APP_NAME}" \
+  "SOURCE_DIR=${SOURCE_DIR}" \
+  "APP_DIR=${APP_DIR}" \
+  "SERVICE_USER=${SERVICE_USER}" \
+  "ENV_FILE=${ENV_FILE}" \
+  'sleep 2' \
+  'systemctl stop "$APP_NAME" || true' \
+  'cp -r "$SOURCE_DIR/_build/prod/rel/$APP_NAME/." "$APP_DIR/"' \
+  'chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"' \
+  'ENV_VARS=$(grep -v "^#" "$ENV_FILE" | grep -v "^[[:space:]]*$" | xargs)' \
+  'sudo -u "$SERVICE_USER" env $ENV_VARS "$APP_DIR/bin/migrate"' \
+  'systemctl start "$APP_NAME"' \
+  'rm -f "$0"' \
+  > "$HANDOFF_SCRIPT"
 chmod 700 "$HANDOFF_SCRIPT"
 
 systemd-run --no-block --unit=hostctl-update-install \
