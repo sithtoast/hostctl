@@ -45,10 +45,7 @@ defmodule Hostctl.WebServer do
     if enabled?() do
       subdomains = Repo.all(from s in Subdomain, where: s.domain_id == ^domain.id)
 
-      ssl_cert =
-        if domain.ssl_enabled,
-          do: Repo.get_by(SslCertificate, domain_id: domain.id),
-          else: nil
+      ssl_cert = Repo.get_by(SslCertificate, domain_id: domain.id)
 
       if ssl_cert && ssl_cert.cert_type == "custom" && ssl_cert.status == "active" do
         write_ssl_cert(domain.name, ssl_cert)

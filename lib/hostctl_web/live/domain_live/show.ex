@@ -48,7 +48,9 @@ defmodule HostctlWeb.DomainLive.Show do
   end
 
   def handle_info({:ssl_cert_updated, cert}, socket) do
-    {:noreply, assign(socket, :ssl_cert, cert)}
+    # Reload domain too so ssl_enabled toggle reflects any auto-update
+    domain = Hosting.get_domain!(socket.assigns.current_scope, cert.domain_id)
+    {:noreply, socket |> assign(:ssl_cert, cert) |> assign(:domain, domain)}
   end
 
   def handle_info({:ssl_log, line}, socket) do

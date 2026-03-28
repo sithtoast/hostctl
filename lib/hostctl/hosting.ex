@@ -445,6 +445,17 @@ defmodule Hostctl.Hosting do
   defp provision_lets_encrypt_cert(%Domain{} = domain, %SslCertificate{} = cert) do
     case CertBot.provision(domain, cert) do
       {:ok, expires_at, log} ->
+        # Auto-enable SSL on the domain so nginx writes the 443 block.
+        unless domain.ssl_enabled do
+          domain
+          |> Domain.changeset(%{ssl_enabled: true})
+          |> Repo.update()
+          |> case do
+            {:ok, _} -> Logger.info("[Hosting] ssl_enabled set to true for #{domain.name}")
+            {:error, r} -> Logger.error("[Hosting] Could not set ssl_enabled for #{domain.name}: #{inspect(r)}")
+          end
+        end
+
         case update_ssl_certificate(cert, %{status: "active", expires_at: expires_at, log: log}) do
           {:ok, _} ->
             Logger.info("[Hosting] SSL certificate activated for #{domain.name}")
