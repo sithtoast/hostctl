@@ -30,9 +30,19 @@ step "1/3  Fetching latest source"
 [[ -d "$SOURCE_DIR/.git" ]] \
   || { echo "error: source directory not found: $SOURCE_DIR"; exit 1; }
 
-git -C "$SOURCE_DIR" fetch --quiet origin
+git -C "$SOURCE_DIR" fetch --quiet --tags origin
 git -C "$SOURCE_DIR" reset --hard "origin/$BRANCH" --quiet
 info "branch: $BRANCH @ $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
+
+# Resolve the version tag for this commit so the running app can report it.
+# Prefer an exact tag on HEAD; fall back to "describe" output (e.g. v0.1.0-α+build.2-3-gabcdef).
+VERSION_TAG=$(git -C "$SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null \
+  || git -C "$SOURCE_DIR" describe --tags 2>/dev/null \
+  || echo "")
+if [[ -n "$VERSION_TAG" ]]; then
+  echo "$VERSION_TAG" > "$SOURCE_DIR/priv/VERSION"
+  info "version: $VERSION_TAG"
+fi
 ok
 
 # ── 2/5  Build ──────────────────────────────────────────────────────────────

@@ -15,9 +15,18 @@ defmodule Hostctl.Updater do
 
   @doc """
   Returns the current application version string.
+
+  In a deployed release the full version tag (e.g. "v0.1.0-α+build.2") is
+  written to priv/VERSION at build time. That file is preferred over the OTP
+  application version (which only carries the bare semver from mix.exs).
   """
   def current_version do
-    Application.spec(:hostctl, :vsn) |> to_string()
+    version_file = Application.app_dir(:hostctl, "priv/VERSION")
+
+    case File.read(version_file) do
+      {:ok, contents} -> contents |> String.trim() |> strip_v_prefix()
+      {:error, _} -> Application.spec(:hostctl, :vsn) |> to_string()
+    end
   end
 
   @doc """
