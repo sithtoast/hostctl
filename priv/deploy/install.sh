@@ -525,6 +525,30 @@ if [[ "$SKIP_NGINX" == false ]]; then
   success "$SERVICE_USER can reload Nginx without a password"
 fi
 
+# 3d-5. Feature setup sudoers --------------------------------------------------
+# Grants the service user passwordless sudo for commands needed by the
+# admin Features page (install packages, manage services, write configs).
+step "Configuring feature management permissions"
+FEATURES_SUDOERS="/etc/sudoers.d/hostctl-features"
+cat > "$FEATURES_SUDOERS" <<SUDOERS
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get install *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl enable *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl disable *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl reload *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/mkdir -p /etc/vsftpd/*
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/touch /etc/vsftpd/*
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chmod * /etc/vsftpd/*
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/mv /tmp/hostctl_feature_* *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chmod * /etc/pam.d/*
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chmod * /etc/vsftpd.conf
+SUDOERS
+chmod 440 "$FEATURES_SUDOERS"
+visudo -cf "$FEATURES_SUDOERS" >/dev/null \
+  || { warn "sudoers syntax check failed — removing $FEATURES_SUDOERS"; rm -f "$FEATURES_SUDOERS"; }
+success "$SERVICE_USER can manage optional features from the web UI"
+
 # 3d-5. Certbot letsencrypt directory (owned by service user, no sudo needed) -
 LE_DIR="/var/lib/hostctl/letsencrypt"
 mkdir -p "$LE_DIR" "$LE_DIR/work" "$LE_DIR/logs"
@@ -600,7 +624,7 @@ StandardError=journal
 SyslogIdentifier=$APP_NAME
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp
+ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp /run/sudo
 
 [Install]
 WantedBy=multi-user.target

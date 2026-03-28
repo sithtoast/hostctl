@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+#
+# hostctl repair — Fix permissions, sudoers, and systemd on an existing install.
+#
+# Must be run as root:
+#   sudo /opt/hostctl/bin/repair
+#
+# Safe to run multiple times; every step is idempotent. Use after upgrades or
+# whenever the panel reports sudo/permission errors (e.g. feature installation
+# failing with "unable to open /run/sudo/ts" or "a terminal is required").
+#
+# What it checks and fixes:
+#   1. Service user existence
+#   2. Directory ownership & permissions (webroot, logs, nginx, SSL, certbot)
+#   3. Sudoers rules (update, nginx, feature management)
+#   4. Systemd unit ReadWritePaths (ensures /run/sudo is writable)
+#   5. Env file permissions
+#   6. Verifies passwordless sudo, reloads & restarts if changes were made
+
+set -euo pipefail
+
+# --- Defaults (match install.sh) ----------------------------------------------
+APP_NAME="hostctl"
+APP_DIR="${HOSTCTL_APP_DIR:-/opt/hostctl}"
+SERVICE_USER="hostctl"
+SERVICE_FILE="/etc/systemd/system/$APP_NAME.service"
+ENV_FILE="/etc/$APP_NAME/env"
+SOURCE_DIR="${HOSTCTL_SOURCE_DIR:-/usr/local/src/$APP_NAME}"
+
+# --- Colours ------------------------------------------------------------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
+fix()  { echo -e "  ${YELLOW}⟳${NC} $*"; }
+err()  { echo -e "  ${RED}✗${NC} $*"; }
+head() { echo -e "\n${BOLD}$*${NC}"; }
+
+FIXED=0
+
+# Must run as root
+[[ $EUID -eq 0 ]] || { echo -e "${RED}Error:${NC} This script must be run as root."; exit 1; }
+
+echo -e "${BOLD}hostctl repair — checking and fixing installation${NC}"
+echo "──────────────────────────────────────────────────"
+
+# =============================================================================
+# 1. Service user
+# =============================================================================
+head "1. Service user"
+
+if id "$SERVICE_USER" &>/dev/null; then
+  ok "User '$SERVICE_USER' exists"
+else
+  err "User '$SERVICE_USER' does not exist — cannot continue"
+  exit 1
+fi
+
+# =============================================================================
+# 2. Directory ownership & permissions
+# =============================================================================
+head "2. Directories"
+
+ensure_dir() {
+  local dir="$1" owner="$2" mode="$3" label="$4"
+  if [[ ! -d "$dir" ]]; then
+    mkdir -p "$dir"
+    fix "Created $dir"
+    FIXED=$((FIXED + 1))
+  fi
+  local cur_owner cur_mode
+  cur_owner="$(stat -c '%U:%G' "$dir" 2>/dev/null)"
+  cur_mode="$(stat -c '%a' "$dir" 2>/dev/null)"
+  if [[ "$cur_owner" != "$owner" ]]; then
+    chown "$owner" "$dir"
+    fix "$label: ownership → $owner"
+    FIXED=$((FIXED + 1))
+  fi
+  if [[ "$cur_mode" != "$mode" ]]; then
+    chmod "$mode" "$dir"
+    fix "$label: mode → $mode"
+    FIXED=$((FIXED + 1))
+  fi
+  ok "$label ($dir)"
+}
+
+ensure_dir "$APP_DIR"                         "root:$SERVICE_USER" "755" "App directory"
+ensure_dir "/var/log/$APP_NAME"               "root:$SERVICE_USER" "775" "Log directory"
+ensure_dir "/var/www"                          "root:$SERVICE_USER" "775" "Webroot"
+ensure_dir "/etc/$APP_NAME"                   "root:$SERVICE_USER" "750" "Config directory"
+
+if command -v nginx &>/dev/null; then
+  ensure_dir "/etc/nginx/sites-available"     "root:$SERVICE_USER" "775" "Nginx sites-available"
+  ensure_dir "/etc/nginx/sites-enabled"       "root:$SERVICE_USER" "775" "Nginx sites-enabled"
+  ensure_dir "/etc/ssl/hostctl"               "root:$SERVICE_USER" "750" "SSL cert directory"
+fi
+
+LE_DIR="/var/lib/hostctl/letsencrypt"
+if [[ -d "$LE_DIR" ]] || command -v certbot &>/dev/null; then
+  for d in "$LE_DIR" "$LE_DIR/work" "$LE_DIR/logs"; do
+    mkdir -p "$d"
+  done
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$LE_DIR"
+  chmod 750 "$LE_DIR"
+  ok "Certbot data directory ($LE_DIR)"
+fi
+
+# =============================================================================
+# 3. Sudoers rules
+# =============================================================================
+head "3. Sudoers rules"
+
+ensure_sudoers() {
+  local file="$1" label="$2" content="$3"
+  if [[ -f "$file" ]]; then
+    local existing
+    existing="$(cat "$file")"
+    if [[ "$existing" == "$content" ]]; then
+      ok "$label (unchanged)"
+      return
+    fi
+  fi
+  echo "$content" > "$file"
+  chmod 440 "$file"
+  if visudo -cf "$file" >/dev/null 2>&1; then
+    fix "$label → written"
+    FIXED=$((FIXED + 1))
+  else
+    err "$label — syntax check failed, removing"
+    rm -f "$file"
+  fi
+}
+
+# Update script
+if [[ -x "$APP_DIR/bin/update" ]]; then
+  ensure_sudoers "/etc/sudoers.d/hostctl-update" "Update script" \
+    "$SERVICE_USER ALL=(root) NOPASSWD: $APP_DIR/bin/update"
+fi
+
+# Nginx reload
+if command -v nginx &>/dev/null; then
+  ensure_sudoers "/etc/sudoers.d/hostctl-nginx" "Nginx reload" \
+    "$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx"
+fi
+
+# Feature management (apt-get, systemctl, vsftpd config paths, etc.)
+FEATURES_CONTENT="$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get install *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl enable *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl disable *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl reload *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/mkdir -p /etc/vsftpd/*
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/touch /etc/vsftpd/*
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chmod * /etc/vsftpd/*
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/mv /tmp/hostctl_feature_* *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chmod * /etc/pam.d/*
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chmod * /etc/vsftpd.conf"
+
+ensure_sudoers "/etc/sudoers.d/hostctl-features" "Feature management" "$FEATURES_CONTENT"
+
+# =============================================================================
+# 4. Systemd unit — ensure ReadWritePaths includes /run/sudo
+# =============================================================================
+head "4. Systemd service"
+
+REQUIRED_RW_PATHS="$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp /run/sudo"
+
+if [[ -f "$SERVICE_FILE" ]]; then
+  # Check if ReadWritePaths includes /run/sudo
+  if grep -q '^ReadWritePaths=' "$SERVICE_FILE"; then
+    current_rw="$(grep '^ReadWritePaths=' "$SERVICE_FILE" | head -1)"
+    if echo "$current_rw" | grep -q '/run/sudo'; then
+      ok "ReadWritePaths includes /run/sudo"
+    else
+      sed -i 's|^ReadWritePaths=.*|'"ReadWritePaths=$REQUIRED_RW_PATHS"'|' "$SERVICE_FILE"
+      fix "ReadWritePaths → added /run/sudo"
+      FIXED=$((FIXED + 1))
+    fi
+  else
+    # No ReadWritePaths — add it after ProtectSystem
+    if grep -q '^\[Service\]' "$SERVICE_FILE"; then
+      sed -i '/^ProtectSystem=/a ReadWritePaths='"$REQUIRED_RW_PATHS" "$SERVICE_FILE"
+      fix "ReadWritePaths → added to service unit"
+      FIXED=$((FIXED + 1))
+    else
+      err "Could not locate [Service] section in $SERVICE_FILE"
+    fi
+  fi
+
+  if grep -q '^ProtectSystem=strict' "$SERVICE_FILE"; then
+    ok "ProtectSystem=strict"
+  elif grep -q '^ProtectSystem=' "$SERVICE_FILE"; then
+    sed -i 's/^ProtectSystem=.*/ProtectSystem=strict/' "$SERVICE_FILE"
+    fix "ProtectSystem → set to strict"
+    FIXED=$((FIXED + 1))
+  fi
+
+  if grep -q '^PrivateTmp=true' "$SERVICE_FILE"; then
+    ok "PrivateTmp=true"
+  fi
+else
+  err "Service file not found at $SERVICE_FILE"
+  err "Run install.sh to create it, or create it manually."
+fi
+
+# =============================================================================
+# 5. Env file permissions
+# =============================================================================
+head "5. Environment file"
+
+if [[ -f "$ENV_FILE" ]]; then
+  cur_owner="$(stat -c '%U:%G' "$ENV_FILE" 2>/dev/null)"
+  cur_mode="$(stat -c '%a' "$ENV_FILE" 2>/dev/null)"
+  changed=false
+  if [[ "$cur_owner" != "root:$SERVICE_USER" ]]; then
+    chown "root:$SERVICE_USER" "$ENV_FILE"
+    changed=true
+  fi
+  if [[ "$cur_mode" != "640" ]]; then
+    chmod 640 "$ENV_FILE"
+    changed=true
+  fi
+  if [[ "$changed" == true ]]; then
+    fix "Env file permissions corrected"
+    FIXED=$((FIXED + 1))
+  fi
+  ok "Env file ($ENV_FILE)"
+else
+  err "Env file not found at $ENV_FILE"
+fi
+
+# =============================================================================
+# 6. Verify sudo works for the service user
+# =============================================================================
+head "6. Sudo verification"
+
+if sudo -u "$SERVICE_USER" sudo -n true 2>/dev/null; then
+  ok "Service user can run sudo without a password"
+else
+  err "Service user still cannot run passwordless sudo"
+  err "Check /etc/sudoers.d/hostctl-* files and ensure /run/sudo is writable"
+fi
+
+# =============================================================================
+# 7. Reload & restart
+# =============================================================================
+head "7. Apply changes"
+
+if [[ $FIXED -gt 0 ]]; then
+  systemctl daemon-reload
+  fix "systemd daemon reloaded"
+
+  if systemctl is-active --quiet "$APP_NAME"; then
+    systemctl restart "$APP_NAME"
+    fix "Service restarted"
+  fi
+  echo ""
+  echo -e "${GREEN}${BOLD}Repair complete — $FIXED issue(s) fixed.${NC}"
+else
+  echo ""
+  echo -e "${GREEN}${BOLD}Everything looks good — no changes needed.${NC}"
+fi

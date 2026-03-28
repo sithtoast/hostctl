@@ -106,7 +106,8 @@ defmodule Hostctl.FeatureSetup do
 
     broadcast(feature.key, :status_changed, "installing")
 
-    with :ok <- install_packages(feature),
+    with :ok <- check_sudo_access(feature),
+         :ok <- install_packages(feature),
          :ok <- enable_services(feature),
          :ok <- run_setup(feature) do
       Settings.save_feature_setting(feature.key, %{
@@ -161,6 +162,32 @@ defmodule Hostctl.FeatureSetup do
   # ---------------------------------------------------------------------------
   # Steps
   # ---------------------------------------------------------------------------
+
+  # Verify the service user can run sudo without a password prompt.
+  # This catches missing sudoers rules or ProtectSystem blocking /run/sudo.
+  defp check_sudo_access(%{key: key}) do
+    broadcast(key, :log, "Checking sudo access...")
+
+    case System.cmd("sudo", ["-n", "true"], stderr_to_stdout: true) do
+      {_, 0} ->
+        :ok
+
+      {output, _code} ->
+        message =
+          "sudo is not available without a password. " <>
+            "Please ensure the hostctl sudoers rules are installed " <>
+            "(re-run install.sh or manually create /etc/sudoers.d/hostctl-features) " <>
+            "and that /run/sudo is in the systemd ReadWritePaths."
+
+        broadcast(key, :log, message)
+
+        for line <- String.split(output, "\n", trim: true) do
+          broadcast(key, :log, line)
+        end
+
+        {:error, :sudo_not_configured}
+    end
+  end
 
   defp install_packages(%{packages: []}), do: :ok
 
