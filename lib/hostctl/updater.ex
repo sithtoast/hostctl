@@ -178,12 +178,36 @@ defmodule Hostctl.Updater do
 
   # Parses a semver string into a comparable list of integers.
   #
-  # Build metadata (+build.N) is ignored per semver. Pre-release suffixes
-  # (-alpha, -α, etc.) cause a -1 to be appended so that pre-releases sort
-  # below their stable counterpart, e.g. [0,0,1,-1] < [0,0,1,0].
+  # Build metadata (+build.N) is NOT ignored here — the build number is
+  # extracted and used as a tiebreaker so that e.g. v0.2.1-α+build.11 sorts
+  # above v0.2.1-α+build.10. Any non-numeric build suffix appends 0.
+  #
+  # Pre-release suffixes (-alpha, -α, etc.) cause a -1 sentinel to be
+  # inserted before the build number so that pre-releases of the same base
+  # sort below their stable counterpart:
+  #   [0,2,1,-1,11] < [0,2,1,0,0]  (pre-release < stable)
+  #   [0,2,1,-1,10] < [0,2,1,-1,11] (older build < newer build)
   defp parse_semver(version) do
-    # 1. Drop build metadata
-    [version | _] = String.split(version, "+")
+    # 1. Split off build metadata and extract trailing integer if present
+    {version, build_num} =
+      case String.split(version, "+", parts: 2) do
+        [base, meta] ->
+          num =
+            meta
+            |> String.split(".")
+            |> List.last()
+            |> then(fn s ->
+              case Integer.parse(s || "") do
+                {n, _} -> n
+                :error -> 0
+              end
+            end)
+
+          {base, num}
+
+        [base] ->
+          {base, 0}
+      end
 
     # 2. Split base from optional pre-release identifier
     {base, prerelease?} =
@@ -203,7 +227,8 @@ defmodule Hostctl.Updater do
         end
       end)
 
-    # 4. Append release-type sentinel: -1 for pre-releases, 0 for stable
-    if prerelease?, do: segments ++ [-1], else: segments ++ [0]
+    # 4. Append release-type sentinel then build number
+    release_sentinel = if prerelease?, do: -1, else: 0
+    segments ++ [release_sentinel, build_num]
   end
 end
