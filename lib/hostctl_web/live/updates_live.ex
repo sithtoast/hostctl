@@ -10,10 +10,33 @@ defmodule HostctlWeb.UpdatesLive do
       |> assign(:page_title, "Updates")
       |> assign(:check_status, :loading)
       |> assign(:update_info, nil)
+      |> assign(:update_state, :idle)
+      |> assign(:update_output, [])
+      |> assign(:update_port, nil)
+      |> assign(:update_possible?, Updater.update_possible?())
 
     if connected?(socket), do: send(self(), :check_updates)
 
     {:ok, socket}
+  end
+
+  @impl true
+  def handle_info({port, {:data, data}}, %{assigns: %{update_port: port}} = socket)
+      when is_port(port) do
+    new_lines = String.split(data, ~r/\r?\n/)
+    {:noreply, update(socket, :update_output, &(&1 ++ new_lines))}
+  end
+
+  @impl true
+  def handle_info({port, {:exit_status, 0}}, %{assigns: %{update_port: port}} = socket)
+      when is_port(port) do
+    {:noreply, socket |> assign(:update_state, :success) |> assign(:update_port, nil)}
+  end
+
+  @impl true
+  def handle_info({port, {:exit_status, code}}, %{assigns: %{update_port: port}} = socket)
+      when is_port(port) do
+    {:noreply, socket |> assign(:update_state, {:failed, code}) |> assign(:update_port, nil)}
   end
 
   @impl true
@@ -101,7 +124,7 @@ defmodule HostctlWeb.UpdatesLive do
                       Released {format_date(@update_info.release.published_at)}
                     </p>
                   <% end %>
-                  <div class="mt-4">
+                  <div class="mt-4 flex flex-wrap items-center gap-3">
                     <a
                       href={@update_info.release.html_url}
                       target="_blank"
@@ -111,6 +134,23 @@ defmodule HostctlWeb.UpdatesLive do
                       View on GitHub
                       <.icon name="hero-arrow-top-right-on-square" class="w-3.5 h-3.5" />
                     </a>
+                    <%= if @update_possible? and @current_scope.user.role == "admin" and @update_state == :idle do %>
+                      <button
+                        id="run-update-btn"
+                        phx-click="run_update"
+                        phx-confirm="This will fetch the latest code, rebuild the release, and restart the service. The page will reconnect automatically. Continue?"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold text-white bg-amber-600 hover:bg-amber-700 active:bg-amber-800 rounded-lg transition-colors"
+                      >
+                        <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Update now
+                      </button>
+                    <% end %>
+                    <%= if @update_state == :running do %>
+                      <span class="inline-flex items-center gap-1.5 text-sm text-amber-700 dark:text-amber-400">
+                        <div class="animate-spin rounded-full h-3.5 w-3.5 border-2 border-amber-500 border-t-transparent">
+                        </div>
+                        Updating…
+                      </span>
+                    <% end %>
                   </div>
                 </div>
               </div>
@@ -218,6 +258,44 @@ defmodule HostctlWeb.UpdatesLive do
             </div>
         <% end %>
 
+        <%!-- Update terminal output --%>
+        <%= if @update_state != :idle do %>
+          <div class="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
+            <div class="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800">
+              <%= cond do %>
+                <% @update_state == :running -> %>
+                  <div class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></div>
+                  <span class="text-xs font-medium text-gray-300">Running update…</span>
+                <% @update_state == :success -> %>
+                  <div class="w-2 h-2 rounded-full bg-emerald-400"></div>
+                  <span class="text-xs font-medium text-emerald-400">
+                    Update complete — service is restarting, page will reconnect shortly
+                  </span>
+                <% true -> %>
+                  <div class="w-2 h-2 rounded-full bg-red-400"></div>
+                  <span class="text-xs font-medium text-red-400">Update failed</span>
+              <% end %>
+            </div>
+            <div
+              id="update-output-scroll"
+              class="p-4 max-h-96 overflow-y-auto"
+              phx-hook=".ScrollUpdateOutput"
+            >
+              <pre
+                id="update-output-pre"
+                class="text-xs text-gray-300 font-mono leading-5 whitespace-pre-wrap"
+              >{Enum.join(@update_output, "\n")}</pre>
+            </div>
+          </div>
+          <script :type={Phoenix.LiveView.ColocatedHook} name=".ScrollUpdateOutput">
+            export default {
+              updated() {
+                this.el.scrollTop = this.el.scrollHeight;
+              }
+            }
+          </script>
+        <% end %>
+
         <%!-- Release notes --%>
         <%= if @check_status == :ok and @update_info.release.body not in [nil, ""] do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
@@ -269,11 +347,30 @@ defmodule HostctlWeb.UpdatesLive do
   end
 
   @impl true
+  def handle_event("run_update", _params, socket) do
+    port =
+      Port.open(
+        {:spawn_executable, "/usr/bin/sudo"},
+        [:binary, :exit_status, args: ["-n", Updater.update_script_path()]]
+      )
+
+    socket =
+      socket
+      |> assign(:update_state, :running)
+      |> assign(:update_output, [])
+      |> assign(:update_port, port)
+
+    {:noreply, socket}
+  end
+
+  @impl true
   def handle_event("recheck", _params, socket) do
     socket =
       socket
       |> assign(:check_status, :loading)
       |> assign(:update_info, nil)
+      |> assign(:update_state, :idle)
+      |> assign(:update_output, [])
 
     send(self(), :check_updates)
 
@@ -319,17 +416,8 @@ defmodule HostctlWeb.UpdatesLive do
     comment = fn text -> ~s(<span class="text-gray-500">#{text}</span>) end
 
     [
-      comment.("# Pull latest changes"),
-      "git pull origin main",
-      "",
-      comment.("# Install new dependencies"),
-      "mix deps.get --only prod",
-      "",
-      comment.("# Run database migrations"),
-      "MIX_ENV=prod mix ecto.migrate",
-      "",
-      comment.("# Restart the application"),
-      "MIX_ENV=prod mix phx.server"
+      comment.("# Run as root on your server"),
+      "sudo /opt/hostctl/bin/update"
     ]
     |> Enum.join("\n")
     |> Phoenix.HTML.raw()

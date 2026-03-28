@@ -398,6 +398,17 @@ fi
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
 success "Release installed"
 
+# 3d-1. Update script sudoers --------------------------------------------------
+step "Configuring one-click update permissions"
+
+chmod +x "$APP_DIR/bin/update" 2>/dev/null || true
+SUDOERS_FILE="/etc/sudoers.d/hostctl-update"
+echo "$SERVICE_USER ALL=(root) NOPASSWD: $APP_DIR/bin/update" > "$SUDOERS_FILE"
+chmod 440 "$SUDOERS_FILE"
+visudo -cf "$SUDOERS_FILE" >/dev/null \
+  || { warn "sudoers syntax check failed — removing $SUDOERS_FILE"; rm -f "$SUDOERS_FILE"; }
+success "Update script can be triggered from the web UI by admins"
+
 # 3e. Environment file ---------------------------------------------------------
 step "Writing environment configuration"
 

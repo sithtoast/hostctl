@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+#
+# Hostctl in-place updater.
+#
+# This script must be run as root. During normal operation it is invoked via
+# "sudo -n /opt/hostctl/bin/update" by the hostctl service user, made possible
+# by the sudoers rule installed at /etc/sudoers.d/hostctl-update.
+#
+# Environment variable overrides (for non-standard deployments):
+#   HOSTCTL_SOURCE_DIR    source tree root  (default: /usr/local/src/hostctl)
+#   HOSTCTL_APP_DIR       release directory (default: /opt/hostctl)
+#   HOSTCTL_BRANCH        git branch to pull (default: main)
+
+set -euo pipefail
+
+APP_NAME="hostctl"
+SOURCE_DIR="${HOSTCTL_SOURCE_DIR:-/usr/local/src/hostctl}"
+APP_DIR="${HOSTCTL_APP_DIR:-/opt/hostctl}"
+SERVICE_USER="${HOSTCTL_SERVICE_USER:-hostctl}"
+BRANCH="${HOSTCTL_BRANCH:-main}"
+ENV_FILE="/etc/$APP_NAME/env"
+
+step() { echo ""; echo "==> $*"; }
+info() { echo "    $*"; }
+ok()   { echo "    [done]"; }
+
+# ── 1/5  Fetch ──────────────────────────────────────────────────────────────
+step "1/5  Fetching latest source"
+
+[[ -d "$SOURCE_DIR/.git" ]] \
+  || { echo "error: source directory not found: $SOURCE_DIR"; exit 1; }
+
+git -C "$SOURCE_DIR" fetch --quiet origin
+git -C "$SOURCE_DIR" reset --hard "origin/$BRANCH" --quiet
+info "branch: $BRANCH @ $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
+ok
+
+# ── 2/5  Build ──────────────────────────────────────────────────────────────
+step "2/5  Building release (this may take a few minutes)"
+
+cd "$SOURCE_DIR"
+export HOME=/root
+export MIX_ENV=prod
+
+mix deps.get --only prod
+mix assets.deploy
+mix compile
+mix release --overwrite
+ok
+
+# ── 3/5  Install ────────────────────────────────────────────────────────────
+step "3/5  Installing release"
+
+cp -r "$SOURCE_DIR/_build/prod/rel/$APP_NAME/." "$APP_DIR/"
+chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
+info "installed to $APP_DIR"
+ok
+
+# ── 4/5  Migrate ────────────────────────────────────────────────────────────
+step "4/5  Running database migrations"
+
+ENV_VARS="$(grep -v '^#' "$ENV_FILE" | grep -v '^[[:space:]]*$' | xargs)"
+sudo -u "$SERVICE_USER" env $ENV_VARS "$APP_DIR/bin/migrate"
+ok
+
+# ── 5/5  Restart ────────────────────────────────────────────────────────────
+step "5/5  Restarting service"
+info "The panel will reconnect automatically after restart..."
+systemctl restart "$APP_NAME"
+ok
+
+echo ""
+echo "=== Update complete ==="

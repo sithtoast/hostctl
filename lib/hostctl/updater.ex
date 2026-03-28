@@ -117,6 +117,25 @@ defmodule Hostctl.Updater do
     end
   end
 
+  @doc """
+  Returns the path to the update script.
+
+  Configurable via the `HOSTCTL_UPDATE_SCRIPT` environment variable.
+  Defaults to `/opt/hostctl/bin/update`.
+  """
+  def update_script_path do
+    System.get_env("HOSTCTL_UPDATE_SCRIPT", "/opt/hostctl/bin/update")
+  end
+
+  @doc """
+  Returns `true` when the update script exists on disk.
+
+  Used to decide whether to show the "Update now" button in the UI.
+  """
+  def update_possible? do
+    File.exists?(update_script_path())
+  end
+
   defp strip_v_prefix("v" <> version), do: version
   defp strip_v_prefix(version), do: version
 
