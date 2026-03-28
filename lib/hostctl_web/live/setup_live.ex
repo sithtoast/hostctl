@@ -45,6 +45,20 @@ defmodule HostctlWeb.SetupLive do
               spellcheck="false"
               required
             />
+            <.input
+              field={@form[:password]}
+              type="password"
+              label="Password"
+              autocomplete="new-password"
+              required
+            />
+            <.input
+              field={@form[:password_confirmation]}
+              type="password"
+              label="Confirm password"
+              autocomplete="new-password"
+              required
+            />
             <.button phx-disable-with="Creating account…" class="w-full">
               Create administrator account
             </.button>
@@ -89,7 +103,7 @@ defmodule HostctlWeb.SetupLive do
          |> push_navigate(to: ~p"/users/log-in")}
 
       true ->
-        changeset = Accounts.change_user_email(%User{}, %{}, validate_unique: false)
+        changeset = User.setup_changeset(%User{}, %{}, validate_unique: false)
 
         {:ok,
          socket

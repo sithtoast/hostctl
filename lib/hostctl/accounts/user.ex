@@ -21,10 +21,11 @@ defmodule Hostctl.Accounts.User do
   """
   def setup_changeset(user, attrs, opts \\ []) do
     user
-    |> cast(attrs, [:name, :email])
+    |> cast(attrs, [:name, :email, :password])
     |> validate_required([:name])
     |> validate_length(:name, min: 2, max: 100)
     |> validate_email(opts)
+    |> validate_password(opts)
     |> put_change(:role, "admin")
     |> put_change(:confirmed_at, DateTime.utc_now(:second))
   end
