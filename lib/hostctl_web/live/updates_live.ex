@@ -351,7 +351,7 @@ defmodule HostctlWeb.UpdatesLive do
     port =
       Port.open(
         {:spawn_executable, "/usr/bin/sudo"},
-        [:binary, :exit_status, args: ["-n", Updater.update_script_path()]]
+        [:binary, :exit_status, :stderr_to_stdout, args: ["-n", Updater.update_script_path()]]
       )
 
     socket =

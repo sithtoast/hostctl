@@ -60,32 +60,49 @@ step "3/3  Scheduling install, migrate & restart"
 # script file is reachable by the new unit.
 
 HANDOFF_SCRIPT="/run/hostctl-update-install.sh"
+HANDOFF_LOG="/var/log/hostctl/update-install.log"
 
 # Write the handoff script without a heredoc to avoid delimiter issues
 printf '%s\n' '#!/bin/bash' \
   'set -euo pipefail' \
+  'exec >> "$HANDOFF_LOG" 2>&1' \
+  'echo "[$(date -u +%FT%TZ)] hostctl update-install handoff started"' \
   "APP_NAME=${APP_NAME}" \
   "SOURCE_DIR=${SOURCE_DIR}" \
   "APP_DIR=${APP_DIR}" \
   "SERVICE_USER=${SERVICE_USER}" \
   "ENV_FILE=${ENV_FILE}" \
-  'sleep 2' \
+  "HANDOFF_LOG=${HANDOFF_LOG}" \
+  'sleep 3' \
   'systemctl stop "$APP_NAME" || true' \
   'cp -r "$SOURCE_DIR/_build/prod/rel/$APP_NAME/." "$APP_DIR/"' \
   'chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"' \
   'ENV_VARS=$(grep -v "^#" "$ENV_FILE" | grep -v "^[[:space:]]*$" | xargs)' \
   'sudo -u "$SERVICE_USER" env $ENV_VARS "$APP_DIR/bin/migrate"' \
   'systemctl start "$APP_NAME"' \
+  'echo "[$(date -u +%FT%TZ)] hostctl update-install handoff complete"' \
   'rm -f "$0"' \
   > "$HANDOFF_SCRIPT"
 chmod 700 "$HANDOFF_SCRIPT"
 
-systemd-run --no-block --unit=hostctl-update-install \
+# Clear any stale failed unit from a previous update attempt; systemd-run
+# will refuse to create a new unit if one of the same name already exists.
+systemctl reset-failed hostctl-update-install 2>/dev/null || true
+
+# --slice=system.slice  — ensures the unit is outside the hostctl service
+#                         cgroup so stopping hostctl doesn't kill this unit.
+# --collect             — auto-cleans the unit after it finishes so the name
+#                         is free for the next update without reset-failed.
+systemd-run --no-block \
+  --unit=hostctl-update-install \
+  --slice=system.slice \
+  --collect \
   --description="Hostctl: install release, migrate, restart" \
   /bin/bash "$HANDOFF_SCRIPT"
 
 info "Service is stopping to swap the release — migrations will run, then it restarts."
 info "Your browser will reconnect automatically in ~30 seconds."
+info "Handoff log: $HANDOFF_LOG"
 ok
 
 echo "=== Update queued — service will restart momentarily ==="
