@@ -73,10 +73,13 @@ defmodule HostctlWeb.Router do
       on_mount: [{HostctlWeb.UserAuth, :require_admin_or_reseller}] do
       live "/users/new", UserLive.Registration, :new
 
-      # Panel users management
+      # Panel users management (admin + reseller)
       live "/panel/users", PanelLive.Users, :index
+    end
 
-      # Panel settings (admin/reseller only)
+    live_session :require_admin,
+      on_mount: [{HostctlWeb.UserAuth, :require_admin}] do
+      # Panel settings (admin only)
       live "/panel/settings", PanelLive.Settings, :index
     end
 

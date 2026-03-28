@@ -80,13 +80,13 @@ defmodule HostctlWeb.Layouts do
             href={~p"/updates"}
             active={@active_tab == :updates}
           />
-          <.nav_item
-            icon="hero-adjustments-horizontal"
-            label="Panel Settings"
-            href={~p"/panel/settings"}
-            active={@active_tab == :panel_settings}
-          />
-          <%= if @current_scope && @current_scope.user && @current_scope.user.role in ["admin", "reseller"] do %>
+          <%= if @current_scope && @current_scope.user && @current_scope.user.role == "admin" do %>
+            <.nav_item
+              icon="hero-adjustments-horizontal"
+              label="Panel Settings"
+              href={~p"/panel/settings"}
+              active={@active_tab == :panel_settings}
+            />
             <.nav_item
               icon="hero-users"
               label="Panel Users"
