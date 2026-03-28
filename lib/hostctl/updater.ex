@@ -5,6 +5,10 @@ defmodule Hostctl.Updater do
   Configure the GitHub repository in your config:
 
       config :hostctl, :github_repo, "your-org/hostctl"
+
+  To also include pre-releases:
+
+      config :hostctl, :github_prereleases, true
   """
 
   @github_api "https://api.github.com"
@@ -35,7 +39,9 @@ defmodule Hostctl.Updater do
   end
 
   defp do_check(repo) do
-    case fetch_latest_release(repo) do
+    prereleases? = Application.get_env(:hostctl, :github_prereleases, false)
+
+    case fetch_latest_release(repo, prereleases?) do
       {:ok, release} ->
         current = current_version()
         latest = strip_v_prefix(release["tag_name"] || "")
@@ -50,7 +56,8 @@ defmodule Hostctl.Updater do
              name: release["name"] || release["tag_name"],
              body: release["body"],
              html_url: release["html_url"],
-             published_at: release["published_at"]
+             published_at: release["published_at"],
+             prerelease: release["prerelease"] == true
            }
          }}
 
@@ -61,9 +68,32 @@ defmodule Hostctl.Updater do
 
   # --- Private helpers ---
 
-  defp fetch_latest_release(repo) do
+  # When prereleases are included, use the list endpoint and take the first entry.
+  # The list is returned newest-first so index 0 is always the most recent release.
+  defp fetch_latest_release(repo, _prereleases? = false) do
     url = "#{@github_api}/repos/#{repo}/releases/latest"
+    get_release(url)
+  end
 
+  defp fetch_latest_release(repo, _prereleases? = true) do
+    url = "#{@github_api}/repos/#{repo}/releases?per_page=1"
+
+    case Req.get(url,
+           headers: [
+             {"accept", "application/vnd.github+json"},
+             {"x-github-api-version", "2022-11-28"}
+           ]
+         ) do
+      {:ok, %{status: 200, body: [release | _]}} -> {:ok, release}
+      {:ok, %{status: 200, body: []}} -> {:error, :no_releases}
+      {:ok, %{status: 404}} -> {:error, :no_releases}
+      {:ok, %{status: 403}} -> {:error, :rate_limited}
+      {:ok, %{status: status}} -> {:error, {:unexpected_status, status}}
+      {:error, exception} -> {:error, exception}
+    end
+  end
+
+  defp get_release(url) do
     case Req.get(url,
            headers: [
              {"accept", "application/vnd.github+json"},

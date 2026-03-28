@@ -78,6 +78,11 @@ defmodule HostctlWeb.UpdatesLive do
                 <div class="flex-1 min-w-0">
                   <p class="text-base font-semibold text-amber-900 dark:text-amber-200">
                     Update available — v{@update_info.release.name}
+                    <%= if @update_info.release.prerelease do %>
+                      <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-700">
+                        pre-release
+                      </span>
+                    <% end %>
                   </p>
                   <p class="mt-1 text-sm text-amber-700 dark:text-amber-400">
                     A new version of hostctl has been published.
@@ -123,6 +128,11 @@ defmodule HostctlWeb.UpdatesLive do
                 <div>
                   <p class="text-base font-semibold text-emerald-900 dark:text-emerald-200">
                     hostctl is up to date
+                    <%= if @update_info.release.prerelease do %>
+                      <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-700">
+                        pre-release
+                      </span>
+                    <% end %>
                   </p>
                   <p class="mt-1 text-sm text-emerald-700 dark:text-emerald-400">
                     You are running the latest version.
@@ -161,6 +171,28 @@ defmodule HostctlWeb.UpdatesLive do
                       class="text-sm text-gray-100 font-mono"
                     >{config_snippet_html()}</pre>
                   </div>
+                </div>
+              </div>
+            </div>
+          <% @check_status == {:error, :no_releases} -> %>
+            <%!-- No releases yet --%>
+            <div class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6">
+              <div class="flex items-start gap-4">
+                <div class="flex items-center justify-center w-10 h-10 rounded-full bg-gray-100 dark:bg-gray-800 shrink-0 mt-0.5">
+                  <.icon name="hero-tag" class="w-5 h-5 text-gray-400 dark:text-gray-500" />
+                </div>
+                <div>
+                  <p class="text-base font-semibold text-gray-900 dark:text-gray-200">
+                    No releases published yet
+                  </p>
+                  <p class="mt-1 text-sm text-gray-600 dark:text-gray-400">
+                    The repository is configured correctly. Update checks will work once
+                    you publish a release on GitHub.
+                  </p>
+                  <span class="mt-3 inline-flex items-center gap-1.5 text-xs font-mono text-gray-500 dark:text-gray-400">
+                    <.icon name="hero-code-bracket" class="w-3.5 h-3.5" />
+                    {Application.get_env(:hostctl, :github_repo)}
+                  </span>
                 </div>
               </div>
             </div>

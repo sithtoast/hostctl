@@ -43,6 +43,10 @@ if repo = System.get_env("GITHUB_REPO") do
   config :hostctl, :github_repo, repo
 end
 
+if System.get_env("GITHUB_PRERELEASES") in ~w(true 1) do
+  config :hostctl, :github_prereleases, true
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
