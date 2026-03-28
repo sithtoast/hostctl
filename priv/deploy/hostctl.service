@@ -21,6 +21,8 @@ SyslogIdentifier=hostctl
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/opt/hostctl /var/log/hostctl /usr/local/src/hostctl
+RuntimeDirectory=hostctl
+RuntimeDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target

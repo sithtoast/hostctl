@@ -69,7 +69,7 @@ step "3/3  Scheduling install, migrate & restart"
 # /run is a tmpfs visible to all processes (unlike PrivateTmp=/tmp) so the
 # script file is reachable by the new unit.
 
-HANDOFF_SCRIPT="/run/hostctl-update-install.sh"
+HANDOFF_SCRIPT="/run/hostctl/update-install.sh"
 HANDOFF_LOG="/var/log/hostctl/update-install.log"
 
 mkdir -p "$(dirname "$HANDOFF_LOG")"
