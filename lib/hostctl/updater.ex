@@ -21,12 +21,19 @@ defmodule Hostctl.Updater do
   application version (which only carries the bare semver from mix.exs).
   """
   def current_version do
-    version_file = Application.app_dir(:hostctl, "priv/VERSION")
+    # /etc/hostctl/version is written by the update/install script at deploy
+    # time and is always up to date with the full tag (e.g. v0.1.0-α+build.3).
+    # Fall back to the version packaged into the release priv dir, then to
+    # the bare semver from mix.exs (dev environment).
+    fixed_path = "/etc/hostctl/version"
+    priv_path = Application.app_dir(:hostctl, "priv/VERSION")
 
-    case File.read(version_file) do
-      {:ok, contents} -> contents |> String.trim() |> strip_v_prefix()
-      {:error, _} -> Application.spec(:hostctl, :vsn) |> to_string()
-    end
+    Enum.find_value([fixed_path, priv_path], fn path ->
+      case File.read(path) do
+        {:ok, contents} -> contents |> String.trim() |> strip_v_prefix()
+        {:error, _} -> nil
+      end
+    end) || (Application.spec(:hostctl, :vsn) |> to_string())
   end
 
   @doc """

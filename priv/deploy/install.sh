@@ -444,6 +444,15 @@ step "Running database migrations"
 sudo -u "$SERVICE_USER" env $(grep -v '^#' "$ENV_FILE" | xargs) "$APP_DIR/bin/migrate"
 success "Migrations complete"
 
+# 3f-1. Write version file -----------------------------------------------------
+VERSION_TAG=$(git -C "$SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null \
+  || git -C "$SOURCE_DIR" describe --tags 2>/dev/null \
+  || echo "")
+if [[ -n "$VERSION_TAG" ]]; then
+  echo "$VERSION_TAG" > "/etc/$APP_NAME/version"
+  success "Version recorded: $VERSION_TAG"
+fi
+
 # 3g. Systemd service ----------------------------------------------------------
 step "Configuring systemd service"
 
