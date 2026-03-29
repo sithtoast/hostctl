@@ -90,6 +90,16 @@ defmodule Hostctl.FeatureSetup do
       ],
       services: [],
       setup_fn: :setup_snappymail
+    },
+    %{
+      key: "mysql",
+      label: "MySQL Server",
+      description:
+        "MySQL database server for hosted applications like WordPress. Enables per-domain MySQL database and user management.",
+      icon: "hero-circle-stack",
+      packages: ["mysql-server", "mysql-client"],
+      services: ["mysql"],
+      setup_fn: :setup_mysql
     }
   ]
 
@@ -274,6 +284,31 @@ defmodule Hostctl.FeatureSetup do
     case escaped_cmd(
            "sh",
            ["-c", "echo '#{Base.encode64(selections)}' | base64 -d | debconf-set-selections"],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        :ok
+
+      {output, code} ->
+        broadcast(feature.key, :log, "debconf pre-seed failed (exit #{code}): #{output}")
+        :ok
+    end
+  end
+
+  defp preseed_debconf(%{key: "mysql"} = feature) do
+    password = mysql_root_password()
+    broadcast(feature.key, :log, "Pre-seeding debconf for MySQL root password...")
+
+    selections = """
+    mysql-server mysql-server/root_password password #{password}
+    mysql-server mysql-server/root_password_again password #{password}
+    """
+
+    encoded = Base.encode64(selections)
+
+    case escaped_cmd(
+           "sh",
+           ["-c", "echo '#{encoded}' | base64 -d | debconf-set-selections"],
            stderr_to_stdout: true
          ) do
       {_, 0} ->
@@ -541,6 +576,85 @@ defmodule Hostctl.FeatureSetup do
       )
 
       :ok
+    end
+  end
+
+  @doc false
+  def setup_mysql(key) do
+    broadcast(key, :log, "Securing MySQL installation...")
+
+    password = mysql_root_password()
+
+    with :ok <- secure_mysql(key, password),
+         :ok <- update_mysql_env(key, password) do
+      broadcast(key, :log, "MySQL configuration complete.")
+      broadcast(key, :log, "Root password has been written to the hostctl env file.")
+      :ok
+    end
+  end
+
+  defp secure_mysql(key, password) do
+    broadcast(key, :log, "Setting MySQL root password and removing defaults...")
+
+    sql = """
+    ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '#{password}';
+    DELETE FROM mysql.user WHERE User='';
+    DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+    DROP DATABASE IF EXISTS test;
+    DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+    FLUSH PRIVILEGES;
+    """
+
+    encoded = Base.encode64(sql)
+
+    case escaped_cmd(
+           "sh",
+           ["-c", "echo '#{encoded}' | base64 -d | mysql -u root"],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        :ok
+
+      {output, code} ->
+        broadcast(key, :log, "MySQL secure setup failed (exit #{code}): #{output}")
+        {:error, {:mysql_secure_failed, code}}
+    end
+  end
+
+  defp update_mysql_env(key, password) do
+    broadcast(key, :log, "Writing MYSQL_ROOT_URL to env file...")
+
+    env_file = "/etc/hostctl/env"
+    url = "mysql://root:#{password}@localhost:3306/mysql"
+
+    # Remove any existing MYSQL_ROOT_URL line, then append the new one
+    case escaped_cmd(
+           "sh",
+           [
+             "-c",
+             "grep -v '^MYSQL_ROOT_URL=' '#{env_file}' > '#{env_file}.tmp' 2>/dev/null; " <>
+               "echo 'MYSQL_ROOT_URL=#{url}' >> '#{env_file}.tmp'; " <>
+               "mv '#{env_file}.tmp' '#{env_file}'"
+           ],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        broadcast(key, :log, "Restart hostctl to pick up the new MySQL configuration.")
+        :ok
+
+      {output, code} ->
+        broadcast(key, :log, "Failed to update env file (exit #{code}): #{output}")
+        {:error, {:env_update_failed, code}}
+    end
+  end
+
+  defp mysql_root_password do
+    # Re-use existing password from config, or generate a new one
+    db_config = Application.get_env(:hostctl, :database_server, [])
+
+    case Keyword.get(db_config, :password) do
+      pw when is_binary(pw) and pw != "" -> pw
+      _ -> :crypto.strong_rand_bytes(24) |> Base.url_encode64() |> binary_part(0, 32)
     end
   end
 
