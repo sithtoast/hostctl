@@ -179,7 +179,18 @@ defmodule Hostctl.DatabaseServer do
   defp do_create_user(username, password, db_name) do
     with_connection(fn conn ->
       with :ok <-
+             query(conn, "CREATE USER IF NOT EXISTS ?@'localhost' IDENTIFIED BY ?", [
+               username,
+               password
+             ]),
+           :ok <-
              query(conn, "CREATE USER IF NOT EXISTS ?@'%' IDENTIFIED BY ?", [username, password]),
+           :ok <-
+             query(
+               conn,
+               "GRANT ALL PRIVILEGES ON `#{db_name}`.* TO ?@'localhost'",
+               [username]
+             ),
            :ok <- query(conn, "GRANT ALL PRIVILEGES ON `#{db_name}`.* TO ?@'%'", [username]),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
@@ -189,7 +200,8 @@ defmodule Hostctl.DatabaseServer do
 
   defp do_drop_user(username) do
     with_connection(fn conn ->
-      with :ok <- query(conn, "DROP USER IF EXISTS ?@'%'", [username]),
+      with :ok <- query(conn, "DROP USER IF EXISTS ?@'localhost'", [username]),
+           :ok <- query(conn, "DROP USER IF EXISTS ?@'%'", [username]),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
       end
@@ -198,7 +210,8 @@ defmodule Hostctl.DatabaseServer do
 
   defp do_update_password(username, password) do
     with_connection(fn conn ->
-      with :ok <- query(conn, "ALTER USER ?@'%' IDENTIFIED BY ?", [username, password]),
+      with :ok <- query(conn, "ALTER USER ?@'localhost' IDENTIFIED BY ?", [username, password]),
+           :ok <- query(conn, "ALTER USER ?@'%' IDENTIFIED BY ?", [username, password]),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
       end
