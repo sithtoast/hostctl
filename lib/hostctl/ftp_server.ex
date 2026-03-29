@@ -101,6 +101,7 @@ defmodule Hostctl.FtpServer do
 
   defp do_provision(%FtpAccount{} = account, raw_password) do
     with :ok <- write_user_conf(account),
+         :ok <- ensure_home_dir_writable(account),
          :ok <- upsert_user_entry(account.username, raw_password),
          :ok <- rebuild_user_db(),
          :ok <- reload() do
@@ -114,6 +115,27 @@ defmodule Hostctl.FtpServer do
          :ok <- rebuild_user_db(),
          :ok <- reload() do
       :ok
+    end
+  end
+
+  # Ensures the account's home directory exists and is owned by www-data.
+  # vsftpd maps all virtual users to guest_username=www-data, so the home
+  # directory must be writable by www-data for uploads to succeed.
+  defp ensure_home_dir_writable(%FtpAccount{home_dir: nil}), do: :ok
+
+  defp ensure_home_dir_writable(%FtpAccount{home_dir: home_dir}) do
+    with :ok <- escaped_mkdir_p(home_dir) do
+      case escaped_cmd("chown", ["www-data:www-data", home_dir]) do
+        {_, 0} ->
+          :ok
+
+        {output, code} ->
+          Logger.warning(
+            "[FtpServer] Could not chown #{home_dir} to www-data (exit #{code}): #{output}"
+          )
+
+          :ok
+      end
     end
   end
 
