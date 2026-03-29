@@ -408,6 +408,7 @@ defmodule Hostctl.FeatureSetup do
     """
 
     with :ok <- setup_apache_port(key),
+         :ok <- uncomment_roundcube_alias(key),
          :ok <- run_cmd(key, "mkdir", ["-p", "/var/lib/roundcube"]),
          :ok <- run_cmd(key, "chown", ["www-data:www-data", "/var/lib/roundcube"]),
          :ok <- write_file_via_sudo(key, "/etc/roundcube/config.inc.php", config),
@@ -520,7 +521,7 @@ defmodule Hostctl.FeatureSetup do
            [
              "-i",
              "s/<VirtualHost \\*:80>/<VirtualHost *:8080>/",
-             "/etc/apache2/sites-enabled/000-default.conf"
+             "/etc/apache2/sites-available/000-default.conf"
            ],
            stderr_to_stdout: true
          ) do
@@ -531,6 +532,23 @@ defmodule Hostctl.FeatureSetup do
         # File may not exist on minimal installs — not fatal
         broadcast(key, :log, "No default VirtualHost to update (OK)")
         :ok
+    end
+  end
+
+  # Debian's roundcube.conf ships with the Alias line commented out by default.
+  # Uncomment it so /roundcube actually maps to the Roundcube public_html dir.
+  defp uncomment_roundcube_alias(key) do
+    broadcast(key, :log, "Ensuring Roundcube Alias is enabled...")
+
+    conf = "/etc/apache2/conf-available/roundcube.conf"
+
+    case escaped_cmd(
+           "sed",
+           ["-i", ~s(s|^#\\s*Alias /roundcube|Alias /roundcube|), conf],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} -> :ok
+      {_, _} -> :ok
     end
   end
 

@@ -276,7 +276,7 @@ if [[ -x /usr/sbin/apache2 ]] || dpkg -l apache2 &>/dev/null 2>&1; then
   fi
 
   # Update default VirtualHost to match port 8080
-  DEFAULT_SITE="/etc/apache2/sites-enabled/000-default.conf"
+  DEFAULT_SITE="/etc/apache2/sites-available/000-default.conf"
   if [[ -f "$DEFAULT_SITE" ]] && grep -q '<VirtualHost \*:80>' "$DEFAULT_SITE"; then
     sed -i 's/<VirtualHost \*:80>/<VirtualHost *:8080>/' "$DEFAULT_SITE"
     fix "Default VirtualHost → *:8080"
@@ -296,8 +296,19 @@ if [[ -x /usr/sbin/apache2 ]] || dpkg -l apache2 &>/dev/null 2>&1; then
     ok "ServerName configured"
   fi
 
-  # Ensure Roundcube apache conf is enabled
+  # Ensure Roundcube apache conf has the Alias uncommented
   if dpkg -l roundcube-core &>/dev/null 2>&1; then
+    RC_APACHE_CONF="/etc/apache2/conf-available/roundcube.conf"
+    if [[ -f "$RC_APACHE_CONF" ]]; then
+      if grep -q '#.*Alias /roundcube' "$RC_APACHE_CONF"; then
+        sed -i 's|#\s*Alias /roundcube /var/lib/roundcube/public_html|Alias /roundcube /var/lib/roundcube/public_html|' "$RC_APACHE_CONF"
+        fix "Uncommented Roundcube Alias directive"
+        FIXED=$((FIXED + 1))
+      else
+        ok "Roundcube Alias directive"
+      fi
+    fi
+
     if [[ ! -f /etc/apache2/conf-enabled/roundcube.conf ]]; then
       a2enconf -q roundcube 2>/dev/null || true
       fix "Roundcube Apache conf enabled"
