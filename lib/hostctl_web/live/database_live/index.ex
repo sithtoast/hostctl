@@ -219,47 +219,55 @@ defmodule HostctlWeb.DatabaseLive.Index do
               id="database-form"
               phx-change="validate_db"
               phx-submit="save_db"
-              class="grid grid-cols-1 gap-4 sm:grid-cols-4"
+              class="space-y-4"
             >
-              <div class="sm:col-span-2">
+              <%!-- Base errors (e.g. MySQL connection failure) --%>
+              <%= if @db_form.errors[:base] != [] do %>
+                <div class="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-3 text-sm text-red-700 dark:text-red-400">
+                  {elem(hd(@db_form.errors[:base]), 0)}
+                </div>
+              <% end %>
+              <div class="grid grid-cols-1 gap-4 sm:grid-cols-4">
+                <div class="sm:col-span-2">
+                  <.input
+                    field={@db_form[:name]}
+                    type="text"
+                    label="Database Name"
+                    placeholder="myapp_production"
+                  />
+                </div>
                 <.input
-                  field={@db_form[:name]}
-                  type="text"
-                  label="Database Name"
-                  placeholder="myapp_production"
+                  field={@db_form[:db_type]}
+                  type="select"
+                  label="Type"
+                  options={[{"PostgreSQL", "postgresql"}, {"MySQL", "mysql"}]}
                 />
-              </div>
-              <.input
-                field={@db_form[:db_type]}
-                type="select"
-                label="Type"
-                options={[{"PostgreSQL", "postgresql"}, {"MySQL", "mysql"}]}
-              />
-              <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Domain
-                </label>
-                <select
-                  name="domain_id"
-                  phx-change="select_domain"
-                  class="block w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                >
-                  <option
-                    :for={domain <- @domains}
-                    value={domain.id}
-                    selected={@selected_domain_id == domain.id}
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    Domain
+                  </label>
+                  <select
+                    name="domain_id"
+                    phx-change="select_domain"
+                    class="block w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                   >
-                    {domain.name}
-                  </option>
-                </select>
-              </div>
-              <div class="sm:col-span-4 flex justify-end">
-                <button
-                  type="submit"
-                  class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
-                >
-                  Create Database
-                </button>
+                    <option
+                      :for={domain <- @domains}
+                      value={domain.id}
+                      selected={@selected_domain_id == domain.id}
+                    >
+                      {domain.name}
+                    </option>
+                  </select>
+                </div>
+                <div class="sm:col-span-4 flex justify-end">
+                  <button
+                    type="submit"
+                    class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    Create Database
+                  </button>
+                </div>
               </div>
             </.form>
           </div>
@@ -489,27 +497,35 @@ defmodule HostctlWeb.DatabaseLive.Index do
                   id="db-user-form"
                   phx-change="validate_db_user"
                   phx-submit="save_db_user"
-                  class="grid grid-cols-1 gap-4 sm:grid-cols-3"
+                  class="space-y-3"
                 >
-                  <.input
-                    field={@db_user_form[:username]}
-                    type="text"
-                    label="Username"
-                    placeholder="wp_user"
-                  />
-                  <.input
-                    field={@db_user_form[:password]}
-                    type="password"
-                    label="Password"
-                    placeholder="Min. 8 characters"
-                  />
-                  <div class="flex items-end">
-                    <button
-                      type="submit"
-                      class="w-full px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
-                    >
-                      Add User
-                    </button>
+                  <%!-- Base (server-side) errors, e.g. MySQL connection failures --%>
+                  <%= if @db_user_form.errors[:base] != [] do %>
+                    <div class="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-3 text-sm text-red-700 dark:text-red-400">
+                      {elem(hd(@db_user_form.errors[:base]), 0)}
+                    </div>
+                  <% end %>
+                  <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <.input
+                      field={@db_user_form[:username]}
+                      type="text"
+                      label="Username"
+                      placeholder="wp_user"
+                    />
+                    <.input
+                      field={@db_user_form[:password]}
+                      type="password"
+                      label="Password"
+                      placeholder="Min. 8 characters"
+                    />
+                    <div class="flex items-end">
+                      <button
+                        type="submit"
+                        class="w-full px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+                      >
+                        Add User
+                      </button>
+                    </div>
                   </div>
                 </.form>
               </div>

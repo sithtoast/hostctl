@@ -466,8 +466,19 @@ defmodule Hostctl.Hosting do
     |> Repo.insert()
     |> case do
       {:ok, database} = result ->
-        DatabaseServer.create_database(database)
-        result
+        case DatabaseServer.create_database(database) do
+          :ok ->
+            result
+
+          {:error, reason} ->
+            Repo.delete(database)
+
+            changeset =
+              Database.changeset(database, attrs)
+              |> Ecto.Changeset.add_error(:base, mysql_error_message(reason))
+
+            {:error, changeset}
+        end
 
       error ->
         error
@@ -516,8 +527,19 @@ defmodule Hostctl.Hosting do
     |> Repo.insert()
     |> case do
       {:ok, db_user} = result ->
-        DatabaseServer.create_user(db_user, database, raw_password)
-        result
+        case DatabaseServer.create_user(db_user, database, raw_password) do
+          :ok ->
+            result
+
+          {:error, reason} ->
+            Repo.delete(db_user)
+
+            changeset =
+              DbUser.changeset(db_user, attrs)
+              |> Ecto.Changeset.add_error(:base, mysql_error_message(reason))
+
+            {:error, changeset}
+        end
 
       error ->
         error
@@ -538,6 +560,15 @@ defmodule Hostctl.Hosting do
 
   def change_db_user(%DbUser{} = db_user, attrs \\ %{}) do
     DbUser.changeset(db_user, attrs)
+  end
+
+  defp mysql_error_message({:connection_failed, reason}) do
+    "Could not connect to MySQL server: #{Exception.message(reason)}. " <>
+      "Ensure MySQL/MariaDB is running and MYSQL_ROOT_URL is configured correctly."
+  end
+
+  defp mysql_error_message(reason) do
+    "MySQL error: #{Exception.message(reason)}"
   end
 
   # ---------------------------------------------------------------------------
