@@ -7,6 +7,7 @@ defmodule Hostctl.Hosting do
   alias Hostctl.Accounts.Scope
   alias Hostctl.Settings
   alias Hostctl.DNS.Cloudflare
+  alias Hostctl.MailgunClient
   alias Hostctl.WebServer
   alias Hostctl.CertBot
   alias Hostctl.FtpServer
@@ -615,5 +616,57 @@ defmodule Hostctl.Hosting do
         where: s.enabled == true,
         preload: [:domain]
     )
+  end
+
+  # ---------------------------------------------------------------------------
+  # Mailgun provisioning
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Provisions Mailgun for a domain in three steps:
+
+  1. Fetches the existing Mailgun domain (or creates it if absent).
+  2. Syncs all sending/receiving DNS records to Cloudflare (best-effort, skipped
+     when Cloudflare is not configured or the zone cannot be found).
+  3. Creates (or updates) a `hostctl` SMTP credential on that domain.
+
+  Returns `{:ok, %{login: login, password: password}}` or `{:error, reason}`.
+  """
+  def provision_mailgun_for_domain(domain_name, api_key, region \\ :us) do
+    with {:ok, domain_info} <- get_or_create_mailgun_domain(api_key, domain_name, region) do
+      sync_mailgun_dns_to_cloudflare(domain_name, domain_info)
+      MailgunClient.create_smtp_credential(api_key, domain_name, region)
+    end
+  end
+
+  defp get_or_create_mailgun_domain(api_key, domain_name, region) do
+    case MailgunClient.get_domain(api_key, domain_name, region) do
+      {:ok, _} = ok -> ok
+      {:error, "HTTP 404"} -> MailgunClient.create_domain(api_key, domain_name, region)
+      error -> error
+    end
+  end
+
+  defp sync_mailgun_dns_to_cloudflare(domain_name, %{
+         sending_dns_records: sending,
+         receiving_dns_records: receiving
+       }) do
+    with %{provider: "cloudflare", cloudflare_api_token: token}
+         when is_binary(token) and token != "" <- Settings.get_dns_provider_setting(),
+         {:ok, zone_id} <- Cloudflare.find_zone(token, domain_name) do
+      Enum.each(sending ++ receiving, fn mg_record ->
+        cf_record = %{
+          type: mg_record["record_type"],
+          name: mg_record["name"] || "@",
+          value: mg_record["value"],
+          priority: mg_record["priority"],
+          ttl: 3600
+        }
+
+        Cloudflare.create_record(token, zone_id, cf_record)
+      end)
+    end
+
+    :ok
   end
 end

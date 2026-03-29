@@ -6,7 +6,6 @@ defmodule HostctlWeb.DomainLive.Show do
   alias Hostctl.Settings
   alias Hostctl.WebServer
   alias Hostctl.MailServer
-  alias Hostctl.MailgunClient
 
   def mount(%{"id" => id}, _session, socket) do
     domain = Hosting.get_domain!(socket.assigns.current_scope, id)
@@ -410,7 +409,7 @@ defmodule HostctlWeb.DomainLive.Show do
     domain_name = socket.assigns.domain.name
     region_atom = if region == "eu", do: :eu, else: :us
 
-    case MailgunClient.create_smtp_credential(api_key, domain_name, region_atom) do
+    case Hosting.provision_mailgun_for_domain(domain_name, api_key, region_atom) do
       {:ok, %{login: login, password: password}} ->
         smtp_host =
           if region_atom == :eu, do: "[smtp.eu.mailgun.org]", else: "[smtp.mailgun.org]"

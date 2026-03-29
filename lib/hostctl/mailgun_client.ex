@@ -23,7 +23,7 @@ defmodule Hostctl.MailgunClient do
   Returns `{:ok, [%{name, smtp_login, state}]}` or `{:error, reason}`.
   """
   def list_domains(api_key) do
-    Req.get("#{@us_base}/v3/domains", auth: {"api", api_key})
+    Req.get("#{@us_base}/v4/domains", auth: {"api", api_key})
     |> parse(fn body ->
       items = body["items"] || []
 
@@ -37,6 +37,47 @@ defmodule Hostctl.MailgunClient do
         end)
 
       {:ok, domains}
+    end)
+  end
+
+  @doc """
+  Retrieves an existing Mailgun domain and its DNS records.
+
+  Returns `{:ok, %{domain: map, sending_dns_records: list, receiving_dns_records: list}}`
+  or `{:error, reason}` (including `{:error, "HTTP 404"}` when not found).
+  """
+  def get_domain(api_key, domain_name, region \\ :us) do
+    base = if region == :eu, do: @eu_base, else: @us_base
+    encoded = URI.encode(domain_name, &URI.char_unreserved?/1)
+
+    Req.get("#{base}/v4/domains/#{encoded}", auth: {"api", api_key})
+    |> parse(fn body ->
+      {:ok,
+       %{
+         domain: body["domain"],
+         sending_dns_records: body["sending_dns_records"] || [],
+         receiving_dns_records: body["receiving_dns_records"] || []
+       }}
+    end)
+  end
+
+  @doc """
+  Creates a new Mailgun domain and returns its DNS records.
+
+  Returns `{:ok, %{domain: map, sending_dns_records: list, receiving_dns_records: list}}`
+  or `{:error, reason}`.
+  """
+  def create_domain(api_key, domain_name, region \\ :us) do
+    base = if region == :eu, do: @eu_base, else: @us_base
+
+    Req.post("#{base}/v4/domains", auth: {"api", api_key}, form: [name: domain_name])
+    |> parse(fn body ->
+      {:ok,
+       %{
+         domain: body["domain"],
+         sending_dns_records: body["sending_dns_records"] || [],
+         receiving_dns_records: body["receiving_dns_records"] || []
+       }}
     end)
   end
 
