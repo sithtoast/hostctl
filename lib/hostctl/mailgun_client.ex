@@ -136,24 +136,31 @@ defmodule Hostctl.MailgunClient do
   def get_dmarc_records(api_key, domain_name, region \\ :us) do
     base = if region == :eu, do: @eu_base, else: @us_base
     encoded = URI.encode(domain_name, &URI.char_unreserved?/1)
-    url = "#{base}/v1/dmarc-records/#{encoded}"
-    Logger.info("[Mailgun] GET #{url}")
+    url = "#{base}/v1/dmarc/records/#{encoded}"
+    Logger.info("[Mailgun] DMARC GET #{url}")
 
-    Req.get(url, auth: {"api", api_key})
-    |> parse(fn body ->
-      # Response: %{"entry" => "<desired TXT value>", "current" => "...", "configured" => bool}
-      records =
-        case body["entry"] do
-          entry when is_binary(entry) and entry != "" ->
-            [%{type: "TXT", name: "_dmarc.#{domain_name}", value: entry, ttl: 300}]
+    case Req.get(url, auth: {"api", api_key}) do
+      {:ok, %Req.Response{status: status, body: body}} ->
+        Logger.info("[Mailgun] DMARC status=#{status} body=#{inspect(body)}")
+
+        # Response: %{"entry" => "<desired TXT value>", "current" => "...", "configured" => bool}
+        case {status, body["entry"]} do
+          {s, entry} when s in 200..299 and is_binary(entry) and entry != "" ->
+            {:ok, [%{type: "TXT", name: "_dmarc.#{domain_name}", value: entry, ttl: 300}]}
+
+          {s, _} when s in 200..299 ->
+            Logger.warning("[Mailgun] DMARC 200 but no 'entry' key; body=#{inspect(body)}")
+            {:ok, []}
 
           _ ->
-            Logger.warning("[Mailgun] No DMARC entry in response: #{inspect(body)}")
-            []
+            Logger.warning("[Mailgun] DMARC non-200 (#{status}); body=#{inspect(body)}")
+            {:error, "HTTP #{status}"}
         end
 
-      {:ok, records}
-    end)
+      {:error, exception} ->
+        Logger.error("[Mailgun] DMARC request failed: #{Exception.message(exception)}")
+        {:error, Exception.message(exception)}
+    end
   end
 
   # ---------------------------------------------------------------------------
