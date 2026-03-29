@@ -11,6 +11,7 @@ defmodule Hostctl.Hosting do
   alias Hostctl.WebServer
   alias Hostctl.CertBot
   alias Hostctl.FtpServer
+  alias Hostctl.MailServer
 
   alias Hostctl.Hosting.{
     Domain,
@@ -341,20 +342,38 @@ defmodule Hostctl.Hosting do
     )
   end
 
+  def list_all_email_accounts_with_domains do
+    Repo.all(
+      from ea in EmailAccount,
+        join: d in Domain, on: ea.domain_id == d.id,
+        select: {ea.username, d.name, ea.hashed_password}
+    )
+  end
+
   def create_email_account(%Domain{} = domain, attrs) do
-    %EmailAccount{domain_id: domain.id}
-    |> EmailAccount.changeset(attrs)
-    |> Repo.insert()
+    result =
+      %EmailAccount{domain_id: domain.id}
+      |> EmailAccount.changeset(attrs)
+      |> Repo.insert()
+
+    if match?({:ok, _}, result), do: MailServer.sync_dovecot_passwd()
+    result
   end
 
   def update_email_account(%EmailAccount{} = account, attrs) do
-    account
-    |> EmailAccount.changeset(attrs)
-    |> Repo.update()
+    result =
+      account
+      |> EmailAccount.changeset(attrs)
+      |> Repo.update()
+
+    if match?({:ok, _}, result), do: MailServer.sync_dovecot_passwd()
+    result
   end
 
   def delete_email_account(%EmailAccount{} = account) do
-    Repo.delete(account)
+    result = Repo.delete(account)
+    if match?({:ok, _}, result), do: MailServer.sync_dovecot_passwd()
+    result
   end
 
   def change_email_account(%EmailAccount{} = account, attrs \\ %{}) do

@@ -37,7 +37,7 @@ defmodule Hostctl.FeatureSetup do
       description:
         "Email hosting with Postfix and Dovecot. Enables per-domain email accounts with IMAP/SMTP.",
       icon: "hero-envelope",
-      packages: ["postfix", "dovecot-imapd", "dovecot-pop3d", "dovecot-pgsql"],
+      packages: ["postfix", "dovecot-imapd", "dovecot-pop3d"],
       services: ["postfix", "dovecot"],
       setup_fn: :setup_postfix
     },
@@ -339,23 +339,16 @@ defmodule Hostctl.FeatureSetup do
   defp configure_dovecot_virtual_users(key) do
     broadcast(key, :log, "Configuring Dovecot for virtual mail users...")
 
-    case parse_database_url(System.get_env("DATABASE_URL", "")) do
-      {:ok, db} ->
-        with :ok <- run_cmd(key, "groupadd", ["-f", "-g", "5000", "vmail"]),
-             :ok <- ensure_vmail_user(key),
-             :ok <- run_cmd(key, "mkdir", ["-p", "/var/mail/vhosts"]),
-             :ok <- run_cmd(key, "chown", ["-R", "vmail:vmail", "/var/mail/vhosts"]),
-             :ok <- write_dovecot_sql_conf(key, db),
-             :ok <- write_dovecot_hostctl_conf(key),
-             :ok <- disable_dovecot_system_auth(key),
-             :ok <- run_cmd(key, "systemctl", ["restart", "dovecot"]) do
-          broadcast(key, :log, "Dovecot virtual user configuration complete.")
-          :ok
-        end
-
-      {:error, reason} ->
-        broadcast(key, :log, "Warning: #{reason} — skipping Dovecot SQL auth setup")
-        :ok
+    with :ok <- run_cmd(key, "groupadd", ["-f", "-g", "5000", "vmail"]),
+         :ok <- ensure_vmail_user(key),
+         :ok <- run_cmd(key, "mkdir", ["-p", "/var/mail/vhosts"]),
+         :ok <- run_cmd(key, "chown", ["-R", "vmail:vmail", "/var/mail/vhosts"]),
+         :ok <- write_dovecot_passwd_file(key),
+         :ok <- write_dovecot_hostctl_conf(key),
+         :ok <- disable_dovecot_system_auth(key),
+         :ok <- run_cmd(key, "systemctl", ["restart", "dovecot"]) do
+      broadcast(key, :log, "Dovecot virtual user configuration complete.")
+      :ok
     end
   end
 
@@ -376,42 +369,11 @@ defmodule Hostctl.FeatureSetup do
     end
   end
 
-  defp parse_database_url(url) when is_binary(url) and url != "" do
-    case URI.parse(url) do
-      %URI{userinfo: userinfo, host: host, path: path}
-      when is_binary(userinfo) and is_binary(host) and is_binary(path) ->
-        [user | pass_parts] = String.split(userinfo, ":", parts: 2)
-        pass = Enum.join(pass_parts)
-        dbname = String.trim_leading(path, "/")
+  defp write_dovecot_passwd_file(key) do
+    broadcast(key, :log, "Creating /etc/dovecot/passwd...")
 
-        if user != "" and host != "" and dbname != "" do
-          {:ok, %{host: host, user: user, pass: pass, dbname: dbname}}
-        else
-          {:error, "incomplete DATABASE_URL"}
-        end
-
-      _ ->
-        {:error, "could not parse DATABASE_URL"}
-    end
-  end
-
-  defp parse_database_url(_), do: {:error, "DATABASE_URL is not set"}
-
-  defp write_dovecot_sql_conf(key, db) do
-    broadcast(key, :log, "Writing /etc/dovecot/dovecot-sql.conf.ext...")
-
-    conf = """
-    driver = pgsql
-    connect = host=#{db.host} dbname=#{db.dbname} user=#{db.user} password=#{db.pass}
-    default_pass_scheme = BLF-CRYPT
-
-    password_query = SELECT hashed_password AS password FROM email_accounts ea JOIN domains d ON ea.domain_id = d.id WHERE ea.username = '%n' AND d.name = '%d' AND ea.status = 'active'
-
-    user_query = SELECT 5000 AS uid, 5000 AS gid, '/var/mail/vhosts/' || d.name || '/' || ea.username AS home FROM email_accounts ea JOIN domains d ON ea.domain_id = d.id WHERE ea.username = '%n' AND d.name = '%d'
-    """
-
-    with :ok <- write_file_via_sudo(key, "/etc/dovecot/dovecot-sql.conf.ext", conf) do
-      run_cmd(key, "chmod", ["600", "/etc/dovecot/dovecot-sql.conf.ext"])
+    with :ok <- write_file_via_sudo(key, "/etc/dovecot/passwd", "") do
+      run_cmd(key, "chmod", ["600", "/etc/dovecot/passwd"])
     end
   end
 
@@ -424,13 +386,14 @@ defmodule Hostctl.FeatureSetup do
     mail_location = maildir:~/Maildir
 
     passdb {
-      driver = sql
-      args = /etc/dovecot/dovecot-sql.conf.ext
+      driver = passwd-file
+      args = scheme=BLF-CRYPT username_format=%u /etc/dovecot/passwd
     }
 
     userdb {
-      driver = sql
-      args = /etc/dovecot/dovecot-sql.conf.ext
+      driver = passwd-file
+      args = username_format=%u /etc/dovecot/passwd
+      default_fields = uid=5000 gid=5000 home=/var/mail/vhosts/%d/%n
     }
     """
 

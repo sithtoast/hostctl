@@ -281,4 +281,56 @@ defmodule Hostctl.MailServer do
     Application.get_env(:hostctl, :mail_server, [])
     |> Keyword.get(:enabled, true)
   end
+
+  # ---------------------------------------------------------------------------
+  # Dovecot passwd-file sync
+  # ---------------------------------------------------------------------------
+
+  @dovecot_passwd_path "/etc/dovecot/passwd"
+
+  @doc """
+  Regenerates `/etc/dovecot/passwd` from all email accounts in the database
+  and restarts Dovecot.
+
+  Uses the Dovecot passwd-file format:
+    username@domain:{BLF-CRYPT}hash:uid:gid::home::
+
+  Called after every email account create/update/delete.
+  Returns `:ok` or `{:error, reason}`.
+  """
+  def sync_dovecot_passwd do
+    if enabled?() do
+      do_sync_dovecot_passwd()
+    else
+      :ok
+    end
+  end
+
+  defp do_sync_dovecot_passwd do
+    accounts =
+      Hosting.list_all_email_accounts_with_domains()
+
+    content =
+      accounts
+      |> Enum.map(fn {username, domain_name, hashed_password} ->
+        home = "/var/mail/vhosts/#{domain_name}/#{username}"
+        "#{username}@#{domain_name}:{BLF-CRYPT}#{hashed_password}:5000:5000::#{home}::"
+      end)
+      |> Enum.join("\n")
+
+    content = if content == "", do: "", else: content <> "\n"
+
+    with :ok <- write_file(@dovecot_passwd_path, content),
+         {_, 0} <- escaped_cmd("chmod", ["600", @dovecot_passwd_path], stderr_to_stdout: true),
+         {_, 0} <- escaped_cmd("systemctl", ["reload-or-restart", "dovecot"], stderr_to_stdout: true) do
+      :ok
+    else
+      {:error, _} = err ->
+        err
+
+      {output, code} ->
+        Logger.error("[MailServer] Failed to sync Dovecot passwd (#{code}): #{output}")
+        {:error, :sync_failed}
+    end
+  end
 end

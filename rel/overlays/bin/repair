@@ -37,7 +37,8 @@ NC='\033[0m'
 ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
 fix()  { echo -e "  ${YELLOW}⟳${NC} $*"; }
 err()  { echo -e "  ${RED}✗${NC} $*"; }
-head() { echo -e "\n${BOLD}$*${NC}"; }
+warn() { echo -e "  ${YELLOW}!${NC} $*"; }
+section() { echo -e "\n${BOLD}$*${NC}"; }
 
 FIXED=0
 
@@ -50,7 +51,7 @@ echo "────────────────────────�
 # =============================================================================
 # 1. Service user
 # =============================================================================
-head "1. Service user"
+section "1. Service user"
 
 if id "$SERVICE_USER" &>/dev/null; then
   ok "User '$SERVICE_USER' exists"
@@ -62,7 +63,7 @@ fi
 # =============================================================================
 # 2. Directory ownership & permissions
 # =============================================================================
-head "2. Directories"
+section "2. Directories"
 
 ensure_dir() {
   local dir="$1" owner="$2" mode="$3" label="$4"
@@ -111,7 +112,7 @@ fi
 # =============================================================================
 # 3. Sudoers rules
 # =============================================================================
-head "3. Sudoers rules"
+section "3. Sudoers rules"
 
 ensure_sudoers() {
   local file="$1" label="$2" content="$3"
@@ -155,7 +156,7 @@ ensure_sudoers "/etc/sudoers.d/hostctl-features" "Feature management" "$FEATURES
 # =============================================================================
 # 4. Systemd unit — ensure ReadWritePaths includes /run/sudo
 # =============================================================================
-head "4. Systemd service"
+section "4. Systemd service"
 
 REQUIRED_RW_PATHS="$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg"
 
@@ -173,14 +174,14 @@ if [[ -f "$SERVICE_FILE" ]]; then
     if $rw_ok; then
       ok "ReadWritePaths includes all required paths"
     else
-      sed -i 's|^ReadWritePaths=.*|'"ReadWritePaths=$REQUIRED_RW_PATHS"'|' "$SERVICE_FILE"
+      sed -i 's|^ReadWritePaths=.*|'"ReadWritePaths=$REQUIRED_RW_PATHS"'|' "$SERVICE_FILE" || true
       fix "ReadWritePaths → updated with all required paths"
       FIXED=$((FIXED + 1))
     fi
   else
     # No ReadWritePaths — add it after ProtectSystem
     if grep -q '^\[Service\]' "$SERVICE_FILE"; then
-      sed -i '/^ProtectSystem=/a ReadWritePaths='"$REQUIRED_RW_PATHS" "$SERVICE_FILE"
+      sed -i '/^ProtectSystem=/a ReadWritePaths='"$REQUIRED_RW_PATHS" "$SERVICE_FILE" || true
       fix "ReadWritePaths → added to service unit"
       FIXED=$((FIXED + 1))
     else
@@ -204,7 +205,7 @@ if [[ -f "$SERVICE_FILE" ]]; then
   if grep -q 'ExecStartPre=.*mkdir.*run/sudo' "$SERVICE_FILE"; then
     ok "ExecStartPre creates /run/sudo/ts"
   else
-    sed -i '/^ExecStart=/i ExecStartPre=+/usr/bin/mkdir -p /run/sudo/ts' "$SERVICE_FILE"
+    sed -i '/^ExecStart=/i ExecStartPre=+/usr/bin/mkdir -p /run/sudo/ts' "$SERVICE_FILE" || true
     fix "ExecStartPre → added /run/sudo/ts creation"
     FIXED=$((FIXED + 1))
   fi
@@ -216,7 +217,7 @@ fi
 # =============================================================================
 # 5. Env file permissions
 # =============================================================================
-head "5. Environment file"
+section "5. Environment file"
 
 if [[ -f "$ENV_FILE" ]]; then
   cur_owner="$(stat -c '%U:%G' "$ENV_FILE" 2>/dev/null)"
@@ -242,7 +243,7 @@ fi
 # =============================================================================
 # 6. Verify sudo works for the service user
 # =============================================================================
-head "6. Sudo verification"
+section "6. Sudo verification"
 
 if sudo -u "$SERVICE_USER" sudo -n /usr/bin/true 2>/dev/null; then
   ok "Service user can run sudo without a password"
@@ -254,7 +255,7 @@ fi
 # =============================================================================
 # 7. Apache / webmail (Roundcube, SnappyMail)
 # =============================================================================
-head "7. Apache webmail proxy"
+section "7. Apache webmail proxy"
 
 if [[ -x /usr/sbin/apache2 ]] || dpkg -l apache2 &>/dev/null 2>&1; then
   # Ensure Apache listens on 127.0.0.1:8080 only (Phoenix owns port 80)
@@ -377,118 +378,88 @@ else
 fi
 
 # =============================================================================
-# 7.5. Dovecot virtual mail users (SQL auth against PostgreSQL)
+# 7.5. Dovecot virtual mail users (passwd-file auth)
 # =============================================================================
-head "7.5. Dovecot virtual mail users"
+section "7.5. Dovecot virtual mail users"
 
 if dpkg -l dovecot-imapd &>/dev/null 2>&1; then
-  # Parse DATABASE_URL from env file
-  DB_URL=""
-  if [[ -f /etc/hostctl/env ]]; then
-    DB_URL=$(grep '^DATABASE_URL=' /etc/hostctl/env | cut -d= -f2- | tr -d '\r')
+  # Create vmail group and user (uid/gid 5000) for virtual mail storage
+  if ! getent group vmail &>/dev/null; then
+    groupadd -f -g 5000 vmail
+    fix "Created vmail group"
+    FIXED=$((FIXED + 1))
+  else
+    ok "vmail group exists"
   fi
 
-  if [[ -z "$DB_URL" ]]; then
-    warn "DATABASE_URL not found in /etc/hostctl/env — skipping Dovecot SQL auth setup"
-  else
-    # Parse ecto://USER:PASS@HOST/DBNAME
-    _url="${DB_URL#*://}"
-    _userinfo="${_url%%@*}"
-    _hostpath="${_url#*@}"
-    DB_USER="${_userinfo%%:*}"
-    DB_PASS="${_userinfo#*:}"
-    DB_HOST="${_hostpath%%/*}"
-    DB_NAME="${_hostpath#*/}"
-
-    # Install dovecot-pgsql if missing
-    if ! dpkg -l dovecot-pgsql &>/dev/null 2>&1; then
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dovecot-pgsql >/dev/null 2>&1
-      fix "Installed dovecot-pgsql"
-      FIXED=$((FIXED + 1))
-    else
-      ok "dovecot-pgsql installed"
-    fi
-
-    # Create vmail group and user (uid/gid 5000) for virtual mail storage
-    if ! getent group vmail &>/dev/null; then
-      groupadd -g 5000 vmail
-      fix "Created vmail group"
-      FIXED=$((FIXED + 1))
-    else
-      ok "vmail group exists"
-    fi
-
-    if ! getent passwd vmail &>/dev/null; then
-      useradd -g vmail -u 5000 -d /var/mail -M -s /usr/sbin/nologin vmail
-      fix "Created vmail user"
-      FIXED=$((FIXED + 1))
-    else
-      ok "vmail user exists"
-    fi
-
-    # Create mail storage directory
-    if [[ ! -d /var/mail/vhosts ]]; then
-      mkdir -p /var/mail/vhosts
-      fix "Created /var/mail/vhosts"
-      FIXED=$((FIXED + 1))
-    fi
-    chown -R vmail:vmail /var/mail/vhosts 2>/dev/null
-
-    # Write Dovecot SQL config (always refresh to pick up credential changes)
-    DOVECOT_SQL_CONF="/etc/dovecot/dovecot-sql.conf.ext"
-    cat > "$DOVECOT_SQL_CONF" << SQLEOF
-driver = pgsql
-connect = host=${DB_HOST} dbname=${DB_NAME} user=${DB_USER} password=${DB_PASS}
-default_pass_scheme = BLF-CRYPT
-
-password_query = SELECT hashed_password AS password FROM email_accounts ea JOIN domains d ON ea.domain_id = d.id WHERE ea.username = '%n' AND d.name = '%d' AND ea.status = 'active'
-
-user_query = SELECT 5000 AS uid, 5000 AS gid, '/var/mail/vhosts/' || d.name || '/' || ea.username AS home FROM email_accounts ea JOIN domains d ON ea.domain_id = d.id WHERE ea.username = '%n' AND d.name = '%d'
-SQLEOF
-    chmod 600 "$DOVECOT_SQL_CONF"
-    fix "Written $DOVECOT_SQL_CONF"
+  if ! getent passwd vmail &>/dev/null; then
+    useradd -g vmail -u 5000 -d /var/mail -M -s /usr/sbin/nologin vmail
+    fix "Created vmail user"
     FIXED=$((FIXED + 1))
+  else
+    ok "vmail user exists"
+  fi
 
-    # Write 99-hostctl.conf if missing
-    DOVECOT_HOSTCTL_CONF="/etc/dovecot/conf.d/99-hostctl.conf"
-    if [[ ! -f "$DOVECOT_HOSTCTL_CONF" ]] || ! grep -q "hostctl" "$DOVECOT_HOSTCTL_CONF" 2>/dev/null; then
-      cat > "$DOVECOT_HOSTCTL_CONF" <<'DOVEOF'
+  # Create mail storage directory
+  if [[ ! -d /var/mail/vhosts ]]; then
+    mkdir -p /var/mail/vhosts
+    fix "Created /var/mail/vhosts"
+    FIXED=$((FIXED + 1))
+  fi
+  chown -R vmail:vmail /var/mail/vhosts 2>/dev/null
+
+  # Create passwd file if missing (hostctl populates it when accounts are managed)
+  DOVECOT_PASSWD="/etc/dovecot/passwd"
+  if [[ ! -f "$DOVECOT_PASSWD" ]]; then
+    touch "$DOVECOT_PASSWD"
+    chmod 600 "$DOVECOT_PASSWD"
+    fix "Created $DOVECOT_PASSWD"
+    FIXED=$((FIXED + 1))
+  else
+    chmod 600 "$DOVECOT_PASSWD"
+    ok "$DOVECOT_PASSWD exists"
+  fi
+
+  # Write 99-hostctl.conf with passwd-file driver
+  DOVECOT_HOSTCTL_CONF="/etc/dovecot/conf.d/99-hostctl.conf"
+  if [[ ! -f "$DOVECOT_HOSTCTL_CONF" ]] || grep -q 'driver = sql' "$DOVECOT_HOSTCTL_CONF" 2>/dev/null; then
+    cat > "$DOVECOT_HOSTCTL_CONF" <<'DOVEOF'
 # Managed by hostctl — virtual mail user configuration
 
 mail_location = maildir:~/Maildir
 
 passdb {
-  driver = sql
-  args = /etc/dovecot/dovecot-sql.conf.ext
+  driver = passwd-file
+  args = scheme=BLF-CRYPT username_format=%u /etc/dovecot/passwd
 }
 
 userdb {
-  driver = sql
-  args = /etc/dovecot/dovecot-sql.conf.ext
+  driver = passwd-file
+  args = username_format=%u /etc/dovecot/passwd
+  default_fields = uid=5000 gid=5000 home=/var/mail/vhosts/%d/%n
 }
 DOVEOF
-      fix "Written $DOVECOT_HOSTCTL_CONF"
-      FIXED=$((FIXED + 1))
-    else
-      ok "$DOVECOT_HOSTCTL_CONF"
-    fi
+    fix "Written $DOVECOT_HOSTCTL_CONF"
+    FIXED=$((FIXED + 1))
+  else
+    ok "$DOVECOT_HOSTCTL_CONF"
+  fi
 
-    # Disable system passdb in 10-auth.conf so virtual users authenticate via SQL
-    AUTH_CONF="/etc/dovecot/conf.d/10-auth.conf"
-    if [[ -f "$AUTH_CONF" ]] && grep -q '^!include auth-system\.conf\.ext' "$AUTH_CONF" 2>/dev/null; then
-      sed -i 's|^!include auth-system\.conf\.ext|# !include auth-system.conf.ext|' "$AUTH_CONF"
-      fix "Disabled system auth in $AUTH_CONF"
-      FIXED=$((FIXED + 1))
-    else
-      ok "Dovecot system auth already disabled"
-    fi
+  # Disable system passdb in 10-auth.conf
+  AUTH_CONF="/etc/dovecot/conf.d/10-auth.conf"
+  if [[ -f "$AUTH_CONF" ]] && grep -q '^!include auth-system\.conf\.ext' "$AUTH_CONF" 2>/dev/null; then
+    sed -i 's|^!include auth-system\.conf\.ext|# !include auth-system.conf.ext|' "$AUTH_CONF"
+    fix "Disabled system auth in $AUTH_CONF"
+    FIXED=$((FIXED + 1))
+  else
+    ok "Dovecot system auth already disabled"
   fi
 else
   ok "Dovecot not installed — skipping"
 fi
 
 
-head "8. Apply changes"
+section "8. Apply changes"
 
 if [[ $FIXED -gt 0 ]]; then
   systemctl daemon-reload
