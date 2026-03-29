@@ -27,12 +27,12 @@ defmodule Hostctl.FtpServer do
         vsftpd_user_conf_dir: "/etc/vsftpd/vsftpd_user_conf",
         virtual_users_file: "/etc/vsftpd/virtual_users.txt",
         virtual_users_db: "/etc/vsftpd/virtual_users",
-        db_load_cmd: "db_load",
-        # Requires: hostctl ALL=(root) NOPASSWD: /usr/bin/systemctl reload vsftpd
-        vsftpd_reload_cmd: ["sudo", "systemctl", "reload", "vsftpd"]
+        db_load_cmd: "db_load"
 
-  Set `enabled: false` in test/dev environments to skip all filesystem and
-  process operations.
+  All filesystem and process operations run via `systemd-run` to escape the
+  service's `ProtectSystem=strict` mount namespace.
+
+  Set `enabled: false` in test/dev environments to skip all operations.
   """
 
   require Logger
@@ -119,8 +119,8 @@ defmodule Hostctl.FtpServer do
     path = Path.join(dir, account.username)
     home_dir = account.home_dir || "/"
 
-    with :ok <- File.mkdir_p(dir),
-         :ok <- File.write(path, "local_root=#{home_dir}\n") do
+    with :ok <- escaped_mkdir_p(dir),
+         :ok <- escaped_write(path, "local_root=#{home_dir}\n") do
       :ok
     end
   end
@@ -128,10 +128,9 @@ defmodule Hostctl.FtpServer do
   defp remove_user_conf(%FtpAccount{} = account) do
     path = Path.join(user_conf_dir(), account.username)
 
-    case File.rm(path) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
-      {:error, reason} -> {:error, reason}
+    case escaped_cmd("rm", ["-f", path]) do
+      {_, 0} -> :ok
+      {output, code} -> {:error, {:rm_failed, code, output}}
     end
   end
 
@@ -151,10 +150,9 @@ defmodule Hostctl.FtpServer do
 
       content = Enum.join(kept ++ [username, raw_password], "\n")
 
-      with :ok <- File.mkdir_p(Path.dirname(file)),
-           :ok <- File.write(file, content <> "\n") do
-        # Restrict readability: should be root-owned but at minimum not world-readable.
-        File.chmod(file, 0o600)
+      with :ok <- escaped_mkdir_p(Path.dirname(file)),
+           :ok <- escaped_write(file, content <> "\n"),
+           :ok <- escaped_chmod("600", file) do
         :ok
       end
     end
@@ -172,14 +170,13 @@ defmodule Hostctl.FtpServer do
 
       case remaining do
         [] ->
-          case File.rm(file) do
-            :ok -> :ok
-            {:error, :enoent} -> :ok
-            {:error, reason} -> {:error, reason}
+          case escaped_cmd("rm", ["-f", file]) do
+            {_, 0} -> :ok
+            {output, code} -> {:error, {:rm_failed, code, output}}
           end
 
         lines ->
-          File.write(file, Enum.join(lines, "\n") <> "\n")
+          escaped_write(file, Enum.join(lines, "\n") <> "\n")
       end
     end
   end
@@ -187,8 +184,8 @@ defmodule Hostctl.FtpServer do
   # Reads the plaintext virtual users file and returns a list of [user, pass] pairs.
   # Returns {:ok, []} if the file does not exist yet.
   defp read_user_entries(file) do
-    case File.read(file) do
-      {:ok, content} ->
+    case escaped_cmd("cat", [file], stderr_to_stdout: true) do
+      {content, 0} ->
         entries =
           content
           |> String.split("\n", trim: true)
@@ -197,11 +194,13 @@ defmodule Hostctl.FtpServer do
 
         {:ok, entries}
 
-      {:error, :enoent} ->
-        {:ok, []}
-
-      {:error, reason} ->
-        {:error, reason}
+      {output, _code} ->
+        # File doesn't exist or can't be read
+        if String.contains?(output, "No such file") do
+          {:ok, []}
+        else
+          {:error, {:read_failed, output}}
+        end
     end
   end
 
@@ -211,7 +210,7 @@ defmodule Hostctl.FtpServer do
     db = virtual_users_db()
     cmd = Keyword.get(config(), :db_load_cmd, "db_load")
 
-    case System.cmd(cmd, ["-T", "-t", "hash", "-f", file, "#{db}.db"],
+    case escaped_cmd(cmd, ["-T", "-t", "hash", "-f", file, "#{db}.db"],
            stderr_to_stdout: true
          ) do
       {_, 0} ->
@@ -227,10 +226,8 @@ defmodule Hostctl.FtpServer do
   end
 
   defp reload do
-    cmd = Keyword.get(config(), :vsftpd_reload_cmd, ["sudo", "systemctl", "reload", "vsftpd"])
-    [executable | args] = cmd
-
-    case System.cmd(executable, args, stderr_to_stdout: true) do
+    # Reload vsftpd via systemd-run to escape the ProtectSystem namespace.
+    case escaped_cmd("systemctl", ["reload", "vsftpd"], stderr_to_stdout: true) do
       {_, 0} ->
         Logger.info("[FtpServer] vsftpd reloaded successfully")
         :ok
@@ -241,6 +238,50 @@ defmodule Hostctl.FtpServer do
         )
 
         {:error, {:reload_failed, exit_code, output}}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # systemd-run helpers — escape ProtectSystem=strict namespace
+  # ---------------------------------------------------------------------------
+
+  # Runs a command in a transient systemd unit outside the service's
+  # ProtectSystem mount namespace.
+  defp escaped_cmd(cmd, args, opts \\ []) do
+    systemd_args = ["systemd-run", "--pipe", "--wait", "--collect", "--quiet", cmd | args]
+    System.cmd("sudo", systemd_args, opts)
+  end
+
+  defp escaped_mkdir_p(dir) do
+    case escaped_cmd("mkdir", ["-p", dir]) do
+      {_, 0} -> :ok
+      {output, code} -> {:error, {:mkdir_failed, code, output}}
+    end
+  end
+
+  defp escaped_chmod(mode, path) do
+    case escaped_cmd("chmod", [mode, path]) do
+      {_, 0} -> :ok
+      {output, code} -> {:error, {:chmod_failed, code, output}}
+    end
+  end
+
+  # Writes file content via systemd-run tee (clean namespace can access /etc).
+  defp escaped_write(path, content) do
+    encoded = Base.encode64(content)
+
+    case System.cmd(
+           "sh",
+           [
+             "-c",
+             ~s(echo '#{encoded}' | base64 -d | sudo systemd-run --pipe --wait --collect --quiet tee -- "$1" > /dev/null),
+             "--",
+             path
+           ],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} -> :ok
+      {output, code} -> {:error, {:write_failed, code, output}}
     end
   end
 

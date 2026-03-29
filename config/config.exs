@@ -60,9 +60,7 @@ config :hostctl, :ftp_server,
   virtual_users_file: "/etc/vsftpd/virtual_users.txt",
   # Path WITHOUT the .db extension – PAM and db_load append it automatically.
   virtual_users_db: "/etc/vsftpd/virtual_users",
-  db_load_cmd: "db_load",
-  # Requires: hostctl ALL=(root) NOPASSWD: /usr/bin/systemctl reload vsftpd
-  vsftpd_reload_cmd: ["sudo", "systemctl", "reload", "vsftpd"]
+  db_load_cmd: "db_load"
 
 # Let's Encrypt / Certbot integration
 # When Cloudflare is configured as the DNS provider the certbot-dns-cloudflare
