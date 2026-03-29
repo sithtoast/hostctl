@@ -36,10 +36,20 @@ defmodule Hostctl.Hosting.FtpAccount do
   def update_changeset(ftp_account, attrs) do
     ftp_account
     |> cast(attrs, [:password, :home_dir, :status])
+    |> clear_empty_password()
     |> validate_length(:password, min: 8, max: 72)
     |> validate_inclusion(:status, ~w(active suspended))
     |> validate_home_dir()
     |> put_hashed_password()
+  end
+
+  # Treat a submitted empty string as "no change" so updates to home_dir/status
+  # don't require re-entering the password.
+  defp clear_empty_password(changeset) do
+    case get_change(changeset, :password) do
+      "" -> delete_change(changeset, :password)
+      _ -> changeset
+    end
   end
 
   defp validate_home_dir(changeset) do

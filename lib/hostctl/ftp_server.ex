@@ -94,6 +94,11 @@ defmodule Hostctl.FtpServer do
   # Private implementation
   # ---------------------------------------------------------------------------
 
+  defp do_provision(%FtpAccount{status: "suspended"} = account, _raw_password) do
+    # Suspended accounts should be removed from vsftpd so they cannot authenticate.
+    do_remove(account)
+  end
+
   defp do_provision(%FtpAccount{} = account, raw_password) do
     with :ok <- write_user_conf(account),
          :ok <- upsert_user_entry(account.username, raw_password),

@@ -695,7 +695,12 @@ defmodule Hostctl.Hosting do
 
     case result do
       {:ok, updated} ->
-        raw_password = attrs["password"] || attrs[:password]
+        raw_password =
+          case attrs["password"] || attrs[:password] do
+            "" -> nil
+            val -> val
+          end
+
         FtpServer.provision_account(updated, raw_password)
         {:ok, updated}
 
