@@ -1,4 +1,6 @@
 defmodule Hostctl.MailgunClient do
+  require Logger
+
   @moduledoc """
   HTTP client for the Mailgun REST API.
 
@@ -49,16 +51,24 @@ defmodule Hostctl.MailgunClient do
   def get_domain(api_key, domain_name, region \\ :us) do
     base = if region == :eu, do: @eu_base, else: @us_base
     encoded = URI.encode(domain_name, &URI.char_unreserved?/1)
+    url = "#{base}/v4/domains/#{encoded}"
+    Logger.info("[Mailgun] GET #{url}")
 
-    Req.get("#{base}/v4/domains/#{encoded}", auth: {"api", api_key})
-    |> parse(fn body ->
-      {:ok,
-       %{
-         domain: body["domain"],
-         sending_dns_records: body["sending_dns_records"] || [],
-         receiving_dns_records: body["receiving_dns_records"] || []
-       }}
-    end)
+    case Req.get(url, auth: {"api", api_key}) do
+      {:ok, %Req.Response{status: 404}} ->
+        Logger.info("[Mailgun] Domain #{domain_name} not found (404)")
+        {:error, "HTTP 404"}
+
+      response ->
+        parse(response, fn body ->
+          {:ok,
+           %{
+             domain: body["domain"],
+             sending_dns_records: body["sending_dns_records"] || [],
+             receiving_dns_records: body["receiving_dns_records"] || []
+           }}
+        end)
+    end
   end
 
   @doc """
@@ -69,6 +79,7 @@ defmodule Hostctl.MailgunClient do
   """
   def create_domain(api_key, domain_name, region \\ :us) do
     base = if region == :eu, do: @eu_base, else: @us_base
+    Logger.info("[Mailgun] Creating domain #{domain_name} in #{region} region")
 
     Req.post("#{base}/v4/domains", auth: {"api", api_key}, form: [name: domain_name])
     |> parse(fn body ->
@@ -93,6 +104,7 @@ defmodule Hostctl.MailgunClient do
   """
   def create_smtp_credential(api_key, domain_name, region \\ :us) do
     base = if region == :eu, do: @eu_base, else: @us_base
+    Logger.info("[Mailgun] Creating SMTP credential for #{domain_name}")
     password = :crypto.strong_rand_bytes(24) |> Base.url_encode64(padding: false)
     login = "hostctl"
     encoded_domain = URI.encode(domain_name, &URI.char_unreserved?/1)
@@ -125,7 +137,18 @@ defmodule Hostctl.MailgunClient do
     success_fn.(body)
   end
 
-  defp parse({:ok, %Req.Response{body: %{"message" => msg}}}, _), do: {:error, msg}
-  defp parse({:ok, %Req.Response{status: status}}, _), do: {:error, "HTTP #{status}"}
-  defp parse({:error, exception}, _), do: {:error, Exception.message(exception)}
+  defp parse({:ok, %Req.Response{status: status, body: %{"message" => msg}}}, _) do
+    Logger.warning("[Mailgun] HTTP #{status}: #{msg}")
+    {:error, msg}
+  end
+
+  defp parse({:ok, %Req.Response{status: status}}, _) do
+    Logger.warning("[Mailgun] HTTP #{status}")
+    {:error, "HTTP #{status}"}
+  end
+
+  defp parse({:error, exception}, _) do
+    Logger.error("[Mailgun] Request failed: #{Exception.message(exception)}")
+    {:error, Exception.message(exception)}
+  end
 end
