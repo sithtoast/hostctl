@@ -141,4 +141,18 @@ if config_env() == :prod do
   #     config :swoosh, :api_client, Swoosh.ApiClient.Req
   #
   # See https://hexdocs.pm/swoosh/Swoosh.html#module-installation for details.
+
+  # MySQL database server for hosted applications (WordPress, etc.)
+  # MYSQL_ROOT_URL format: mysql://user:password@host:port/database
+  # e.g. mysql://root:secret@localhost:3306/mysql
+  if mysql_url = System.get_env("MYSQL_ROOT_URL") do
+    uri = URI.parse(mysql_url)
+
+    config :hostctl, :database_server,
+      enabled: true,
+      hostname: uri.host || "localhost",
+      port: uri.port || 3306,
+      username: uri.userinfo && String.split(uri.userinfo, ":") |> List.first(),
+      password: uri.userinfo && String.split(uri.userinfo, ":", parts: 2) |> List.last()
+  end
 end

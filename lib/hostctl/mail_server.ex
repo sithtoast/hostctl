@@ -325,9 +325,11 @@ defmodule Hostctl.MailServer do
     content = if content == "", do: "", else: content <> "\n"
 
     with :ok <- write_file(@dovecot_passwd_path, content),
-         {_, 0} <- escaped_cmd("chown", ["root:dovecot", @dovecot_passwd_path], stderr_to_stdout: true),
+         {_, 0} <-
+           escaped_cmd("chown", ["root:dovecot", @dovecot_passwd_path], stderr_to_stdout: true),
          {_, 0} <- escaped_cmd("chmod", ["640", @dovecot_passwd_path], stderr_to_stdout: true),
-         {_, 0} <- escaped_cmd("systemctl", ["reload-or-restart", "dovecot"], stderr_to_stdout: true) do
+         {_, 0} <-
+           escaped_cmd("systemctl", ["reload-or-restart", "dovecot"], stderr_to_stdout: true) do
       :ok
     else
       {:error, _} = err ->

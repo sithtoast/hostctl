@@ -192,7 +192,10 @@ defmodule HostctlWeb.DnsLive.Index do
          socket
          |> assign(:zone, zone)
          |> stream(:dns_records, zone.dns_records, reset: true)
-         |> put_flash(:error, "Synced #{ok} record(s) to Cloudflare. #{failed} failed — check logs.")}
+         |> put_flash(
+           :error,
+           "Synced #{ok} record(s) to Cloudflare. #{failed} failed — check logs."
+         )}
 
       {:error, :not_linked} ->
         {:noreply, put_flash(socket, :error, "Zone is not linked to Cloudflare.")}
@@ -239,13 +242,15 @@ defmodule HostctlWeb.DnsLive.Index do
                 <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-100 dark:bg-orange-900/20 text-orange-700 dark:text-orange-400 text-xs font-semibold">
                   <.icon name="hero-cloud" class="w-3.5 h-3.5" /> Cloudflare Active
                 </span>
-                <button                  id="sync-cf-btn"
+                <button
+                  id="sync-cf-btn"
                   phx-click="sync_to_cloudflare"
                   class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-100 hover:bg-orange-200 dark:bg-orange-900/20 dark:hover:bg-orange-900/30 text-orange-700 dark:text-orange-400 text-xs font-semibold transition-colors"
                 >
                   <.icon name="hero-arrow-path" class="w-3.5 h-3.5" /> Sync
                 </button>
-                <button                  id="unlink-cf-btn"
+                <button
+                  id="unlink-cf-btn"
                   phx-click="unlink_cloudflare_zone"
                   class="text-xs text-gray-400 hover:text-red-500 transition-colors"
                 >

@@ -361,11 +361,15 @@ defmodule Hostctl.FeatureSetup do
 
       _ ->
         run_cmd(key, "useradd", [
-          "-g", "vmail",
-          "-u", "5000",
-          "-d", "/var/mail",
+          "-g",
+          "vmail",
+          "-u",
+          "5000",
+          "-d",
+          "/var/mail",
           "-M",
-          "-s", "/usr/sbin/nologin",
+          "-s",
+          "/usr/sbin/nologin",
           "vmail"
         ])
     end
@@ -410,7 +414,11 @@ defmodule Hostctl.FeatureSetup do
 
     case escaped_cmd(
            "sed",
-           ["-i", "s|^!include auth-system\\.conf\\.ext|# !include auth-system.conf.ext|", auth_conf],
+           [
+             "-i",
+             "s|^!include auth-system\\.conf\\.ext|# !include auth-system.conf.ext|",
+             auth_conf
+           ],
            stderr_to_stdout: true
          ) do
       {_, 0} ->

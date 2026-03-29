@@ -12,6 +12,7 @@ defmodule Hostctl.Hosting do
   alias Hostctl.CertBot
   alias Hostctl.FtpServer
   alias Hostctl.MailServer
+  alias Hostctl.DatabaseServer
 
   alias Hostctl.Hosting.{
     Domain,
@@ -20,6 +21,7 @@ defmodule Hostctl.Hosting do
     DnsRecord,
     EmailAccount,
     Database,
+    DbUser,
     SslCertificate,
     CronJob,
     FtpAccount,
@@ -229,7 +231,9 @@ defmodule Hostctl.Hosting do
             Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_id))
 
           {:error, reason} ->
-            Logger.warning("[Cloudflare] Failed to push #{record.type} #{record.name}: #{inspect(reason)}")
+            Logger.warning(
+              "[Cloudflare] Failed to push #{record.type} #{record.name}: #{inspect(reason)}"
+            )
         end
       end)
 
@@ -399,7 +403,8 @@ defmodule Hostctl.Hosting do
   def list_all_email_accounts_with_domains do
     Repo.all(
       from ea in EmailAccount,
-        join: d in Domain, on: ea.domain_id == d.id,
+        join: d in Domain,
+        on: ea.domain_id == d.id,
         select: {ea.username, d.name, ea.hashed_password}
     )
   end
@@ -451,10 +456,22 @@ defmodule Hostctl.Hosting do
     Repo.all(from d in Database, where: d.domain_id == ^domain.id, order_by: [asc: d.name])
   end
 
+  def get_database!(%Domain{} = domain, id) do
+    Repo.get_by!(Database, id: id, domain_id: domain.id)
+  end
+
   def create_database(%Domain{} = domain, attrs) do
     %Database{domain_id: domain.id}
     |> Database.changeset(attrs)
     |> Repo.insert()
+    |> case do
+      {:ok, database} = result ->
+        DatabaseServer.create_database(database)
+        result
+
+      error ->
+        error
+    end
   end
 
   def update_database(%Database{} = database, attrs) do
@@ -465,10 +482,62 @@ defmodule Hostctl.Hosting do
 
   def delete_database(%Database{} = database) do
     Repo.delete(database)
+    |> case do
+      {:ok, deleted} = result ->
+        DatabaseServer.drop_database(deleted)
+        result
+
+      error ->
+        error
+    end
   end
 
   def change_database(%Database{} = database, attrs \\ %{}) do
     Database.changeset(database, attrs)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Database Users
+  # ---------------------------------------------------------------------------
+
+  def list_db_users(%Database{} = database) do
+    Repo.all(from u in DbUser, where: u.database_id == ^database.id, order_by: [asc: u.username])
+  end
+
+  def get_db_user!(%Database{} = database, id) do
+    Repo.get_by!(DbUser, id: id, database_id: database.id)
+  end
+
+  def create_db_user(%Database{} = database, attrs) do
+    raw_password = attrs["password"] || attrs[:password]
+
+    %DbUser{database_id: database.id}
+    |> DbUser.changeset(attrs)
+    |> Repo.insert()
+    |> case do
+      {:ok, db_user} = result ->
+        DatabaseServer.create_user(db_user, database, raw_password)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  def delete_db_user(%DbUser{} = db_user, %Database{} = database) do
+    Repo.delete(db_user)
+    |> case do
+      {:ok, deleted} = result ->
+        DatabaseServer.drop_user(deleted, database)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  def change_db_user(%DbUser{} = db_user, attrs \\ %{}) do
+    DbUser.changeset(db_user, attrs)
   end
 
   # ---------------------------------------------------------------------------
@@ -747,9 +816,13 @@ defmodule Hostctl.Hosting do
     end
   end
 
-  defp sync_mailgun_dns_to_cloudflare(domain_name, %{
-         sending_dns_records: sending
-       }, dmarc_records) do
+  defp sync_mailgun_dns_to_cloudflare(
+         domain_name,
+         %{
+           sending_dns_records: sending
+         },
+         dmarc_records
+       ) do
     # Only use sending records (SPF, DKIM) — never receiving_dns_records,
     # which are Mailgun's own inbound MX servers, not ours.
     mg_sending_records =
@@ -789,9 +862,13 @@ defmodule Hostctl.Hosting do
             # already pushed some records via maybe_sync_create_to_cloudflare.
             Enum.each(cf_records, fn record ->
               case cf_upsert(token, zone_id, existing_cf, record, domain_name) do
-                {:ok, _} -> :ok
+                {:ok, _} ->
+                  :ok
+
                 {:error, reason} ->
-                  Logger.warning("[Mailgun] DNS sync failed for #{record.name}: #{inspect(reason)}")
+                  Logger.warning(
+                    "[Mailgun] DNS sync failed for #{record.name}: #{inspect(reason)}"
+                  )
               end
             end)
 

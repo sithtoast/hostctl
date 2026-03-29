@@ -14,6 +14,19 @@ services:
       timeout: 5s
       retries: 10
 
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: hostctl
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-phostctl"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   app:
     build:
       context: .
@@ -21,6 +34,8 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      mysql:
         condition: service_healthy
     ports:
       - "4000:4000"
@@ -34,5 +49,8 @@ services:
     command: >
       sh -c "/app/bin/migrate && /app/bin/server"
 
+      MYSQL_ROOT_URL: "mysql://root:hostctl@mysql/mysql"
+
 volumes:
   postgres_data:
+  mysql_data:

@@ -84,6 +84,18 @@ config :hostctl, :certbot,
   dns_propagation_seconds: 60,
   email: nil
 
+# MySQL database server integration
+# Hostctl connects to the MySQL server with root-level credentials to
+# create/drop databases and manage users for hosted applications (e.g.
+# WordPress). The MySQL server itself should be installed on the host
+# (e.g. apt install mysql-server) or run via Docker.
+config :hostctl, :database_server,
+  enabled: true,
+  hostname: "localhost",
+  port: 3306,
+  username: "root",
+  password: ""
+
 # Configure the endpoint
 config :hostctl, HostctlWeb.Endpoint,
   url: [host: "localhost"],

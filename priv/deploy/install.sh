@@ -16,6 +16,7 @@
 #   --skip-nginx          Skip nginx installation and configuration
 #   --skip-certbot        Skip SSL certificate provisioning
 #   --skip-postgres       Skip PostgreSQL installation (use existing)
+#   --skip-mysql          Skip MySQL server installation
 #   --skip-php            Skip PHP-FPM installation
 #   --reconfigure         Re-run only the configuration/service steps (no build)
 #   --cloudflare          Configure nginx for Cloudflare proxy (HTTP-only origin,
@@ -25,6 +26,7 @@ set -euo pipefail
 
 # --- Pinned dependency versions -----------------------------------------------
 POSTGRES_MAJOR="17"
+MYSQL_VERSION="8.0"
 OTP_MAJOR="27"
 ELIXIR_VERSION="1.18.3"  # must match OTP_MAJOR above
 # PHP versions to install for hosted sites (space-separated, first is default)
@@ -38,12 +40,14 @@ SERVICE_USER="hostctl"
 DB_NAME="hostctl_prod"
 DB_USER="hostctl"
 DB_PASSWORD=""
+MYSQL_ROOT_PASSWORD=""
 DOMAIN=""
 REPO_URL="https://github.com/yourorg/hostctl.git"   # TODO: update when published
 REPO_BRANCH="main"
 SKIP_NGINX=false
 SKIP_CERTBOT=false
 SKIP_POSTGRES=false
+SKIP_MYSQL=false
 SKIP_PHP=false
 RECONFIGURE=false
 CLOUDFLARE_PROXY=false
@@ -81,6 +85,7 @@ for arg in "$@"; do
     --skip-nginx)     SKIP_NGINX=true ;;
     --skip-certbot)   SKIP_CERTBOT=true ;;
     --skip-postgres)  SKIP_POSTGRES=true ;;
+    --skip-mysql)     SKIP_MYSQL=true ;;
     --skip-php)       SKIP_PHP=true ;;
     --reconfigure)    RECONFIGURE=true ;;
     --cloudflare)     CLOUDFLARE_PROXY=true ;;
@@ -162,6 +167,15 @@ if [[ -z "$DOMAIN" && "$SKIP_NGINX" == false ]]; then
   [[ -n "$DOMAIN" ]] || error "Domain is required for nginx. Use --skip-nginx to skip."
 fi
 
+if [[ -z "$MYSQL_ROOT_PASSWORD" ]]; then
+  if [[ -f "$ENV_FILE" ]]; then
+    MYSQL_ROOT_PASSWORD="$(grep '^MYSQL_ROOT_URL=' "$ENV_FILE" | sed 's|.*://[^:]*:\([^@]*\)@.*|\1|')" || true
+  fi
+  if [[ -z "$MYSQL_ROOT_PASSWORD" ]]; then
+    MYSQL_ROOT_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)"
+  fi
+fi
+
 if [[ -z "$DB_PASSWORD" ]]; then
   if [[ -f "$ENV_FILE" ]]; then
     # Re-use the password already stored in the env file so the DB and env stay in sync
@@ -178,6 +192,7 @@ echo -e "${BOLD}Installation plan:${NC}"
 echo -e "  Erlang/OTP    : $OTP_MAJOR  (rabbitmq/rabbitmq-erlang PPA)"
 echo -e "  Elixir        : $ELIXIR_VERSION  (github.com/elixir-lang/elixir)"
 echo -e "  PostgreSQL    : $POSTGRES_MAJOR  (postgresql.org apt repo)"
+echo -e "  MySQL         : $MYSQL_VERSION  (mysql.com apt repo)"
 echo -e "  App directory : $APP_DIR"
 echo -e "  System user   : $SERVICE_USER"
 echo -e "  Database      : $DB_NAME"
@@ -186,6 +201,7 @@ echo -e "  Database      : $DB_NAME"
 [[ "$CLOUDFLARE_PROXY" == true ]] && echo -e "  Nginx mode    : ${CYAN}Cloudflare proxy (HTTP-only origin, no certbot)${NC}"
 [[ "$SKIP_CERTBOT" == true && "$CLOUDFLARE_PROXY" == false ]] && echo -e "  SSL/Certbot   : ${YELLOW}skipped${NC}"
 [[ "$SKIP_POSTGRES" == true ]]    && echo -e "  PostgreSQL    : ${YELLOW}skipped (using existing)${NC}"
+[[ "$SKIP_MYSQL" == true ]]       && echo -e "  MySQL         : ${YELLOW}skipped${NC}"
 [[ "$SKIP_PHP" == true ]]         && echo -e "  PHP-FPM       : ${YELLOW}skipped${NC}"
 echo ""
 read -rp "$(echo -e "${BOLD}Proceed? [Y/n] ${NC}")" _proceed
@@ -233,6 +249,17 @@ if [[ "$SKIP_POSTGRES" == false ]] && ! command -v psql &>/dev/null; then
     "https://www.postgresql.org/media/keys/ACCC4CF8.asc" \
     || error "Failed to download PostgreSQL signing key."
   success "PostgreSQL signing key cached"
+fi
+
+# 1c. MySQL: pre-download -------------------------------------------------------
+if [[ "$SKIP_MYSQL" == false ]] && ! command -v mysqld &>/dev/null; then
+  info "Pre-downloading MySQL $MYSQL_VERSION server..."
+  # Set the root password non-interactively via debconf
+  echo "mysql-server mysql-server/root_password password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+  echo "mysql-server mysql-server/root_password_again password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+  apt-get install -y --no-install-recommends --download-only \
+    mysql-server mysql-client >/dev/null
+  success "MySQL packages cached"
 fi
 
 # 1d. Pre-cache remaining apt packages ------------------------------------------
@@ -357,7 +384,41 @@ https://apt.postgresql.org/pub/repos/apt ${OS_CODENAME}-pgdg main" \
   success "PostgreSQL ready"
 fi
 
-# 2e. Nginx --------------------------------------------------------------------
+# 2e. MySQL --------------------------------------------------------------------
+if [[ "$SKIP_MYSQL" == false ]]; then
+  step "Installing MySQL $MYSQL_VERSION"
+
+  if ! command -v mysqld &>/dev/null; then
+    # Pre-seed root password to avoid interactive prompts
+    echo "mysql-server mysql-server/root_password password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+    echo "mysql-server mysql-server/root_password_again password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+    apt-get install -y --no-install-recommends mysql-server mysql-client
+    systemctl enable --now mysql
+    success "MySQL $MYSQL_VERSION installed"
+  else
+    success "MySQL already installed"
+  fi
+
+  step "Securing MySQL"
+
+  # Update root password if MySQL was already installed (idempotent)
+  mysqladmin -u root password "$MYSQL_ROOT_PASSWORD" 2>/dev/null \
+    || mysqladmin -u root -p"$MYSQL_ROOT_PASSWORD" password "$MYSQL_ROOT_PASSWORD" 2>/dev/null \
+    || true
+
+  # Remove anonymous users, test database, and disallow remote root login
+  mysql -u root -p"$MYSQL_ROOT_PASSWORD" <<-MYSQL_SECURE
+    DELETE FROM mysql.user WHERE User='';
+    DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+    DROP DATABASE IF EXISTS test;
+    DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+    FLUSH PRIVILEGES;
+MYSQL_SECURE
+
+  success "MySQL secured"
+fi
+
+# 2f. Nginx --------------------------------------------------------------------
 if [[ "$SKIP_NGINX" == false ]]; then
   step "Installing Nginx"
 
@@ -563,6 +624,7 @@ PHX_SERVER=true
 PHX_HOST=${DOMAIN:-localhost}
 PORT=4000
 DATABASE_URL=ecto://$DB_USER:$DB_PASSWORD@localhost/$DB_NAME
+MYSQL_ROOT_URL=mysql://root:$MYSQL_ROOT_PASSWORD@localhost:3306/mysql
 SECRET_KEY_BASE=$SECRET_KEY_BASE
 INITIAL_SETUP_TOKEN=$INITIAL_SETUP_TOKEN
 POOL_SIZE=10
@@ -596,7 +658,7 @@ step "Configuring systemd service"
 cat > "$SERVICE_FILE" <<SVCEOF
 [Unit]
 Description=Hostctl Phoenix Server
-After=network.target postgresql.service
+After=network.target postgresql.service mysql.service
 Requires=postgresql.service
 
 [Service]

@@ -71,6 +71,9 @@ config :hostctl, HostctlWeb.Endpoint,
 # Disable FTP server integration in development (no vsftpd running locally)
 config :hostctl, :ftp_server, enabled: false
 
+# Disable MySQL database server integration in development
+config :hostctl, :database_server, enabled: false
+
 # Enable dev routes for dashboard and mailbox
 config :hostctl, dev_routes: true
 
