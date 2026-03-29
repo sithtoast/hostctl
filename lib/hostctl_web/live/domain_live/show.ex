@@ -5,6 +5,7 @@ defmodule HostctlWeb.DomainLive.Show do
   alias Hostctl.Hosting.{SslCertificate, Subdomain}
   alias Hostctl.Settings
   alias Hostctl.WebServer
+  alias Hostctl.MailServer
 
   def mount(%{"id" => id}, _session, socket) do
     domain = Hosting.get_domain!(socket.assigns.current_scope, id)
@@ -66,7 +67,8 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign_ssl_form()
      |> assign_subdomain_form()
      |> assign_cron_form()
-     |> assign_ftp_form()}
+     |> assign_ftp_form()
+     |> assign_smarthost_form()}
   end
 
   def handle_params(_params, _url, socket) do
@@ -106,6 +108,9 @@ defmodule HostctlWeb.DomainLive.Show do
 
         :ftp ->
           stream(socket, :ftp_accounts, Hosting.list_ftp_accounts(domain), reset: true)
+
+        :smarthost ->
+          socket
 
         _ ->
           socket
@@ -327,6 +332,72 @@ defmodule HostctlWeb.DomainLive.Show do
     end
   end
 
+  # Smarthost events
+  def handle_event("validate_smarthost", %{"smarthost" => params}, socket) do
+    changeset =
+      Hosting.change_domain_smarthost_setting(socket.assigns.smarthost_setting, params)
+      |> Map.put(:action, :validate)
+
+    {:noreply, assign(socket, :smarthost_form, to_form(changeset, as: :smarthost))}
+  end
+
+  def handle_event("submit_smarthost", %{"action" => "apply"} = params, socket) do
+    domain = socket.assigns.domain
+    smarthost_params = Map.get(params, "smarthost", %{})
+
+    case Hosting.save_domain_smarthost_setting(domain, smarthost_params) do
+      {:ok, setting} ->
+        apply_status =
+          if Settings.feature_enabled?("email") do
+            case MailServer.apply_domain_smarthost(setting) do
+              :ok -> :applied
+              {:error, _reason} -> :apply_failed
+            end
+          else
+            :saved
+          end
+
+        socket =
+          socket
+          |> assign(:smarthost_setting, setting)
+          |> assign(
+            :smarthost_form,
+            to_form(Hosting.change_domain_smarthost_setting(setting), as: :smarthost)
+          )
+          |> assign(:smarthost_apply_status, apply_status)
+
+        {:noreply, socket}
+
+      {:error, changeset} ->
+        {:noreply, assign(socket, :smarthost_form, to_form(changeset, as: :smarthost))}
+    end
+  end
+
+  def handle_event("submit_smarthost", %{"smarthost" => params}, socket) do
+    domain = socket.assigns.domain
+
+    case Hosting.save_domain_smarthost_setting(domain, params) do
+      {:ok, setting} ->
+        socket =
+          socket
+          |> assign(:smarthost_setting, setting)
+          |> assign(
+            :smarthost_form,
+            to_form(Hosting.change_domain_smarthost_setting(setting), as: :smarthost)
+          )
+          |> assign(:smarthost_apply_status, :saved)
+
+        {:noreply, socket}
+
+      {:error, changeset} ->
+        {:noreply, assign(socket, :smarthost_form, to_form(changeset, as: :smarthost))}
+    end
+  end
+
+  def handle_event("toggle_smarthost_password", _params, socket) do
+    {:noreply, update(socket, :smarthost_show_password, &(!&1))}
+  end
+
   defp assign_ssl_form(socket) do
     user_email = socket.assigns.current_scope.user.email
     changeset = Hosting.change_ssl_certificate(%SslCertificate{}, %{email: user_email})
@@ -343,6 +414,19 @@ defmodule HostctlWeb.DomainLive.Show do
 
   defp assign_ftp_form(socket) do
     assign(socket, :ftp_form, to_form(Hosting.change_ftp_account(%Hostctl.Hosting.FtpAccount{})))
+  end
+
+  defp assign_smarthost_form(socket) do
+    setting = Hosting.get_domain_smarthost_setting(socket.assigns.domain)
+
+    socket
+    |> assign(:smarthost_setting, setting)
+    |> assign(
+      :smarthost_form,
+      to_form(Hosting.change_domain_smarthost_setting(setting), as: :smarthost)
+    )
+    |> assign(:smarthost_show_password, false)
+    |> assign(:smarthost_apply_status, nil)
   end
 
   def render(assigns) do
@@ -399,6 +483,13 @@ defmodule HostctlWeb.DomainLive.Show do
               base_tabs ++ [{"FTP", :ftp, "hero-folder"}]
             else
               base_tabs
+            end
+
+          tabs =
+            if Settings.feature_enabled?("email") do
+              tabs ++ [{"Smarthost", :smarthost, "hero-envelope-open"}]
+            else
+              tabs
             end %>
           <%= for {label, section, icon} <- tabs do %>
             <button
@@ -897,6 +988,132 @@ defmodule HostctlWeb.DomainLive.Show do
                   </div>
                 <% end %>
               </div>
+            </div>
+          </div>
+        <% end %>
+
+        <%!-- Smarthost --%>
+        <%= if @active_section == :smarthost do %>
+          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
+            <div class="px-6 py-5 border-b border-gray-200 dark:border-gray-800">
+              <h3 class="text-base font-semibold text-gray-900 dark:text-white">Domain Smarthost</h3>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                Override the server-wide relay for outgoing mail from {@domain.name}.
+              </p>
+            </div>
+            <div class="p-6">
+              <.form
+                for={@smarthost_form}
+                id="smarthost-form"
+                phx-change="validate_smarthost"
+                phx-submit="submit_smarthost"
+                class="space-y-5"
+              >
+                <%!-- Enable toggle --%>
+                <div class="flex items-center gap-3">
+                  <.input
+                    field={@smarthost_form[:enabled]}
+                    type="checkbox"
+                    label="Enable domain smarthost"
+                  />
+                </div>
+
+                <div class={[
+                  @smarthost_form[:enabled].value != true && "opacity-50 pointer-events-none"
+                ]}>
+                  <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <.input
+                      field={@smarthost_form[:host]}
+                      type="text"
+                      label="Relay host"
+                      placeholder="smtp.mailgun.org"
+                    />
+                    <.input
+                      field={@smarthost_form[:port]}
+                      type="number"
+                      label="Port"
+                      placeholder="587"
+                    />
+                  </div>
+
+                  <div class="mt-4 flex items-center gap-3">
+                    <.input
+                      field={@smarthost_form[:auth_required]}
+                      type="checkbox"
+                      label="Authentication required"
+                    />
+                  </div>
+
+                  <div class={[
+                    "mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2",
+                    @smarthost_form[:auth_required].value != true && "opacity-50 pointer-events-none"
+                  ]}>
+                    <.input
+                      field={@smarthost_form[:username]}
+                      type="text"
+                      label="Username"
+                      placeholder="postmaster@mg.example.com"
+                    />
+                    <div class="relative">
+                      <.input
+                        field={@smarthost_form[:password]}
+                        type={if(@smarthost_show_password, do: "text", else: "password")}
+                        label="Password / API key"
+                        placeholder="••••••••"
+                      />
+                      <button
+                        type="button"
+                        phx-click="toggle_smarthost_password"
+                        class="absolute right-3 top-8 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                      >
+                        <.icon
+                          name={if(@smarthost_show_password, do: "hero-eye-slash", else: "hero-eye")}
+                          class="w-4 h-4"
+                        />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flex items-center justify-between pt-2">
+                  <div class="text-sm">
+                    <%= cond do %>
+                      <% @smarthost_apply_status == :applied -> %>
+                        <span class="text-green-600 dark:text-green-400 flex items-center gap-1">
+                          <.icon name="hero-check-circle" class="w-4 h-4" /> Saved &amp; applied
+                        </span>
+                      <% @smarthost_apply_status == :saved -> %>
+                        <span class="text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                          <.icon name="hero-check" class="w-4 h-4" /> Saved
+                        </span>
+                      <% @smarthost_apply_status == :apply_failed -> %>
+                        <span class="text-red-600 dark:text-red-400 flex items-center gap-1">
+                          <.icon name="hero-x-circle" class="w-4 h-4" /> Saved, but apply failed
+                        </span>
+                      <% true -> %>
+                        <span></span>
+                    <% end %>
+                  </div>
+                  <div class="flex gap-2">
+                    <button
+                      type="submit"
+                      name="action"
+                      value="save"
+                      class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="submit"
+                      name="action"
+                      value="apply"
+                      class="px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors"
+                    >
+                      Save &amp; Apply
+                    </button>
+                  </div>
+                </div>
+              </.form>
             </div>
           </div>
         <% end %>

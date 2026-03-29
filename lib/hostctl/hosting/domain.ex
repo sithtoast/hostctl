@@ -11,7 +11,8 @@ defmodule Hostctl.Hosting.Domain do
     Database,
     SslCertificate,
     CronJob,
-    FtpAccount
+    FtpAccount,
+    DomainSmarthostSetting
   }
 
   schema "domains" do
@@ -31,6 +32,7 @@ defmodule Hostctl.Hosting.Domain do
     has_one :ssl_certificate, SslCertificate
     has_many :cron_jobs, CronJob
     has_many :ftp_accounts, FtpAccount
+    has_one :smarthost_setting, DomainSmarthostSetting
 
     timestamps(type: :utc_datetime)
   end

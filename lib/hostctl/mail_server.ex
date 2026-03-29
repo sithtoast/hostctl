@@ -1,14 +1,29 @@
 defmodule Hostctl.MailServer do
   @moduledoc """
-  Manages Postfix smarthost (relayhost) configuration.
+  Manages Postfix smarthost (relayhost) configuration — both server-wide and
+  per-domain.
 
-  When a smarthost is enabled, this module writes the SASL credentials file,
-  builds the hash database, and sets the required Postfix directives via
-  `postconf -e`. When disabled, the smarthost directives are removed.
+  ## Server-wide smarthost
 
-  All filesystem and process operations are run via `systemd-run` to escape the
-  service's `ProtectSystem=strict` mount namespace, mirroring the same pattern
-  used by `Hostctl.FeatureSetup`.
+  `apply_smarthost/1` writes `/etc/postfix/sasl_passwd`, runs `postmap`,
+  configures `relayhost` and related SASL directives via `postconf -e`, and
+  reloads Postfix. Disabling removes all those directives.
+
+  ## Per-domain smarthost
+
+  Per-domain overrides use Postfix's `sender_dependent_relayhost_maps` mechanism.
+  `apply_domain_smarthost/2` rebuilds two hash maps from the full set of enabled
+  domain settings stored in the database:
+
+    - `/etc/postfix/domain_relay`         — maps `@domain.com` → relay host:port
+    - `/etc/postfix/domain_relay_secrets` — maps relay host:port → user:pass
+
+  It also sets the required baseline `main.cf` directives
+  (`smtp_sender_dependent_authentication`, `sender_dependent_relayhost_maps`) and
+  reloads Postfix. Domain-level settings take priority over the server-wide relay.
+
+  All filesystem/process operations run via `sudo systemd-run --pipe --wait` to
+  escape `ProtectSystem=strict`.
 
   Set `enabled: false` in config to skip all operations (test/dev):
 
@@ -17,7 +32,11 @@ defmodule Hostctl.MailServer do
 
   require Logger
 
+  alias Hostctl.Hosting
+
   @sasl_passwd_path "/etc/postfix/sasl_passwd"
+  @domain_relay_path "/etc/postfix/domain_relay"
+  @domain_relay_secrets_path "/etc/postfix/domain_relay_secrets"
 
   @sasl_directives ~w(
     smtp_sasl_auth_enable
@@ -27,8 +46,12 @@ defmodule Hostctl.MailServer do
     relayhost
   )
 
+  # ---------------------------------------------------------------------------
+  # Server-wide smarthost
+  # ---------------------------------------------------------------------------
+
   @doc """
-  Applies the smarthost configuration to Postfix.
+  Applies the server-wide smarthost configuration to Postfix.
 
   If `setting.enabled` is true, writes credentials and configures Postfix.
   If false, removes the relayhost directives and reloads Postfix.
@@ -47,16 +70,12 @@ defmodule Hostctl.MailServer do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # Configuration
-  # ---------------------------------------------------------------------------
-
   defp configure_smarthost(setting) do
     host_port = format_host_port(setting.host, setting.port)
 
     with :ok <- write_sasl_passwd(host_port, setting),
-         :ok <- secure_sasl_passwd(),
-         :ok <- run_postmap(),
+         :ok <- secure_file(@sasl_passwd_path),
+         :ok <- run_postmap(@sasl_passwd_path),
          :ok <- set_postfix_directives(host_port, setting),
          :ok <- reload_postfix() do
       :ok
@@ -76,30 +95,7 @@ defmodule Hostctl.MailServer do
   end
 
   defp write_sasl_passwd(_host_port, _setting) do
-    # No auth required — write an empty credentials file
     write_file(@sasl_passwd_path, "")
-  end
-
-  defp secure_sasl_passwd do
-    case escaped_cmd("chmod", ["600", @sasl_passwd_path], stderr_to_stdout: true) do
-      {_, 0} ->
-        :ok
-
-      {output, code} ->
-        Logger.error("[MailServer] chmod sasl_passwd failed (#{code}): #{output}")
-        {:error, {:chmod_failed, code}}
-    end
-  end
-
-  defp run_postmap do
-    case escaped_cmd("postmap", [@sasl_passwd_path], stderr_to_stdout: true) do
-      {_, 0} ->
-        :ok
-
-      {output, code} ->
-        Logger.error("[MailServer] postmap failed (#{code}): #{output}")
-        {:error, {:postmap_failed, code}}
-    end
   end
 
   defp set_postfix_directives(host_port, setting) do
@@ -115,11 +111,90 @@ defmodule Hostctl.MailServer do
             "smtp_sasl_security_options=noanonymous"
           ]
         else
-          [
-            "smtp_sasl_auth_enable=no"
-          ]
+          ["smtp_sasl_auth_enable=no"]
         end
 
+    run_postconf_e(directives)
+  end
+
+  defp clear_postfix_directives do
+    case escaped_cmd("postconf", ["-X" | @sasl_directives], stderr_to_stdout: true) do
+      {_, 0} ->
+        :ok
+
+      {output, code} ->
+        Logger.error("[MailServer] postconf -X failed (#{code}): #{output}")
+        {:error, {:postconf_failed, code}}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Per-domain smarthost
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Applies per-domain relay configuration for the given domain.
+
+  Rebuilds the full `domain_relay` and `domain_relay_secrets` hash maps from
+  all enabled domain smarthost settings in the database (including the one just
+  saved), sets the required Postfix baseline directives, and reloads Postfix.
+
+  Pass `domain` as the `%Domain{}` whose setting was just changed so the
+  caller's context is clear, but the rebuild is always from the full DB state.
+
+  Returns `:ok` or `{:error, reason}`.
+  """
+  def apply_domain_smarthost(_domain) do
+    if enabled?() do
+      rebuild_domain_relay_maps()
+    else
+      :ok
+    end
+  end
+
+  defp rebuild_domain_relay_maps do
+    settings = Hosting.list_enabled_domain_smarthost_settings()
+
+    relay_entries =
+      Enum.map(settings, fn s ->
+        host_port = format_host_port(s.host, s.port)
+        "@#{s.domain.name} #{host_port}"
+      end)
+
+    secrets_entries =
+      settings
+      |> Enum.filter(& &1.auth_required)
+      |> Enum.map(fn s ->
+        host_port = format_host_port(s.host, s.port)
+        "#{host_port} #{s.username}:#{s.password}"
+      end)
+      |> Enum.uniq()
+
+    with :ok <- write_file(@domain_relay_path, Enum.join(relay_entries, "\n") <> "\n"),
+         :ok <- write_file(@domain_relay_secrets_path, Enum.join(secrets_entries, "\n") <> "\n"),
+         :ok <- secure_file(@domain_relay_secrets_path),
+         :ok <- run_postmap(@domain_relay_path),
+         :ok <- run_postmap(@domain_relay_secrets_path),
+         :ok <- set_domain_relay_directives(),
+         :ok <- reload_postfix() do
+      :ok
+    end
+  end
+
+  defp set_domain_relay_directives do
+    directives = [
+      "smtp_sender_dependent_authentication=yes",
+      "sender_dependent_relayhost_maps=hash:#{@domain_relay_path}"
+    ]
+
+    run_postconf_e(directives)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Shared helpers
+  # ---------------------------------------------------------------------------
+
+  defp run_postconf_e(directives) do
     Enum.reduce_while(directives, :ok, fn directive, :ok ->
       case escaped_cmd("postconf", ["-e", directive], stderr_to_stdout: true) do
         {_, 0} ->
@@ -132,14 +207,25 @@ defmodule Hostctl.MailServer do
     end)
   end
 
-  defp clear_postfix_directives do
-    case escaped_cmd("postconf", ["-X" | @sasl_directives], stderr_to_stdout: true) do
+  defp secure_file(path) do
+    case escaped_cmd("chmod", ["600", path], stderr_to_stdout: true) do
       {_, 0} ->
         :ok
 
       {output, code} ->
-        Logger.error("[MailServer] postconf -X failed (#{code}): #{output}")
-        {:error, {:postconf_failed, code}}
+        Logger.error("[MailServer] chmod #{path} failed (#{code}): #{output}")
+        {:error, {:chmod_failed, code}}
+    end
+  end
+
+  defp run_postmap(path) do
+    case escaped_cmd("postmap", [path], stderr_to_stdout: true) do
+      {_, 0} ->
+        :ok
+
+      {output, code} ->
+        Logger.error("[MailServer] postmap #{path} failed (#{code}): #{output}")
+        {:error, {:postmap_failed, code}}
     end
   end
 
@@ -154,19 +240,9 @@ defmodule Hostctl.MailServer do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # Helpers
-  # ---------------------------------------------------------------------------
-
   defp format_host_port(host, port) do
-    # Wrap bare hostnames in brackets (disables MX lookup, required for relay)
-    # If the user already wrapped in brackets, leave as-is
     bracketed =
-      if String.starts_with?(host, "[") do
-        host
-      else
-        "[#{host}]"
-      end
+      if String.starts_with?(host, "["), do: host, else: "[#{host}]"
 
     "#{bracketed}:#{port}"
   end

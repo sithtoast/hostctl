@@ -20,7 +20,8 @@ defmodule Hostctl.Hosting do
     Database,
     SslCertificate,
     CronJob,
-    FtpAccount
+    FtpAccount,
+    DomainSmarthostSetting
   }
 
   # ---------------------------------------------------------------------------
@@ -568,5 +569,51 @@ defmodule Hostctl.Hosting do
 
   def change_ftp_account_for_update(%FtpAccount{} = account, attrs \\ %{}) do
     FtpAccount.update_changeset(account, attrs)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Domain Smarthost Settings
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Returns the smarthost setting for a domain, or a new unsaved struct if none exists.
+  """
+  def get_domain_smarthost_setting(%Domain{} = domain) do
+    Repo.get_by(DomainSmarthostSetting, domain_id: domain.id) ||
+      %DomainSmarthostSetting{domain_id: domain.id}
+  end
+
+  @doc """
+  Upserts the smarthost setting for a domain.
+  """
+  def save_domain_smarthost_setting(%Domain{} = domain, attrs) do
+    case get_domain_smarthost_setting(domain) do
+      %DomainSmarthostSetting{id: nil} = new ->
+        new
+        |> DomainSmarthostSetting.changeset(attrs)
+        |> Repo.insert()
+
+      existing ->
+        existing
+        |> DomainSmarthostSetting.changeset(attrs)
+        |> Repo.update()
+    end
+  end
+
+  @doc "Returns a changeset for a domain smarthost setting."
+  def change_domain_smarthost_setting(%DomainSmarthostSetting{} = setting, attrs \\ %{}) do
+    DomainSmarthostSetting.changeset(setting, attrs)
+  end
+
+  @doc """
+  Returns all domain smarthost settings that are enabled, with domain preloaded.
+  Used by MailServer when rebuilding the full relay map.
+  """
+  def list_enabled_domain_smarthost_settings do
+    Repo.all(
+      from s in DomainSmarthostSetting,
+        where: s.enabled == true,
+        preload: [:domain]
+    )
   end
 end
