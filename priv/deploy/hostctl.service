@@ -21,7 +21,7 @@ SyslogIdentifier=hostctl
 # Security hardening
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/opt/hostctl /var/log/hostctl /usr/local/src/hostctl /run/sudo
+ReadWritePaths=/opt/hostctl /var/log/hostctl /usr/local/src/hostctl /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg
 RuntimeDirectory=hostctl
 RuntimeDirectoryMode=0700
 

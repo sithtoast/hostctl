@@ -168,17 +168,24 @@ ensure_sudoers "/etc/sudoers.d/hostctl-features" "Feature management" "$FEATURES
 # =============================================================================
 head "4. Systemd service"
 
-REQUIRED_RW_PATHS="$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp /run/sudo"
+REQUIRED_RW_PATHS="$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg"
 
 if [[ -f "$SERVICE_FILE" ]]; then
-  # Check if ReadWritePaths includes /run/sudo
+  # Check if ReadWritePaths includes all required paths
   if grep -q '^ReadWritePaths=' "$SERVICE_FILE"; then
     current_rw="$(grep '^ReadWritePaths=' "$SERVICE_FILE" | head -1)"
-    if echo "$current_rw" | grep -q '/run/sudo'; then
-      ok "ReadWritePaths includes /run/sudo"
+    rw_ok=true
+    for rw_path in /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg; do
+      if ! echo "$current_rw" | grep -q "$rw_path"; then
+        rw_ok=false
+        break
+      fi
+    done
+    if $rw_ok; then
+      ok "ReadWritePaths includes all required paths"
     else
       sed -i 's|^ReadWritePaths=.*|'"ReadWritePaths=$REQUIRED_RW_PATHS"'|' "$SERVICE_FILE"
-      fix "ReadWritePaths → added /run/sudo"
+      fix "ReadWritePaths → updated with all required paths"
       FIXED=$((FIXED + 1))
     fi
   else

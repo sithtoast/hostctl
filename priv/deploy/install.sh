@@ -626,7 +626,7 @@ StandardError=journal
 SyslogIdentifier=$APP_NAME
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp /run/sudo
+ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg
 
 [Install]
 WantedBy=multi-user.target
