@@ -50,6 +50,40 @@ defmodule Hostctl.FeatureSetup do
       packages: [],
       services: ["cron"],
       setup_fn: nil
+    },
+    %{
+      key: "roundcube",
+      label: "Roundcube Webmail",
+      description:
+        "Feature-rich webmail client with full IMAP support, address book, and plugin system. Accessible at /roundcube.",
+      icon: "hero-inbox-stack",
+      packages: [
+        "roundcube",
+        "roundcube-core",
+        "roundcube-plugins",
+        "apache2",
+        "libapache2-mod-php"
+      ],
+      services: ["apache2"],
+      setup_fn: :setup_roundcube
+    },
+    %{
+      key: "snappymail",
+      label: "SnappyMail",
+      description:
+        "Lightweight, modern webmail client (successor to RainLoop). Fast, mobile-friendly UI accessible at /snappymail.",
+      icon: "hero-bolt",
+      packages: [
+        "apache2",
+        "libapache2-mod-php",
+        "php-curl",
+        "php-xml",
+        "php-mbstring",
+        "php-json",
+        "unzip"
+      ],
+      services: ["apache2"],
+      setup_fn: :setup_snappymail
     }
   ]
 
@@ -324,6 +358,115 @@ defmodule Hostctl.FeatureSetup do
     """
 
     write_file_via_sudo(key, "/etc/vsftpd.conf", conf)
+  end
+
+  @doc false
+  def setup_roundcube(key) do
+    broadcast(key, :log, "Configuring Roundcube Webmail...")
+
+    # Configure Roundcube to connect to local IMAP/SMTP
+    config = """
+    <?php
+    $config['imap_host'] = 'localhost:143';
+    $config['smtp_host'] = 'localhost:587';
+    $config['smtp_auth_type'] = 'LOGIN';
+    $config['product_name'] = 'hostctl Webmail';
+    $config['des_key'] = '#{random_des_key()}';
+    $config['plugins'] = ['archive', 'zipdownload'];
+    $config['skin'] = 'elastic';
+    """
+
+    with :ok <- write_file_via_sudo(key, "/etc/roundcube/config.inc.php", config),
+         :ok <- enable_apache_conf(key, "roundcube") do
+      broadcast(key, :log, "Roundcube configuration complete.")
+      broadcast(key, :log, "Webmail is available at http://<server>/roundcube")
+      :ok
+    end
+  end
+
+  @doc false
+  def setup_snappymail(key) do
+    broadcast(key, :log, "Installing SnappyMail...")
+
+    install_dir = "/var/www/snappymail"
+
+    with :ok <- run_cmd(key, "mkdir", ["-p", install_dir]),
+         :ok <- download_snappymail(key, install_dir),
+         :ok <- run_cmd(key, "chown", ["-R", "www-data:www-data", install_dir]),
+         :ok <- write_snappymail_apache_conf(key),
+         :ok <- enable_apache_conf(key, "snappymail") do
+      broadcast(key, :log, "SnappyMail configuration complete.")
+      broadcast(key, :log, "Webmail is available at http://<server>/snappymail")
+
+      broadcast(
+        key,
+        :log,
+        "Admin panel: http://<server>/snappymail/?admin (default password: 12345)"
+      )
+
+      :ok
+    end
+  end
+
+  defp download_snappymail(key, install_dir) do
+    broadcast(key, :log, "Downloading latest SnappyMail release...")
+
+    url = "https://snappymail.eu/repository/latest.tar.gz"
+
+    case escaped_cmd(
+           "sh",
+           ["-c", "curl -fsSL '#{url}' | tar xz -C '#{install_dir}'"],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        broadcast(key, :log, "SnappyMail downloaded and extracted.")
+        :ok
+
+      {output, code} ->
+        broadcast(key, :log, "Download failed (exit #{code}): #{output}")
+        {:error, {:download_failed, code}}
+    end
+  end
+
+  defp write_snappymail_apache_conf(key) do
+    broadcast(key, :log, "Writing Apache config for SnappyMail...")
+
+    conf = """
+    Alias /snappymail /var/www/snappymail
+
+    <Directory /var/www/snappymail>
+        Options -Indexes
+        AllowOverride All
+        Require all granted
+
+        <FilesMatch "\\.php$">
+            SetHandler application/x-httpd-php
+        </FilesMatch>
+    </Directory>
+
+    <Directory /var/www/snappymail/data>
+        Require all denied
+    </Directory>
+    """
+
+    write_file_via_sudo(key, "/etc/apache2/conf-available/snappymail.conf", conf)
+  end
+
+  defp enable_apache_conf(key, conf_name) do
+    broadcast(key, :log, "Enabling Apache config for #{conf_name}...")
+
+    with {_, 0} <- escaped_cmd("a2enconf", [conf_name], stderr_to_stdout: true),
+         {_, 0} <- escaped_cmd("systemctl", ["reload", "apache2"], stderr_to_stdout: true) do
+      :ok
+    else
+      {output, code} ->
+        broadcast(key, :log, "Failed to enable Apache config (exit #{code}): #{output}")
+        {:error, {:apache_conf_failed, code}}
+    end
+  end
+
+  defp random_des_key do
+    :crypto.strong_rand_bytes(24) |> Base.encode64() |> binary_part(0, 24)
   end
 
   # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ defmodule HostctlWeb.EmailLive.Index do
 
   alias Hostctl.Hosting
   alias Hostctl.Hosting.EmailAccount
+  alias Hostctl.Settings
 
   def mount(_params, _session, socket) do
     domains = Hosting.list_domains(socket.assigns.current_scope)
@@ -15,6 +16,7 @@ defmodule HostctlWeb.EmailLive.Index do
      |> assign(:domains, domains)
      |> assign(:selected_domain_id, nil)
      |> assign(:accounts_empty?, all_accounts == [])
+     |> assign(:webmail_links, webmail_links())
      |> assign_form()
      |> stream(:email_accounts, all_accounts)}
   end
@@ -93,6 +95,14 @@ defmodule HostctlWeb.EmailLive.Index do
     end
   end
 
+  defp webmail_links do
+    [
+      {"roundcube", "Roundcube", "/roundcube", "hero-inbox-stack"},
+      {"snappymail", "SnappyMail", "/snappymail", "hero-bolt"}
+    ]
+    |> Enum.filter(fn {key, _, _, _} -> Settings.feature_enabled?(key) end)
+  end
+
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
@@ -104,6 +114,21 @@ defmodule HostctlWeb.EmailLive.Index do
               Manage email accounts for your domains
             </p>
           </div>
+          <%= if @webmail_links != [] do %>
+            <div class="flex items-center gap-2">
+              <a
+                :for={{_key, label, path, icon} <- @webmail_links}
+                href={path}
+                target="_blank"
+                rel="noopener noreferrer"
+                class="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 text-sm font-medium rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                <.icon name={icon} class="w-4 h-4" />
+                {label}
+                <.icon name="hero-arrow-top-right-on-square" class="w-3.5 h-3.5 text-gray-400" />
+              </a>
+            </div>
+          <% end %>
         </div>
 
         <%= if @domains == [] do %>
@@ -138,7 +163,13 @@ defmodule HostctlWeb.EmailLive.Index do
             >
               <div class="flex flex-col sm:flex-row items-start gap-3">
                 <div class="flex-1 w-full sm:w-auto">
-                  <.input field={@form[:username]} type="text" label="Username" placeholder="info" errors={[]} />
+                  <.input
+                    field={@form[:username]}
+                    type="text"
+                    label="Username"
+                    placeholder="info"
+                    errors={[]}
+                  />
                 </div>
                 <span class="hidden sm:block mt-8 text-gray-500 dark:text-gray-400 text-sm">@</span>
                 <div class="flex-1 w-full sm:w-auto fieldset mb-2">
@@ -177,13 +208,22 @@ defmodule HostctlWeb.EmailLive.Index do
               </div>
               <%= if @form.source.action do %>
                 <div class="flex flex-wrap gap-x-4 gap-y-1">
-                  <p :for={msg <- Enum.map(@form[:username].errors, &translate_error(&1))} class="flex items-center gap-1.5 text-sm text-error">
+                  <p
+                    :for={msg <- Enum.map(@form[:username].errors, &translate_error(&1))}
+                    class="flex items-center gap-1.5 text-sm text-error"
+                  >
                     <.icon name="hero-exclamation-circle" class="size-4" /> Username {msg}
                   </p>
-                  <p :for={msg <- Enum.map(@form[:password].errors, &translate_error(&1))} class="flex items-center gap-1.5 text-sm text-error">
+                  <p
+                    :for={msg <- Enum.map(@form[:password].errors, &translate_error(&1))}
+                    class="flex items-center gap-1.5 text-sm text-error"
+                  >
                     <.icon name="hero-exclamation-circle" class="size-4" /> Password {msg}
                   </p>
-                  <p :for={msg <- Enum.map(@form[:quota_mb].errors, &translate_error(&1))} class="flex items-center gap-1.5 text-sm text-error">
+                  <p
+                    :for={msg <- Enum.map(@form[:quota_mb].errors, &translate_error(&1))}
+                    class="flex items-center gap-1.5 text-sm text-error"
+                  >
                     <.icon name="hero-exclamation-circle" class="size-4" /> Quota {msg}
                   </p>
                 </div>
@@ -257,49 +297,53 @@ defmodule HostctlWeb.EmailLive.Index do
                   <th class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
                 </tr>
               </thead>
-              <tbody id="email-accounts" phx-update="stream" class="divide-y divide-gray-100 dark:divide-gray-800">
+              <tbody
+                id="email-accounts"
+                phx-update="stream"
+                class="divide-y divide-gray-100 dark:divide-gray-800"
+              >
                 <tr
                   :for={{id, account} <- @streams.email_accounts}
                   id={id}
                   class="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
                 >
-                    <td class="px-6 py-4">
-                      <div class="flex items-center gap-3">
-                        <div class="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 text-xs font-bold shrink-0">
-                          {String.upcase(String.slice(account.username, 0, 1))}
-                        </div>
-                        <p class="text-sm font-medium text-gray-900 dark:text-white">
-                          {account.username}
-                        </p>
+                  <td class="px-6 py-4">
+                    <div class="flex items-center gap-3">
+                      <div class="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 text-xs font-bold shrink-0">
+                        {String.upcase(String.slice(account.username, 0, 1))}
                       </div>
-                    </td>
-                    <td class="px-6 py-4 text-sm text-gray-600 dark:text-gray-400">
-                      {account.quota_mb} MB
-                    </td>
-                    <td class="px-6 py-4">
-                      <span class={[
-                        "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
-                        if(account.status == "active",
-                          do: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-                          else: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                        )
-                      ]}>
-                        {account.status}
-                      </span>
-                    </td>
-                    <td class="px-6 py-4 text-right">
-                      <button
-                        phx-click="delete"
-                        phx-value-id={account.id}
-                        data-confirm="Delete this email account?"
-                        class="text-xs font-medium text-red-500 hover:text-red-600"
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+                      <p class="text-sm font-medium text-gray-900 dark:text-white">
+                        {account.username}
+                      </p>
+                    </div>
+                  </td>
+                  <td class="px-6 py-4 text-sm text-gray-600 dark:text-gray-400">
+                    {account.quota_mb} MB
+                  </td>
+                  <td class="px-6 py-4">
+                    <span class={[
+                      "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
+                      if(account.status == "active",
+                        do: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+                        else: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                      )
+                    ]}>
+                      {account.status}
+                    </span>
+                  </td>
+                  <td class="px-6 py-4 text-right">
+                    <button
+                      phx-click="delete"
+                      phx-value-id={account.id}
+                      data-confirm="Delete this email account?"
+                      class="text-xs font-medium text-red-500 hover:text-red-600"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         <% end %>
       </div>
