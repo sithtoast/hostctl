@@ -23,7 +23,7 @@ defmodule Hostctl.MailgunClient do
   Returns `{:ok, [%{name, smtp_login, state}]}` or `{:error, reason}`.
   """
   def list_domains(api_key) do
-    Req.get("#{@us_base}/v4/domains", headers: basic_auth(api_key))
+    Req.get("#{@us_base}/v3/domains", auth: {"api", api_key})
     |> parse(fn body ->
       items = body["items"] || []
 
@@ -57,7 +57,7 @@ defmodule Hostctl.MailgunClient do
     creds_url = "#{base}/v3/#{URI.encode(domain_name, &URI.char_unreserved?/1)}/credentials"
 
     case Req.post(creds_url,
-           headers: basic_auth(api_key),
+           auth: {"api", api_key},
            form: [login: login, password: password]
          )
          |> parse(fn _ -> {:ok, :created} end) do
@@ -67,7 +67,7 @@ defmodule Hostctl.MailgunClient do
       {:error, _} ->
         # Credential likely already exists — update the password instead
         Req.put("#{creds_url}/#{login}",
-          headers: basic_auth(api_key),
+          auth: {"api", api_key},
           form: [password: password]
         )
         |> parse(fn _ -> {:ok, %{login: "#{login}@#{domain_name}", password: password}} end)
@@ -77,11 +77,6 @@ defmodule Hostctl.MailgunClient do
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
-
-  defp basic_auth(api_key) do
-    encoded = Base.encode64("api:#{api_key}")
-    [{"Authorization", "Basic #{encoded}"}]
-  end
 
   defp parse({:ok, %Req.Response{status: status, body: body}}, success_fn)
        when status in 200..299 do
