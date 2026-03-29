@@ -735,7 +735,7 @@ defmodule Hostctl.Hosting do
         end
 
       sync_mailgun_dns_to_cloudflare(domain_name, domain_info, dmarc_records)
-      ensure_dmarc_record(domain_name)
+      ensure_dmarc_record(domain_name, dmarc_records)
       MailgunClient.create_smtp_credential(api_key, domain_name, region)
     end
   end
@@ -836,26 +836,48 @@ defmodule Hostctl.Hosting do
 
   # Ensures a _dmarc TXT record exists for the domain. Called after Mailgun
   # provisioning as a fallback — Mailgun's DMARC API often returns nothing.
-  defp ensure_dmarc_record(domain_name) do
+  # Upserts the _dmarc TXT record using Mailgun-provided records when available,
+  # falling back to a sensible default. Always upserts so re-provisioning updates
+  # any stale value.
+  defp ensure_dmarc_record(domain_name, mailgun_dmarc_records) do
     with %Domain{} = domain <- Repo.get_by(Domain, name: domain_name),
          %DnsZone{} = zone <- Repo.get_by(DnsZone, domain_id: domain.id) do
       dmarc_name = "_dmarc.#{domain_name}"
 
-      unless Repo.get_by(DnsRecord, dns_zone_id: zone.id, type: "TXT", name: dmarc_name) do
-        attrs = %{
-          type: "TXT",
-          name: dmarc_name,
-          value: "v=DMARC1; p=none; rua=mailto:postmaster@#{domain_name}",
-          ttl: 300
-        }
+      # Prefer the record Mailgun provides; fall back to a sensible default
+      dmarc_value =
+        case Enum.find(mailgun_dmarc_records, fn r ->
+               r.name == dmarc_name or r.name == "_dmarc" or
+                 String.starts_with?(to_string(r.name), "_dmarc")
+             end) do
+          %{value: v} when is_binary(v) and v != "" ->
+            v
 
-        %DnsRecord{dns_zone_id: zone.id}
-        |> DnsRecord.changeset(attrs)
-        |> Repo.insert()
-        |> case do
-          {:ok, record} -> maybe_sync_create_to_cloudflare(zone, record)
-          _ -> :ok
+          _ ->
+            "v=DMARC1; p=none; pct=100; fo=1; ri=3600; rua=mailto:postmaster@#{domain_name}"
         end
+
+      attrs = %{type: "TXT", name: dmarc_name, value: dmarc_value, ttl: 300}
+
+      # Delete any existing _dmarc record (plain Repo.delete_all so Cloudflare
+      # sync doesn't fire twice — we'll push the new record right after)
+      existing = Repo.get_by(DnsRecord, dns_zone_id: zone.id, type: "TXT", name: dmarc_name)
+
+      if existing do
+        maybe_sync_delete_to_cloudflare(existing)
+        Repo.delete(existing)
+      end
+
+      %DnsRecord{dns_zone_id: zone.id}
+      |> DnsRecord.changeset(attrs)
+      |> Repo.insert()
+      |> case do
+        {:ok, record} ->
+          Logger.info("[DMARC] Upserted #{dmarc_name} = #{dmarc_value}")
+          maybe_sync_create_to_cloudflare(zone, record)
+
+        {:error, changeset} ->
+          Logger.warning("[DMARC] Failed to upsert record: #{inspect(changeset.errors)}")
       end
     end
 
