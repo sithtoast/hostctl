@@ -52,6 +52,13 @@ defmodule HostctlWeb.Plugs.WebmailProxy do
           |> Enum.reject(fn {k, _} ->
             k in ["transfer-encoding", "connection", "keep-alive"]
           end)
+          |> Enum.map(fn
+            {"location", location} ->
+              {"location", rewrite_location(location, conn)}
+
+            other ->
+              other
+          end)
 
         conn
         |> prepend_resp_headers(resp_headers)
@@ -63,6 +70,21 @@ defmodule HostctlWeb.Plugs.WebmailProxy do
         |> put_resp_content_type("text/plain")
         |> send_resp(502, "Webmail service unavailable")
         |> halt()
+    end
+  end
+
+  # Strip the backend host/port from absolute Location headers so redirects
+  # go through the proxy instead of leaking http://127.0.0.1:8080/...
+  defp rewrite_location(location, conn) do
+    case URI.parse(location) do
+      %URI{host: "127.0.0.1", port: 8080, path: path, query: query} ->
+        base = conn.scheme <> "://" <> conn.host
+        base = if conn.port not in [80, 443], do: base <> ":#{conn.port}", else: base
+        uri = base <> (path || "/")
+        if query, do: uri <> "?" <> query, else: uri
+
+      _ ->
+        location
     end
   end
 

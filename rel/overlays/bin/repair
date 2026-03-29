@@ -300,8 +300,8 @@ if [[ -x /usr/sbin/apache2 ]] || dpkg -l apache2 &>/dev/null 2>&1; then
   if dpkg -l roundcube-core &>/dev/null 2>&1; then
     RC_APACHE_CONF="/etc/apache2/conf-available/roundcube.conf"
     if [[ -f "$RC_APACHE_CONF" ]]; then
-      if grep -q '#.*Alias /roundcube' "$RC_APACHE_CONF"; then
-        sed -i 's|#\s*Alias /roundcube /var/lib/roundcube/public_html|Alias /roundcube /var/lib/roundcube/public_html|' "$RC_APACHE_CONF"
+      if grep -q '^#.*Alias /roundcube' "$RC_APACHE_CONF"; then
+        sed -i 's|^#[[:space:]]*Alias /roundcube|Alias /roundcube|' "$RC_APACHE_CONF"
         fix "Uncommented Roundcube Alias directive"
         FIXED=$((FIXED + 1))
       else

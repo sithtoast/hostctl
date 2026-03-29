@@ -544,7 +544,7 @@ defmodule Hostctl.FeatureSetup do
 
     case escaped_cmd(
            "sed",
-           ["-i", ~s(s|^#\\s*Alias /roundcube|Alias /roundcube|), conf],
+           ["-i", ~s(s|^#[[:space:]]*Alias /roundcube|Alias /roundcube|), conf],
            stderr_to_stdout: true
          ) do
       {_, 0} -> :ok
