@@ -64,7 +64,9 @@ defmodule Hostctl.FeatureSetup do
         "roundcube-plugins",
         "apache2",
         "libapache2-mod-php",
-        "php-sqlite3"
+        "php-sqlite3",
+        "php-mbstring",
+        "php-xml"
       ],
       services: [],
       setup_fn: :setup_roundcube

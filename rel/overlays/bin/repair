@@ -346,8 +346,8 @@ if [[ -x /usr/sbin/apache2 ]] || dpkg -l apache2 &>/dev/null 2>&1; then
 
       # Install SQLite packages if missing
       if ! dpkg -l roundcube-sqlite3 &>/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends roundcube-sqlite3 php-sqlite3 >/dev/null 2>&1
-        fix "Installed roundcube-sqlite3 and php-sqlite3"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends roundcube-sqlite3 php-sqlite3 php-mbstring php-xml >/dev/null 2>&1
+        fix "Installed roundcube-sqlite3 php-sqlite3 php-mbstring php-xml"
       fi
 
       cat > "$RC_CONF" <<'RCEOF'
