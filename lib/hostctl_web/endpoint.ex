@@ -43,6 +43,8 @@ defmodule HostctlWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  plug HostctlWeb.Plugs.WebmailProxy
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
@@ -51,6 +53,5 @@ defmodule HostctlWeb.Endpoint do
   plug Plug.MethodOverride
   plug Plug.Head
   plug Plug.Session, @session_options
-  plug HostctlWeb.Plugs.WebmailProxy
   plug HostctlWeb.Router
 end
