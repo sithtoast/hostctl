@@ -134,35 +134,34 @@ defmodule HostctlWeb.EmailLive.Index do
               id="email-account-form"
               phx-change="validate"
               phx-submit="save"
-              class="grid grid-cols-1 gap-4 sm:grid-cols-4"
+              class="space-y-4"
             >
-              <div class="sm:col-span-2 flex items-end gap-2">
-                <div class="flex-1">
-                  <.input field={@form[:username]} type="text" label="Username" placeholder="info" />
-                </div>
-                <span class="pb-2 text-gray-500 dark:text-gray-400 text-sm">@</span>
-                <div class="flex-1">
-                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    Domain
-                  </label>
-                  <select
-                    name="domain_id"
-                    phx-change="select_domain"
-                    class="block w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                  >
-                    <option
-                      :for={domain <- @domains}
-                      value={domain.id}
-                      selected={@selected_domain_id == domain.id}
+              <div class="grid grid-cols-1 gap-4 sm:grid-cols-[1fr_auto_1fr_1fr_1fr] sm:items-start">
+                <.input field={@form[:username]} type="text" label="Username" placeholder="info" />
+                <span class="hidden sm:block mt-8 text-gray-500 dark:text-gray-400 text-sm">@</span>
+                <div class="fieldset mb-2">
+                  <label for="domain-select">
+                    <span class="label mb-1">Domain</span>
+                    <select
+                      id="domain-select"
+                      name="domain_id"
+                      phx-change="select_domain"
+                      class="w-full input"
                     >
-                      {domain.name}
-                    </option>
-                  </select>
+                      <option
+                        :for={domain <- @domains}
+                        value={domain.id}
+                        selected={@selected_domain_id == domain.id}
+                      >
+                        {domain.name}
+                      </option>
+                    </select>
+                  </label>
                 </div>
+                <.input field={@form[:password]} type="password" label="Password" />
+                <.input field={@form[:quota_mb]} type="number" label="Quota (MB)" />
               </div>
-              <.input field={@form[:password]} type="password" label="Password" />
-              <.input field={@form[:quota_mb]} type="number" label="Quota (MB)" />
-              <div class="sm:col-span-4 flex justify-end">
+              <div class="flex justify-end">
                 <button
                   type="submit"
                   class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
@@ -211,38 +210,40 @@ defmodule HostctlWeb.EmailLive.Index do
 
           <%!-- Accounts list --%>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
-            <div id="email-accounts" phx-update="stream">
-              <div class={[
-                "flex flex-col items-center justify-center py-16 gap-3",
-                if(@accounts_empty?, do: "block", else: "hidden")
-              ]}>
-                <.icon
-                  name="hero-envelope"
-                  class="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto"
-                />
-                <p class="text-sm text-gray-400 mt-2">No email accounts yet.</p>
-              </div>
-              <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-800">
-                <thead>
-                  <tr class="bg-gray-50 dark:bg-gray-800/50">
-                    <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                      Email Address
-                    </th>
-                    <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                      Quota
-                    </th>
-                    <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                      Status
-                    </th>
-                    <th class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
-                  <tr
-                    :for={{id, account} <- @streams.email_accounts}
-                    id={id}
-                    class="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
-                  >
+            <div
+              :if={@accounts_empty?}
+              class="flex flex-col items-center justify-center py-16 gap-3"
+            >
+              <.icon
+                name="hero-envelope"
+                class="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto"
+              />
+              <p class="text-sm text-gray-400 mt-2">No email accounts yet.</p>
+            </div>
+            <table class={[
+              "min-w-full divide-y divide-gray-200 dark:divide-gray-800",
+              if(@accounts_empty?, do: "hidden")
+            ]}>
+              <thead>
+                <tr class="bg-gray-50 dark:bg-gray-800/50">
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Email Address
+                  </th>
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Quota
+                  </th>
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody id="email-accounts" phx-update="stream" class="divide-y divide-gray-100 dark:divide-gray-800">
+                <tr
+                  :for={{id, account} <- @streams.email_accounts}
+                  id={id}
+                  class="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+                >
                     <td class="px-6 py-4">
                       <div class="flex items-center gap-3">
                         <div class="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 text-xs font-bold shrink-0">
@@ -280,7 +281,6 @@ defmodule HostctlWeb.EmailLive.Index do
                   </tr>
                 </tbody>
               </table>
-            </div>
           </div>
         <% end %>
       </div>
