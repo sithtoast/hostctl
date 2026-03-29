@@ -346,8 +346,8 @@ if [[ -x /usr/sbin/apache2 ]] || dpkg -l apache2 &>/dev/null 2>&1; then
 
       # Install SQLite packages if missing
       if ! dpkg -l roundcube-sqlite3 &>/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends roundcube-sqlite3 php-sqlite3 php-mbstring php-xml >/dev/null 2>&1
-        fix "Installed roundcube-sqlite3 php-sqlite3 php-mbstring php-xml"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends roundcube-sqlite3 php-sqlite3 php-mbstring php-xml php-intl >/dev/null 2>&1
+        fix "Installed roundcube-sqlite3 php-sqlite3 php-mbstring php-xml php-intl"
       fi
 
       cat > "$RC_CONF" <<'RCEOF'
@@ -377,8 +377,117 @@ else
 fi
 
 # =============================================================================
-# 8. Reload & restart
+# 7.5. Dovecot virtual mail users (SQL auth against PostgreSQL)
 # =============================================================================
+head "7.5. Dovecot virtual mail users"
+
+if dpkg -l dovecot-imapd &>/dev/null 2>&1; then
+  # Parse DATABASE_URL from env file
+  DB_URL=""
+  if [[ -f /etc/hostctl/env ]]; then
+    DB_URL=$(grep '^DATABASE_URL=' /etc/hostctl/env | cut -d= -f2- | tr -d '\r')
+  fi
+
+  if [[ -z "$DB_URL" ]]; then
+    warn "DATABASE_URL not found in /etc/hostctl/env — skipping Dovecot SQL auth setup"
+  else
+    # Parse ecto://USER:PASS@HOST/DBNAME
+    _url="${DB_URL#*://}"
+    _userinfo="${_url%%@*}"
+    _hostpath="${_url#*@}"
+    DB_USER="${_userinfo%%:*}"
+    DB_PASS="${_userinfo#*:}"
+    DB_HOST="${_hostpath%%/*}"
+    DB_NAME="${_hostpath#*/}"
+
+    # Install dovecot-pgsql if missing
+    if ! dpkg -l dovecot-pgsql &>/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dovecot-pgsql >/dev/null 2>&1
+      fix "Installed dovecot-pgsql"
+      FIXED=$((FIXED + 1))
+    else
+      ok "dovecot-pgsql installed"
+    fi
+
+    # Create vmail group and user (uid/gid 5000) for virtual mail storage
+    if ! getent group vmail &>/dev/null; then
+      groupadd -g 5000 vmail
+      fix "Created vmail group"
+      FIXED=$((FIXED + 1))
+    else
+      ok "vmail group exists"
+    fi
+
+    if ! getent passwd vmail &>/dev/null; then
+      useradd -g vmail -u 5000 -d /var/mail -M -s /usr/sbin/nologin vmail
+      fix "Created vmail user"
+      FIXED=$((FIXED + 1))
+    else
+      ok "vmail user exists"
+    fi
+
+    # Create mail storage directory
+    if [[ ! -d /var/mail/vhosts ]]; then
+      mkdir -p /var/mail/vhosts
+      fix "Created /var/mail/vhosts"
+      FIXED=$((FIXED + 1))
+    fi
+    chown -R vmail:vmail /var/mail/vhosts 2>/dev/null
+
+    # Write Dovecot SQL config (always refresh to pick up credential changes)
+    DOVECOT_SQL_CONF="/etc/dovecot/dovecot-sql.conf.ext"
+    cat > "$DOVECOT_SQL_CONF" << SQLEOF
+driver = pgsql
+connect = host=${DB_HOST} dbname=${DB_NAME} user=${DB_USER} password=${DB_PASS}
+default_pass_scheme = BLF-CRYPT
+
+password_query = SELECT hashed_password AS password FROM email_accounts ea JOIN domains d ON ea.domain_id = d.id WHERE ea.username = '%n' AND d.name = '%d' AND ea.status = 'active'
+
+user_query = SELECT 5000 AS uid, 5000 AS gid, '/var/mail/vhosts/' || d.name || '/' || ea.username AS home FROM email_accounts ea JOIN domains d ON ea.domain_id = d.id WHERE ea.username = '%n' AND d.name = '%d'
+SQLEOF
+    chmod 600 "$DOVECOT_SQL_CONF"
+    fix "Written $DOVECOT_SQL_CONF"
+    FIXED=$((FIXED + 1))
+
+    # Write 99-hostctl.conf if missing
+    DOVECOT_HOSTCTL_CONF="/etc/dovecot/conf.d/99-hostctl.conf"
+    if [[ ! -f "$DOVECOT_HOSTCTL_CONF" ]] || ! grep -q "hostctl" "$DOVECOT_HOSTCTL_CONF" 2>/dev/null; then
+      cat > "$DOVECOT_HOSTCTL_CONF" <<'DOVEOF'
+# Managed by hostctl — virtual mail user configuration
+
+mail_location = maildir:~/Maildir
+
+passdb {
+  driver = sql
+  args = /etc/dovecot/dovecot-sql.conf.ext
+}
+
+userdb {
+  driver = sql
+  args = /etc/dovecot/dovecot-sql.conf.ext
+}
+DOVEOF
+      fix "Written $DOVECOT_HOSTCTL_CONF"
+      FIXED=$((FIXED + 1))
+    else
+      ok "$DOVECOT_HOSTCTL_CONF"
+    fi
+
+    # Disable system passdb in 10-auth.conf so virtual users authenticate via SQL
+    AUTH_CONF="/etc/dovecot/conf.d/10-auth.conf"
+    if [[ -f "$AUTH_CONF" ]] && grep -q '^!include auth-system\.conf\.ext' "$AUTH_CONF" 2>/dev/null; then
+      sed -i 's|^!include auth-system\.conf\.ext|# !include auth-system.conf.ext|' "$AUTH_CONF"
+      fix "Disabled system auth in $AUTH_CONF"
+      FIXED=$((FIXED + 1))
+    else
+      ok "Dovecot system auth already disabled"
+    fi
+  fi
+else
+  ok "Dovecot not installed — skipping"
+fi
+
+
 head "8. Apply changes"
 
 if [[ $FIXED -gt 0 ]]; then
@@ -388,6 +497,11 @@ if [[ $FIXED -gt 0 ]]; then
   if systemctl is-active --quiet apache2 2>/dev/null; then
     systemctl restart apache2
     fix "Apache restarted"
+  fi
+
+  if systemctl is-active --quiet dovecot 2>/dev/null; then
+    systemctl restart dovecot
+    fix "Dovecot restarted"
   fi
 
   if systemctl is-active --quiet "$APP_NAME"; then

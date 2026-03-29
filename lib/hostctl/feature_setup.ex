@@ -37,7 +37,7 @@ defmodule Hostctl.FeatureSetup do
       description:
         "Email hosting with Postfix and Dovecot. Enables per-domain email accounts with IMAP/SMTP.",
       icon: "hero-envelope",
-      packages: ["postfix", "dovecot-imapd", "dovecot-pop3d"],
+      packages: ["postfix", "dovecot-imapd", "dovecot-pop3d", "dovecot-pgsql"],
       services: ["postfix", "dovecot"],
       setup_fn: :setup_postfix
     },
@@ -66,7 +66,8 @@ defmodule Hostctl.FeatureSetup do
         "libapache2-mod-php",
         "php-sqlite3",
         "php-mbstring",
-        "php-xml"
+        "php-xml",
+        "php-intl"
       ],
       services: [],
       setup_fn: :setup_roundcube
@@ -313,23 +314,145 @@ defmodule Hostctl.FeatureSetup do
   def setup_postfix(key) do
     broadcast(key, :log, "Applying Postfix configuration...")
 
-    smarthost = Settings.get_smarthost_setting()
+    with :ok <- configure_dovecot_virtual_users(key) do
+      smarthost = Settings.get_smarthost_setting()
 
-    if smarthost.enabled do
-      broadcast(key, :log, "Smarthost is configured — applying relay settings to Postfix...")
+      if smarthost.enabled do
+        broadcast(key, :log, "Smarthost is configured — applying relay settings to Postfix...")
 
-      case MailServer.apply_smarthost(smarthost) do
-        :ok ->
-          broadcast(key, :log, "Smarthost configured successfully.")
-          :ok
+        case MailServer.apply_smarthost(smarthost) do
+          :ok ->
+            broadcast(key, :log, "Smarthost configured successfully.")
+            :ok
 
-        {:error, reason} ->
-          broadcast(key, :log, "Smarthost configuration failed: #{inspect(reason)}")
-          {:error, reason}
+          {:error, reason} ->
+            broadcast(key, :log, "Smarthost configuration failed: #{inspect(reason)}")
+            {:error, reason}
+        end
+      else
+        broadcast(key, :log, "No smarthost configured — skipping relay setup.")
+        :ok
       end
-    else
-      broadcast(key, :log, "No smarthost configured — skipping relay setup.")
-      :ok
+    end
+  end
+
+  defp configure_dovecot_virtual_users(key) do
+    broadcast(key, :log, "Configuring Dovecot for virtual mail users...")
+
+    case parse_database_url(System.get_env("DATABASE_URL", "")) do
+      {:ok, db} ->
+        with :ok <- run_cmd(key, "groupadd", ["-f", "-g", "5000", "vmail"]),
+             :ok <- ensure_vmail_user(key),
+             :ok <- run_cmd(key, "mkdir", ["-p", "/var/mail/vhosts"]),
+             :ok <- run_cmd(key, "chown", ["-R", "vmail:vmail", "/var/mail/vhosts"]),
+             :ok <- write_dovecot_sql_conf(key, db),
+             :ok <- write_dovecot_hostctl_conf(key),
+             :ok <- disable_dovecot_system_auth(key),
+             :ok <- run_cmd(key, "systemctl", ["restart", "dovecot"]) do
+          broadcast(key, :log, "Dovecot virtual user configuration complete.")
+          :ok
+        end
+
+      {:error, reason} ->
+        broadcast(key, :log, "Warning: #{reason} — skipping Dovecot SQL auth setup")
+        :ok
+    end
+  end
+
+  defp ensure_vmail_user(key) do
+    case escaped_cmd("id", ["vmail"], stderr_to_stdout: true) do
+      {_, 0} ->
+        :ok
+
+      _ ->
+        run_cmd(key, "useradd", [
+          "-g", "vmail",
+          "-u", "5000",
+          "-d", "/var/mail",
+          "-M",
+          "-s", "/usr/sbin/nologin",
+          "vmail"
+        ])
+    end
+  end
+
+  defp parse_database_url(url) when is_binary(url) and url != "" do
+    case URI.parse(url) do
+      %URI{userinfo: userinfo, host: host, path: path}
+      when is_binary(userinfo) and is_binary(host) and is_binary(path) ->
+        [user | pass_parts] = String.split(userinfo, ":", parts: 2)
+        pass = Enum.join(pass_parts)
+        dbname = String.trim_leading(path, "/")
+
+        if user != "" and host != "" and dbname != "" do
+          {:ok, %{host: host, user: user, pass: pass, dbname: dbname}}
+        else
+          {:error, "incomplete DATABASE_URL"}
+        end
+
+      _ ->
+        {:error, "could not parse DATABASE_URL"}
+    end
+  end
+
+  defp parse_database_url(_), do: {:error, "DATABASE_URL is not set"}
+
+  defp write_dovecot_sql_conf(key, db) do
+    broadcast(key, :log, "Writing /etc/dovecot/dovecot-sql.conf.ext...")
+
+    conf = """
+    driver = pgsql
+    connect = host=#{db.host} dbname=#{db.dbname} user=#{db.user} password=#{db.pass}
+    default_pass_scheme = BLF-CRYPT
+
+    password_query = SELECT hashed_password AS password FROM email_accounts ea JOIN domains d ON ea.domain_id = d.id WHERE ea.username = '%n' AND d.name = '%d' AND ea.status = 'active'
+
+    user_query = SELECT 5000 AS uid, 5000 AS gid, '/var/mail/vhosts/' || d.name || '/' || ea.username AS home FROM email_accounts ea JOIN domains d ON ea.domain_id = d.id WHERE ea.username = '%n' AND d.name = '%d'
+    """
+
+    with :ok <- write_file_via_sudo(key, "/etc/dovecot/dovecot-sql.conf.ext", conf) do
+      run_cmd(key, "chmod", ["600", "/etc/dovecot/dovecot-sql.conf.ext"])
+    end
+  end
+
+  defp write_dovecot_hostctl_conf(key) do
+    broadcast(key, :log, "Writing /etc/dovecot/conf.d/99-hostctl.conf...")
+
+    conf = """
+    # Managed by hostctl — virtual mail user configuration
+
+    mail_location = maildir:~/Maildir
+
+    passdb {
+      driver = sql
+      args = /etc/dovecot/dovecot-sql.conf.ext
+    }
+
+    userdb {
+      driver = sql
+      args = /etc/dovecot/dovecot-sql.conf.ext
+    }
+    """
+
+    write_file_via_sudo(key, "/etc/dovecot/conf.d/99-hostctl.conf", conf)
+  end
+
+  defp disable_dovecot_system_auth(key) do
+    broadcast(key, :log, "Disabling Dovecot system auth in 10-auth.conf...")
+
+    auth_conf = "/etc/dovecot/conf.d/10-auth.conf"
+
+    case escaped_cmd(
+           "sed",
+           ["-i", "s|^!include auth-system\\.conf\\.ext|# !include auth-system.conf.ext|", auth_conf],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        :ok
+
+      {output, code} ->
+        broadcast(key, :log, "Warning: could not update 10-auth.conf (exit #{code}): #{output}")
+        :ok
     end
   end
 
