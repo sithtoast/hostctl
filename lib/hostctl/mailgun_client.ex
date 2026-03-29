@@ -141,17 +141,16 @@ defmodule Hostctl.MailgunClient do
 
     Req.get(url, auth: {"api", api_key})
     |> parse(fn body ->
+      # Response: %{"entry" => "<desired TXT value>", "current" => "...", "configured" => bool}
       records =
-        (body["items"] || [])
-        |> Enum.map(fn r ->
-          %{
-            type: r["record_type"] || "TXT",
-            name: r["name"],
-            value: r["value"],
-            ttl: 300
-          }
-        end)
-        |> Enum.filter(& &1.name)
+        case body["entry"] do
+          entry when is_binary(entry) and entry != "" ->
+            [%{type: "TXT", name: "_dmarc.#{domain_name}", value: entry, ttl: 300}]
+
+          _ ->
+            Logger.warning("[Mailgun] No DMARC entry in response: #{inspect(body)}")
+            []
+        end
 
       {:ok, records}
     end)
