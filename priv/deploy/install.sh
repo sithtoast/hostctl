@@ -16,7 +16,8 @@
 #   --skip-nginx          Skip nginx installation and configuration
 #   --skip-certbot        Skip SSL certificate provisioning
 #   --skip-postgres       Skip PostgreSQL installation (use existing)
-#   --skip-mysql          Skip MySQL server installation
+#   --skip-mysql          Skip MySQL/MariaDB installation
+#   --db-flavor=FLAVOR    Database flavor: mysql (default) or mariadb
 #   --skip-php            Skip PHP-FPM installation
 #   --reconfigure         Re-run only the configuration/service steps (no build)
 #   --cloudflare          Configure nginx for Cloudflare proxy (HTTP-only origin,
@@ -26,7 +27,6 @@ set -euo pipefail
 
 # --- Pinned dependency versions -----------------------------------------------
 POSTGRES_MAJOR="17"
-MYSQL_VERSION="8.0"
 OTP_MAJOR="27"
 ELIXIR_VERSION="1.18.3"  # must match OTP_MAJOR above
 # PHP versions to install for hosted sites (space-separated, first is default)
@@ -48,6 +48,7 @@ SKIP_NGINX=false
 SKIP_CERTBOT=false
 SKIP_POSTGRES=false
 SKIP_MYSQL=false
+MYSQL_FLAVOR="mysql"  # or 'mariadb'
 SKIP_PHP=false
 RECONFIGURE=false
 CLOUDFLARE_PROXY=false
@@ -86,6 +87,7 @@ for arg in "$@"; do
     --skip-certbot)   SKIP_CERTBOT=true ;;
     --skip-postgres)  SKIP_POSTGRES=true ;;
     --skip-mysql)     SKIP_MYSQL=true ;;
+    --db-flavor=*)    MYSQL_FLAVOR="${arg#*=}" ;;
     --skip-php)       SKIP_PHP=true ;;
     --reconfigure)    RECONFIGURE=true ;;
     --cloudflare)     CLOUDFLARE_PROXY=true ;;
@@ -101,6 +103,25 @@ done
 # for the control panel), but certbot + the dns-cloudflare plugin are still installed
 # so that hosted domains can obtain Let's Encrypt certs via DNS-01 challenge.
 [[ "$CLOUDFLARE_PROXY" == true ]] && SKIP_CERTBOT=true
+
+# Derive package/service names from chosen database flavor
+case "$MYSQL_FLAVOR" in
+  mysql)
+    DB_FLAVOR_LABEL="MySQL"
+    DB_PACKAGES="mysql-server mysql-client"
+    DB_SERVICE="mysql"
+    DB_PKG_CHECK="mysql-server"
+    DB_DEBCONF_PKG="mysql-server"
+    ;;
+  mariadb)
+    DB_FLAVOR_LABEL="MariaDB"
+    DB_PACKAGES="mariadb-server mariadb-client"
+    DB_SERVICE="mariadb"
+    DB_PKG_CHECK="mariadb-server"
+    DB_DEBCONF_PKG="mariadb-server"
+    ;;
+  *) error "Invalid --db-flavor: '$MYSQL_FLAVOR'. Choose 'mysql' or 'mariadb'." ;;
+esac
 
 # ==============================================================================
 # PHASE 0 - PRE-FLIGHT: verify the system before touching anything
@@ -192,7 +213,7 @@ echo -e "${BOLD}Installation plan:${NC}"
 echo -e "  Erlang/OTP    : $OTP_MAJOR  (rabbitmq/rabbitmq-erlang PPA)"
 echo -e "  Elixir        : $ELIXIR_VERSION  (github.com/elixir-lang/elixir)"
 echo -e "  PostgreSQL    : $POSTGRES_MAJOR  (postgresql.org apt repo)"
-echo -e "  MySQL         : $MYSQL_VERSION  (mysql.com apt repo)"
+echo -e "  Database      : $DB_FLAVOR_LABEL  ($DB_PACKAGES)"
 echo -e "  App directory : $APP_DIR"
 echo -e "  System user   : $SERVICE_USER"
 echo -e "  Database      : $DB_NAME"
@@ -201,7 +222,7 @@ echo -e "  Database      : $DB_NAME"
 [[ "$CLOUDFLARE_PROXY" == true ]] && echo -e "  Nginx mode    : ${CYAN}Cloudflare proxy (HTTP-only origin, no certbot)${NC}"
 [[ "$SKIP_CERTBOT" == true && "$CLOUDFLARE_PROXY" == false ]] && echo -e "  SSL/Certbot   : ${YELLOW}skipped${NC}"
 [[ "$SKIP_POSTGRES" == true ]]    && echo -e "  PostgreSQL    : ${YELLOW}skipped (using existing)${NC}"
-[[ "$SKIP_MYSQL" == true ]]       && echo -e "  MySQL         : ${YELLOW}skipped${NC}"
+[[ "$SKIP_MYSQL" == true ]]       && echo -e "  Database      : ${YELLOW}skipped${NC}"
 [[ "$SKIP_PHP" == true ]]         && echo -e "  PHP-FPM       : ${YELLOW}skipped${NC}"
 echo ""
 read -rp "$(echo -e "${BOLD}Proceed? [Y/n] ${NC}")" _proceed
@@ -252,14 +273,13 @@ if [[ "$SKIP_POSTGRES" == false ]] && ! command -v psql &>/dev/null; then
 fi
 
 # 1c. MySQL: pre-download -------------------------------------------------------
-if [[ "$SKIP_MYSQL" == false ]] && ! command -v mysqld &>/dev/null; then
-  info "Pre-downloading MySQL $MYSQL_VERSION server..."
-  # Set the root password non-interactively via debconf
-  echo "mysql-server mysql-server/root_password password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
-  echo "mysql-server mysql-server/root_password_again password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
-  apt-get install -y --no-install-recommends --download-only \
-    mysql-server mysql-client >/dev/null
-  success "MySQL packages cached"
+if [[ "$SKIP_MYSQL" == false ]] && ! dpkg -l "$DB_PKG_CHECK" 2>/dev/null | grep -q '^ii'; then
+  info "Pre-downloading $DB_FLAVOR_LABEL server..."
+  echo "$DB_DEBCONF_PKG $DB_DEBCONF_PKG/root_password password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+  echo "$DB_DEBCONF_PKG $DB_DEBCONF_PKG/root_password_again password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+  # shellcheck disable=SC2086
+  apt-get install -y --no-install-recommends --download-only $DB_PACKAGES >/dev/null
+  success "$DB_FLAVOR_LABEL packages cached"
 fi
 
 # 1d. Pre-cache remaining apt packages ------------------------------------------
@@ -384,24 +404,25 @@ https://apt.postgresql.org/pub/repos/apt ${OS_CODENAME}-pgdg main" \
   success "PostgreSQL ready"
 fi
 
-# 2e. MySQL --------------------------------------------------------------------
+# 2e. MySQL/MariaDB ------------------------------------------------------------
 if [[ "$SKIP_MYSQL" == false ]]; then
-  step "Installing MySQL $MYSQL_VERSION"
+  step "Installing $DB_FLAVOR_LABEL"
 
-  if ! command -v mysqld &>/dev/null; then
+  if ! dpkg -l "$DB_PKG_CHECK" 2>/dev/null | grep -q '^ii'; then
     # Pre-seed root password to avoid interactive prompts
-    echo "mysql-server mysql-server/root_password password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
-    echo "mysql-server mysql-server/root_password_again password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
-    apt-get install -y --no-install-recommends mysql-server mysql-client
-    systemctl enable --now mysql
-    success "MySQL $MYSQL_VERSION installed"
+    echo "$DB_DEBCONF_PKG $DB_DEBCONF_PKG/root_password password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+    echo "$DB_DEBCONF_PKG $DB_DEBCONF_PKG/root_password_again password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+    # shellcheck disable=SC2086
+    apt-get install -y --no-install-recommends $DB_PACKAGES
+    systemctl enable --now "$DB_SERVICE"
+    success "$DB_FLAVOR_LABEL installed"
   else
-    success "MySQL already installed"
+    success "$DB_FLAVOR_LABEL already installed"
   fi
 
-  step "Securing MySQL"
+  step "Securing $DB_FLAVOR_LABEL"
 
-  # Update root password if MySQL was already installed (idempotent)
+  # Socket auth first (fresh installs), fall back to password auth (already configured)
   mysqladmin -u root password "$MYSQL_ROOT_PASSWORD" 2>/dev/null \
     || mysqladmin -u root -p"$MYSQL_ROOT_PASSWORD" password "$MYSQL_ROOT_PASSWORD" 2>/dev/null \
     || true
@@ -415,7 +436,7 @@ if [[ "$SKIP_MYSQL" == false ]]; then
     FLUSH PRIVILEGES;
 MYSQL_SECURE
 
-  success "MySQL secured"
+  success "$DB_FLAVOR_LABEL secured"
 fi
 
 # 2f. Nginx --------------------------------------------------------------------
@@ -658,7 +679,7 @@ step "Configuring systemd service"
 cat > "$SERVICE_FILE" <<SVCEOF
 [Unit]
 Description=Hostctl Phoenix Server
-After=network.target postgresql.service mysql.service
+After=network.target postgresql.service ${DB_SERVICE}.service
 Requires=postgresql.service
 
 [Service]

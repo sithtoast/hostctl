@@ -99,7 +99,19 @@ defmodule Hostctl.FeatureSetup do
       icon: "hero-circle-stack",
       packages: ["mysql-server", "mysql-client"],
       services: ["mysql"],
-      setup_fn: :setup_mysql
+      setup_fn: :setup_mysql,
+      conflicts: ["mariadb"]
+    },
+    %{
+      key: "mariadb",
+      label: "MariaDB Server",
+      description:
+        "MariaDB database server — a fully open-source MySQL drop-in replacement and the default on Debian. Enables per-domain database and user management.",
+      icon: "hero-circle-stack",
+      packages: ["mariadb-server", "mariadb-client"],
+      services: ["mariadb"],
+      setup_fn: :setup_mariadb,
+      conflicts: ["mysql"]
     }
   ]
 
@@ -158,6 +170,7 @@ defmodule Hostctl.FeatureSetup do
     broadcast(feature.key, :status_changed, "installing")
 
     with :ok <- check_sudo_access(feature),
+         :ok <- resolve_conflicts(feature),
          :ok <- install_packages(feature),
          :ok <- enable_services(feature),
          :ok <- run_setup(feature) do
@@ -295,31 +308,6 @@ defmodule Hostctl.FeatureSetup do
     end
   end
 
-  defp preseed_debconf(%{key: "mysql"} = feature) do
-    password = mysql_root_password()
-    broadcast(feature.key, :log, "Pre-seeding debconf for MySQL root password...")
-
-    selections = """
-    mysql-server mysql-server/root_password password #{password}
-    mysql-server mysql-server/root_password_again password #{password}
-    """
-
-    encoded = Base.encode64(selections)
-
-    case escaped_cmd(
-           "sh",
-           ["-c", "echo '#{encoded}' | base64 -d | debconf-set-selections"],
-           stderr_to_stdout: true
-         ) do
-      {_, 0} ->
-        :ok
-
-      {output, code} ->
-        broadcast(feature.key, :log, "debconf pre-seed failed (exit #{code}): #{output}")
-        :ok
-    end
-  end
-
   defp preseed_debconf(_feature), do: :ok
 
   defp enable_services(%{services: []}), do: :ok
@@ -341,6 +329,46 @@ defmodule Hostctl.FeatureSetup do
 
   defp run_setup(%{setup_fn: nil}), do: :ok
   defp run_setup(%{setup_fn: func} = feature), do: apply(__MODULE__, func, [feature.key])
+
+  defp resolve_conflicts(%{key: key} = feature) do
+    conflicts = Map.get(feature, :conflicts, [])
+
+    Enum.reduce_while(conflicts, :ok, fn conflict_key, :ok ->
+      setting = Settings.get_feature_setting(conflict_key)
+
+      if setting.enabled and setting.status == "installed" do
+        conflict = get_feature(conflict_key)
+
+        broadcast(
+          key,
+          :log,
+          "#{conflict.label} is installed and conflicts — disabling it first..."
+        )
+
+        Enum.each(conflict.services, fn service ->
+          broadcast(key, :log, "Stopping #{service}...")
+          escaped_cmd("systemctl", ["stop", service], stderr_to_stdout: true)
+          escaped_cmd("systemctl", ["disable", service], stderr_to_stdout: true)
+        end)
+
+        Settings.save_feature_setting(conflict_key, %{
+          enabled: false,
+          status: "not_installed",
+          status_message: nil
+        })
+
+        Phoenix.PubSub.broadcast(
+          Hostctl.PubSub,
+          "feature_setup:#{conflict_key}",
+          {:status_changed, "not_installed"}
+        )
+
+        broadcast(key, :log, "#{conflict.label} disabled.")
+      end
+
+      {:cont, :ok}
+    end)
+  end
 
   # ---------------------------------------------------------------------------
   # Feature-specific setup
@@ -593,11 +621,26 @@ defmodule Hostctl.FeatureSetup do
     end
   end
 
+  @doc false
+  def setup_mariadb(key) do
+    broadcast(key, :log, "Securing MariaDB installation...")
+
+    password = mysql_root_password()
+
+    with :ok <- secure_mysql(key, password),
+         :ok <- update_mysql_env(key, password) do
+      broadcast(key, :log, "MariaDB configuration complete.")
+      broadcast(key, :log, "Root password has been written to the hostctl env file.")
+      :ok
+    end
+  end
+
   defp secure_mysql(key, password) do
     broadcast(key, :log, "Setting MySQL root password and removing defaults...")
 
+    # Compatible with MySQL 8.0 and MariaDB (avoids deprecated mysql_native_password)
     sql = """
-    ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '#{password}';
+    ALTER USER 'root'@'localhost' IDENTIFIED BY '#{password}';
     DELETE FROM mysql.user WHERE User='';
     DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
     DROP DATABASE IF EXISTS test;
@@ -607,15 +650,30 @@ defmodule Hostctl.FeatureSetup do
 
     encoded = Base.encode64(sql)
 
-    case escaped_cmd(
-           "sh",
-           ["-c", "echo '#{encoded}' | base64 -d | mysql -u root"],
-           stderr_to_stdout: true
-         ) do
-      {_, 0} ->
+    # Fresh installs use auth_socket/unix_socket (no password). If that fails,
+    # debconf may have set a root password — fall back to authenticating with it.
+    {output, code} =
+      case escaped_cmd("sh", ["-c", "echo '#{encoded}' | base64 -d | mysql -u root"],
+             stderr_to_stdout: true
+           ) do
+        {_, 0} = ok ->
+          ok
+
+        {_, _} ->
+          broadcast(key, :log, "Socket auth failed — trying password auth...")
+
+          escaped_cmd(
+            "sh",
+            ["-c", "echo '#{encoded}' | base64 -d | mysql -u root -p'#{password}'"],
+            stderr_to_stdout: true
+          )
+      end
+
+    case code do
+      0 ->
         :ok
 
-      {output, code} ->
+      _ ->
         broadcast(key, :log, "MySQL secure setup failed (exit #{code}): #{output}")
         {:error, {:mysql_secure_failed, code}}
     end
