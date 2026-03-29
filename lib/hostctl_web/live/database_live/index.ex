@@ -3,6 +3,7 @@ defmodule HostctlWeb.DatabaseLive.Index do
 
   alias Hostctl.Hosting
   alias Hostctl.Hosting.Database
+  alias Hostctl.Hosting.DbUser
 
   def mount(_params, _session, socket) do
     domains = Hosting.list_domains(socket.assigns.current_scope)
@@ -14,8 +15,9 @@ defmodule HostctlWeb.DatabaseLive.Index do
      |> assign(:active_tab, :databases)
      |> assign(:domains, domains)
      |> assign(:selected_domain_id, nil)
-     |> assign(:expanded_db_id, nil)
-     |> assign(:db_users, %{})
+     |> assign(:expanded_db, nil)
+     |> assign(:db_users, [])
+     |> assign(:db_user_form, nil)
      |> assign(:dbs_empty?, all_databases == [])
      |> assign_db_form()
      |> stream(:databases, all_databases)}
@@ -86,27 +88,87 @@ defmodule HostctlWeb.DatabaseLive.Index do
 
   def handle_event("toggle_db_users", %{"id" => id}, socket) do
     db_id = String.to_integer(id)
+    prev_db = socket.assigns.expanded_db
 
-    socket =
-      if socket.assigns.expanded_db_id == db_id do
-        assign(socket, :expanded_db_id, nil)
-      else
-        databases = Enum.flat_map(socket.assigns.domains, &Hosting.list_databases/1)
+    if prev_db && prev_db.id == db_id do
+      {:noreply,
+       socket
+       |> assign(:expanded_db, nil)
+       |> assign(:db_users, [])
+       |> assign(:db_user_form, nil)
+       |> stream_insert(:databases, prev_db)}
+    else
+      databases = Enum.flat_map(socket.assigns.domains, &Hosting.list_databases/1)
 
-        case Enum.find(databases, &(&1.id == db_id)) do
-          nil ->
+      case Enum.find(databases, &(&1.id == db_id)) do
+        nil ->
+          {:noreply, socket}
+
+        db ->
+          db_users = Hosting.list_db_users(db)
+
+          socket =
             socket
+            |> assign(:expanded_db, db)
+            |> assign(:db_users, db_users)
+            |> assign_db_user_form()
+            |> stream_insert(:databases, db)
 
-          _db ->
-            assign(socket, :expanded_db_id, db_id)
-        end
+          socket =
+            if prev_db,
+              do: stream_insert(socket, :databases, prev_db),
+              else: socket
+
+          {:noreply, socket}
       end
+    end
+  end
 
-    {:noreply, socket}
+  def handle_event("validate_db_user", %{"db_user" => params}, socket) do
+    form =
+      %DbUser{}
+      |> Hosting.change_db_user(params)
+      |> to_form(action: :validate)
+
+    {:noreply, assign(socket, :db_user_form, form)}
+  end
+
+  def handle_event("save_db_user", %{"db_user" => params}, socket) do
+    database = socket.assigns.expanded_db
+
+    case Hosting.create_db_user(database, params) do
+      {:ok, db_user} ->
+        db_users = Hosting.list_db_users(database)
+
+        {:noreply,
+         socket
+         |> assign(:db_users, db_users)
+         |> assign_db_user_form()
+         |> put_flash(:info, "User #{db_user.username} created.")}
+
+      {:error, changeset} ->
+        {:noreply, assign(socket, :db_user_form, to_form(changeset))}
+    end
+  end
+
+  def handle_event("delete_db_user", %{"id" => id}, socket) do
+    database = socket.assigns.expanded_db
+    db_user = Hosting.get_db_user!(database, String.to_integer(id))
+    {:ok, _} = Hosting.delete_db_user(db_user, database)
+    db_users = Hosting.list_db_users(database)
+
+    {:noreply,
+     socket
+     |> assign(:db_users, db_users)
+     |> put_flash(:info, "User deleted.")}
   end
 
   defp assign_db_form(socket) do
     assign(socket, :db_form, to_form(Hosting.change_database(%Database{})))
+  end
+
+  defp assign_db_user_form(socket) do
+    assign(socket, :db_user_form, to_form(Hosting.change_db_user(%DbUser{})))
   end
 
   defp get_first_domain_id(socket) do
@@ -307,20 +369,152 @@ defmodule HostctlWeb.DatabaseLive.Index do
                       </span>
                     </td>
                     <td class="px-6 py-4 text-right">
-                      <button
-                        phx-click="delete_db"
-                        phx-value-id={db.id}
-                        data-confirm={"Delete database #{db.name}? This cannot be undone."}
-                        class="text-xs font-medium text-red-500 hover:text-red-600"
-                      >
-                        Delete
-                      </button>
+                      <div class="flex items-center justify-end gap-4">
+                        <button
+                          phx-click="toggle_db_users"
+                          phx-value-id={db.id}
+                          class={[
+                            "text-xs font-medium transition-colors",
+                            if(@expanded_db && @expanded_db.id == db.id,
+                              do: "text-indigo-600 dark:text-indigo-400",
+                              else:
+                                "text-gray-500 hover:text-indigo-600 dark:text-gray-400 dark:hover:text-indigo-400"
+                            )
+                          ]}
+                        >
+                          Users
+                        </button>
+                        <button
+                          phx-click="delete_db"
+                          phx-value-id={db.id}
+                          data-confirm={"Delete database #{db.name}? This cannot be undone."}
+                          class="text-xs font-medium text-red-500 hover:text-red-600"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
+
+          <%!-- Database Users Panel --%>
+          <%= if @expanded_db do %>
+            <div
+              id="db-users-panel"
+              class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden"
+            >
+              <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 dark:border-gray-800">
+                <div class="flex items-center gap-3">
+                  <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-100 dark:bg-indigo-900/30 shrink-0">
+                    <.icon name="hero-users" class="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                  </div>
+                  <div>
+                    <h2 class="text-sm font-semibold text-gray-900 dark:text-white">
+                      Users — <span class="font-mono">{@expanded_db.name}</span>
+                    </h2>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      {if @expanded_db.db_type == "mysql",
+                        do: "MySQL users are provisioned on the server automatically.",
+                        else: "Credential records for this PostgreSQL database."}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  phx-click="toggle_db_users"
+                  phx-value-id={@expanded_db.id}
+                  class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors rounded-lg p-1"
+                >
+                  <.icon name="hero-x-mark" class="w-5 h-5" />
+                </button>
+              </div>
+
+              <%!-- Existing users list --%>
+              <div class="px-6 py-4">
+                <%= if @db_users == [] do %>
+                  <p class="text-sm text-gray-400 dark:text-gray-500 text-center py-6">
+                    No users yet. Add one below.
+                  </p>
+                <% else %>
+                  <table class="min-w-full">
+                    <thead>
+                      <tr>
+                        <th class="pb-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Username
+                        </th>
+                        <th class="pb-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Created
+                        </th>
+                        <th class="pb-3 relative"><span class="sr-only">Actions</span></th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
+                      <tr :for={user <- @db_users} id={"db-user-#{user.id}"}>
+                        <td class="py-3">
+                          <div class="flex items-center gap-2">
+                            <.icon name="hero-user" class="w-4 h-4 text-gray-400 shrink-0" />
+                            <span class="font-mono text-sm text-gray-900 dark:text-white">
+                              {user.username}
+                            </span>
+                          </div>
+                        </td>
+                        <td class="py-3 text-sm text-gray-500 dark:text-gray-400">
+                          {Calendar.strftime(user.inserted_at, "%b %d, %Y")}
+                        </td>
+                        <td class="py-3 text-right">
+                          <button
+                            phx-click="delete_db_user"
+                            phx-value-id={user.id}
+                            data-confirm={"Delete user #{user.username}? This cannot be undone."}
+                            class="text-xs font-medium text-red-500 hover:text-red-600 transition-colors"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                <% end %>
+              </div>
+
+              <%!-- Add user form --%>
+              <div class="px-6 py-4 border-t border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/20">
+                <h3 class="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider mb-3">
+                  Add User
+                </h3>
+                <.form
+                  for={@db_user_form}
+                  id="db-user-form"
+                  phx-change="validate_db_user"
+                  phx-submit="save_db_user"
+                  class="grid grid-cols-1 gap-4 sm:grid-cols-3"
+                >
+                  <.input
+                    field={@db_user_form[:username]}
+                    type="text"
+                    label="Username"
+                    placeholder="wp_user"
+                  />
+                  <.input
+                    field={@db_user_form[:password]}
+                    type="password"
+                    label="Password"
+                    placeholder="Min. 8 characters"
+                  />
+                  <div class="flex items-end">
+                    <button
+                      type="submit"
+                      class="w-full px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+                    >
+                      Add User
+                    </button>
+                  </div>
+                </.form>
+              </div>
+            </div>
+          <% end %>
         <% end %>
       </div>
     </Layouts.app>
