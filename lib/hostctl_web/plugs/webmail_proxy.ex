@@ -50,7 +50,7 @@ defmodule HostctlWeb.Plugs.WebmailProxy do
           response.headers
           |> Enum.flat_map(fn {k, vs} -> Enum.map(List.wrap(vs), &{k, &1}) end)
           |> Enum.reject(fn {k, _} ->
-            k in ["transfer-encoding", "connection", "keep-alive"]
+            k in ["transfer-encoding", "connection", "keep-alive", "content-length"]
           end)
           |> Enum.map(fn
             {"location", location} ->
