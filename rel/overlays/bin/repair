@@ -347,16 +347,15 @@ if [[ -x /usr/sbin/apache2 ]] || dpkg -l apache2 &>/dev/null 2>&1; then
 
       # Install SQLite packages if missing
       if ! dpkg -l roundcube-sqlite3 &>/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends roundcube-sqlite3 php-sqlite3 php-mbstring php-xml php-intl >/dev/null 2>&1
-        fix "Installed roundcube-sqlite3 php-sqlite3 php-mbstring php-xml php-intl"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends roundcube-sqlite3 php-sqlite3 php-mbstring php-xml php-intl php-zip >/dev/null 2>&1
+        fix "Installed roundcube-sqlite3 php-sqlite3 php-mbstring php-xml php-intl php-zip"
       fi
 
       cat > "$RC_CONF" <<'RCEOF'
 <?php
 $config['db_dsnw'] = 'sqlite:////var/lib/roundcube/roundcube.db?mode=0640';
 $config['imap_host'] = 'localhost:143';
-$config['smtp_host'] = 'localhost:587';
-$config['smtp_auth_type'] = 'LOGIN';
+$config['smtp_host'] = 'localhost:25';
 $config['product_name'] = 'hostctl Webmail';
 $config['plugins'] = ['archive', 'zipdownload'];
 $config['skin'] = 'elastic';
@@ -371,6 +370,35 @@ RCEOF
       FIXED=$((FIXED + 1))
     else
       ok "Roundcube DB config"
+    fi
+
+    # Fix SMTP host if pointing to port 587 (submission not enabled; use port 25)
+    if [[ -f "$RC_CONF" ]] && grep -q 'smtp_host.*587\|smtp_auth_type' "$RC_CONF" 2>/dev/null; then
+      sed -i "s|'smtp_host'.*=.*'localhost:587'|\$config['smtp_host'] = 'localhost:25'|" "$RC_CONF"
+      sed -i "/smtp_auth_type/d" "$RC_CONF"
+      fix "Fixed Roundcube SMTP host to localhost:25"
+      FIXED=$((FIXED + 1))
+    else
+      ok "Roundcube SMTP config"
+    fi
+
+    # Ensure smtp_user/smtp_pass are empty so Roundcube doesn't attempt SMTP auth
+    if [[ -f "$RC_CONF" ]] && ! grep -q "smtp_user" "$RC_CONF" 2>/dev/null; then
+      # Insert after smtp_host line
+      sed -i "/smtp_host/a \$config['smtp_user'] = '';\n\$config['smtp_pass'] = '';" "$RC_CONF"
+      fix "Set empty smtp_user/smtp_pass (disable SMTP auth)"
+      FIXED=$((FIXED + 1))
+    else
+      ok "Roundcube SMTP auth config"
+    fi
+
+    # Install php-zip if missing (required for zipdownload plugin)
+    if ! dpkg -l php-zip &>/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-zip >/dev/null 2>&1
+      fix "Installed php-zip"
+      FIXED=$((FIXED + 1))
+    else
+      ok "php-zip installed"
     fi
   fi
 else
@@ -412,11 +440,13 @@ if dpkg -l dovecot-imapd &>/dev/null 2>&1; then
   DOVECOT_PASSWD="/etc/dovecot/passwd"
   if [[ ! -f "$DOVECOT_PASSWD" ]]; then
     touch "$DOVECOT_PASSWD"
-    chmod 600 "$DOVECOT_PASSWD"
+    chown root:dovecot "$DOVECOT_PASSWD"
+    chmod 640 "$DOVECOT_PASSWD"
     fix "Created $DOVECOT_PASSWD"
     FIXED=$((FIXED + 1))
   else
-    chmod 600 "$DOVECOT_PASSWD"
+    chown root:dovecot "$DOVECOT_PASSWD"
+    chmod 640 "$DOVECOT_PASSWD"
     ok "$DOVECOT_PASSWD exists"
   fi
 

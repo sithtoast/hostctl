@@ -67,7 +67,8 @@ defmodule Hostctl.FeatureSetup do
         "php-sqlite3",
         "php-mbstring",
         "php-xml",
-        "php-intl"
+        "php-intl",
+        "php-zip"
       ],
       services: [],
       setup_fn: :setup_roundcube
@@ -372,8 +373,9 @@ defmodule Hostctl.FeatureSetup do
   defp write_dovecot_passwd_file(key) do
     broadcast(key, :log, "Creating /etc/dovecot/passwd...")
 
-    with :ok <- write_file_via_sudo(key, "/etc/dovecot/passwd", "") do
-      run_cmd(key, "chmod", ["600", "/etc/dovecot/passwd"])
+    with :ok <- write_file_via_sudo(key, "/etc/dovecot/passwd", ""),
+         :ok <- run_cmd(key, "chown", ["root:dovecot", "/etc/dovecot/passwd"]) do
+      run_cmd(key, "chmod", ["640", "/etc/dovecot/passwd"])
     end
   end
 
@@ -487,8 +489,9 @@ defmodule Hostctl.FeatureSetup do
     <?php
     $config['db_dsnw'] = 'sqlite:////var/lib/roundcube/roundcube.db?mode=0640';
     $config['imap_host'] = 'localhost:143';
-    $config['smtp_host'] = 'localhost:587';
-    $config['smtp_auth_type'] = 'LOGIN';
+    $config['smtp_host'] = 'localhost:25';
+    $config['smtp_user'] = '';
+    $config['smtp_pass'] = '';
     $config['product_name'] = 'hostctl Webmail';
     $config['des_key'] = '#{random_des_key()}';
     $config['plugins'] = ['archive', 'zipdownload'];

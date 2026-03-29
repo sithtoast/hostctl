@@ -184,7 +184,11 @@ defmodule Hostctl.MailServer do
   defp set_domain_relay_directives do
     directives = [
       "smtp_sender_dependent_authentication=yes",
-      "sender_dependent_relayhost_maps=hash:#{@domain_relay_path}"
+      "sender_dependent_relayhost_maps=hash:#{@domain_relay_path}",
+      "smtp_sasl_auth_enable=yes",
+      "smtp_sasl_password_maps=hash:#{@domain_relay_secrets_path}",
+      "smtp_sasl_security_options=noanonymous",
+      "smtp_tls_security_level=may"
     ]
 
     run_postconf_e(directives)
@@ -321,7 +325,8 @@ defmodule Hostctl.MailServer do
     content = if content == "", do: "", else: content <> "\n"
 
     with :ok <- write_file(@dovecot_passwd_path, content),
-         {_, 0} <- escaped_cmd("chmod", ["600", @dovecot_passwd_path], stderr_to_stdout: true),
+         {_, 0} <- escaped_cmd("chown", ["root:dovecot", @dovecot_passwd_path], stderr_to_stdout: true),
+         {_, 0} <- escaped_cmd("chmod", ["640", @dovecot_passwd_path], stderr_to_stdout: true),
          {_, 0} <- escaped_cmd("systemctl", ["reload-or-restart", "dovecot"], stderr_to_stdout: true) do
       :ok
     else
