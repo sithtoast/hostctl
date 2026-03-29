@@ -147,7 +147,8 @@ if command -v nginx &>/dev/null; then
 fi
 
 # Feature management (apt-get, systemctl, vsftpd config paths, etc.)
-FEATURES_CONTENT="$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get install *
+FEATURES_CONTENT="$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/true
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get install *
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl enable *
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl disable *
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start *
@@ -202,6 +203,15 @@ if [[ -f "$SERVICE_FILE" ]]; then
   if grep -q '^PrivateTmp=true' "$SERVICE_FILE"; then
     ok "PrivateTmp=true"
   fi
+
+  # Ensure ExecStartPre creates /run/sudo/ts (needed for sudo under ProtectSystem=strict)
+  if grep -q 'ExecStartPre=.*mkdir.*run/sudo' "$SERVICE_FILE"; then
+    ok "ExecStartPre creates /run/sudo/ts"
+  else
+    sed -i '/^ExecStart=/i ExecStartPre=+/usr/bin/mkdir -p /run/sudo/ts' "$SERVICE_FILE"
+    fix "ExecStartPre → added /run/sudo/ts creation"
+    FIXED=$((FIXED + 1))
+  fi
 else
   err "Service file not found at $SERVICE_FILE"
   err "Run install.sh to create it, or create it manually."
@@ -238,7 +248,7 @@ fi
 # =============================================================================
 head "6. Sudo verification"
 
-if sudo -u "$SERVICE_USER" sudo -n true 2>/dev/null; then
+if sudo -u "$SERVICE_USER" sudo -n /usr/bin/true 2>/dev/null; then
   ok "Service user can run sudo without a password"
 else
   err "Service user still cannot run passwordless sudo"

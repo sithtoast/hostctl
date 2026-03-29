@@ -11,6 +11,7 @@ WorkingDirectory=/opt/hostctl
 EnvironmentFile=/etc/hostctl/env
 ExecStart=/opt/hostctl/bin/server
 ExecStop=/opt/hostctl/bin/hostctl stop
+ExecStartPre=+/usr/bin/mkdir -p /run/sudo/ts
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

@@ -531,6 +531,7 @@ fi
 step "Configuring feature management permissions"
 FEATURES_SUDOERS="/etc/sudoers.d/hostctl-features"
 cat > "$FEATURES_SUDOERS" <<SUDOERS
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/true
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get install *
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl enable *
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl disable *
@@ -617,6 +618,7 @@ WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
 ExecStart=$APP_DIR/bin/server
 ExecStop=$APP_DIR/bin/$APP_NAME stop
+ExecStartPre=+/usr/bin/mkdir -p /run/sudo/ts
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

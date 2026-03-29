@@ -164,20 +164,19 @@ defmodule Hostctl.FeatureSetup do
   # ---------------------------------------------------------------------------
 
   # Verify the service user can run sudo without a password prompt.
-  # This catches missing sudoers rules or ProtectSystem blocking /run/sudo.
+  # Uses /usr/bin/true which is explicitly allowed in the hostctl-features sudoers file.
   defp check_sudo_access(%{key: key}) do
     broadcast(key, :log, "Checking sudo access...")
 
-    case System.cmd("sudo", ["-n", "true"], stderr_to_stdout: true) do
+    case System.cmd("sudo", ["-n", "/usr/bin/true"], stderr_to_stdout: true) do
       {_, 0} ->
         :ok
 
       {output, _code} ->
         message =
           "sudo is not available without a password. " <>
-            "Please ensure the hostctl sudoers rules are installed " <>
-            "(re-run install.sh or manually create /etc/sudoers.d/hostctl-features) " <>
-            "and that /run/sudo is in the systemd ReadWritePaths."
+            "Run 'sudo /opt/hostctl/bin/repair' on the server to fix permissions, " <>
+            "then restart the hostctl service."
 
         broadcast(key, :log, message)
 
