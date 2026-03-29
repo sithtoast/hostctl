@@ -125,7 +125,9 @@ defmodule Hostctl.FtpServer do
 
   defp ensure_home_dir_writable(%FtpAccount{home_dir: home_dir}) do
     with :ok <- escaped_mkdir_p(home_dir) do
-      case escaped_cmd("chown", ["www-data:www-data", home_dir]) do
+      # Recursively chown so subdirectories (e.g. public/ inside the domain root)
+      # are also writable by www-data, not just the top-level chroot directory.
+      case escaped_cmd("chown", ["-R", "www-data:www-data", home_dir]) do
         {_, 0} ->
           :ok
 
@@ -146,8 +148,13 @@ defmodule Hostctl.FtpServer do
     path = Path.join(dir, account.username)
     home_dir = account.home_dir || "/"
 
+    content = """
+    local_root=#{home_dir}
+    write_enable=YES
+    """
+
     with :ok <- escaped_mkdir_p(dir),
-         :ok <- escaped_write(path, "local_root=#{home_dir}\n") do
+         :ok <- escaped_write(path, content) do
       :ok
     end
   end
