@@ -136,10 +136,12 @@ defmodule HostctlWeb.EmailLive.Index do
               phx-submit="save"
               class="space-y-4"
             >
-              <div class="grid grid-cols-1 gap-4 sm:grid-cols-[1fr_auto_1fr_1fr_1fr] sm:items-start">
-                <.input field={@form[:username]} type="text" label="Username" placeholder="info" />
+              <div class="flex flex-col sm:flex-row items-start gap-3">
+                <div class="flex-1 w-full sm:w-auto">
+                  <.input field={@form[:username]} type="text" label="Username" placeholder="info" errors={[]} />
+                </div>
                 <span class="hidden sm:block mt-8 text-gray-500 dark:text-gray-400 text-sm">@</span>
-                <div class="fieldset mb-2">
+                <div class="flex-1 w-full sm:w-auto fieldset mb-2">
                   <label for="domain-select">
                     <span class="label mb-1">Domain</span>
                     <select
@@ -158,17 +160,34 @@ defmodule HostctlWeb.EmailLive.Index do
                     </select>
                   </label>
                 </div>
-                <.input field={@form[:password]} type="password" label="Password" />
-                <.input field={@form[:quota_mb]} type="number" label="Quota (MB)" />
+                <div class="flex-1 w-full sm:w-auto">
+                  <.input field={@form[:password]} type="password" label="Password" errors={[]} />
+                </div>
+                <div class="w-full sm:w-28">
+                  <.input field={@form[:quota_mb]} type="number" label="Quota (MB)" errors={[]} />
+                </div>
+                <div class="mt-0 sm:mt-6">
+                  <button
+                    type="submit"
+                    class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap"
+                  >
+                    Create Account
+                  </button>
+                </div>
               </div>
-              <div class="flex justify-end">
-                <button
-                  type="submit"
-                  class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
-                >
-                  Create Account
-                </button>
-              </div>
+              <%= if @form.source.action do %>
+                <div class="flex flex-wrap gap-x-4 gap-y-1">
+                  <p :for={msg <- Enum.map(@form[:username].errors, &translate_error(&1))} class="flex items-center gap-1.5 text-sm text-error">
+                    <.icon name="hero-exclamation-circle" class="size-4" /> Username {msg}
+                  </p>
+                  <p :for={msg <- Enum.map(@form[:password].errors, &translate_error(&1))} class="flex items-center gap-1.5 text-sm text-error">
+                    <.icon name="hero-exclamation-circle" class="size-4" /> Password {msg}
+                  </p>
+                  <p :for={msg <- Enum.map(@form[:quota_mb].errors, &translate_error(&1))} class="flex items-center gap-1.5 text-sm text-error">
+                    <.icon name="hero-exclamation-circle" class="size-4" /> Quota {msg}
+                  </p>
+                </div>
+              <% end %>
             </.form>
           </div>
 
