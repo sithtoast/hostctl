@@ -6,6 +6,7 @@ defmodule HostctlWeb.DomainLive.Show do
   alias Hostctl.Settings
   alias Hostctl.WebServer
   alias Hostctl.MailServer
+  alias Hostctl.MailgunClient
 
   def mount(%{"id" => id}, _session, socket) do
     domain = Hosting.get_domain!(socket.assigns.current_scope, id)
@@ -68,7 +69,10 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign_subdomain_form()
      |> assign_cron_form()
      |> assign_ftp_form()
-     |> assign_smarthost_form()}
+     |> assign_smarthost_form()
+     |> assign(:mg_key, "")
+     |> assign(:mg_region, "us")
+     |> assign(:mg_status, nil)}
   end
 
   def handle_params(_params, _url, socket) do
@@ -396,6 +400,47 @@ defmodule HostctlWeb.DomainLive.Show do
 
   def handle_event("toggle_smarthost_password", _params, socket) do
     {:noreply, update(socket, :smarthost_show_password, &(!&1))}
+  end
+
+  def handle_event(
+        "configure_mailgun_smarthost",
+        %{"mg_key" => api_key, "mg_region" => region},
+        socket
+      ) do
+    domain_name = socket.assigns.domain.name
+    region_atom = if region == "eu", do: :eu, else: :us
+
+    case MailgunClient.create_smtp_credential(api_key, domain_name, region_atom) do
+      {:ok, %{login: login, password: password}} ->
+        smtp_host =
+          if region_atom == :eu, do: "[smtp.eu.mailgun.org]", else: "[smtp.mailgun.org]"
+
+        prefilled = %{
+          "enabled" => "true",
+          "host" => smtp_host,
+          "port" => "587",
+          "auth_required" => "true",
+          "username" => login,
+          "password" => password
+        }
+
+        setting = socket.assigns.smarthost_setting
+        changeset = Hosting.change_domain_smarthost_setting(setting, prefilled)
+
+        {:noreply,
+         socket
+         |> assign(:smarthost_form, to_form(changeset, as: :smarthost))
+         |> assign(:mg_key, api_key)
+         |> assign(:mg_region, region)
+         |> assign(:mg_status, :ok)}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(:mg_key, api_key)
+         |> assign(:mg_region, region)
+         |> assign(:mg_status, {:error, reason})}
+    end
   end
 
   defp assign_ssl_form(socket) do
@@ -1002,6 +1047,61 @@ defmodule HostctlWeb.DomainLive.Show do
               </p>
             </div>
             <div class="p-6">
+              <%!-- Mailgun quick setup --%>
+              <div class="mb-6 rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-950/20 p-4">
+                <div class="flex items-center gap-2 mb-2">
+                  <.icon name="hero-bolt" class="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                  <span class="text-sm font-semibold text-purple-900 dark:text-purple-200">
+                    Quick setup with Mailgun
+                  </span>
+                </div>
+                <p class="text-xs text-purple-700 dark:text-purple-400 mb-3">
+                  Enter your Mailgun Private API key to automatically create SMTP credentials
+                  for <strong>{@domain.name}</strong> and pre-fill the form below.
+                </p>
+                <form
+                  id="mg-domain-setup-form"
+                  phx-submit="configure_mailgun_smarthost"
+                  class="flex flex-wrap gap-2"
+                >
+                  <input
+                    type="password"
+                    name="mg_key"
+                    placeholder="Mailgun Private API key (key-...)"
+                    autocomplete="off"
+                    class="flex-1 min-w-0 px-3 py-2 text-sm bg-white dark:bg-gray-800 border border-purple-200 dark:border-purple-700 rounded-lg focus:ring-1 focus:ring-purple-400 focus:outline-none text-gray-900 dark:text-white placeholder-gray-400"
+                  />
+                  <select
+                    name="mg_region"
+                    class="px-3 py-2 text-sm bg-white dark:bg-gray-800 border border-purple-200 dark:border-purple-700 rounded-lg focus:ring-1 focus:ring-purple-400 focus:outline-none text-gray-900 dark:text-white"
+                  >
+                    <option value="us" selected>US region</option>
+                    <option value="eu">EU region</option>
+                  </select>
+                  <button
+                    type="submit"
+                    id="mg-domain-connect-btn"
+                    class="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors whitespace-nowrap"
+                  >
+                    Connect & Auto-fill
+                  </button>
+                </form>
+                <%= if @mg_status do %>
+                  <%= cond do %>
+                    <% @mg_status == :ok -> %>
+                      <p class="mt-2 text-xs text-green-700 dark:text-green-400 flex items-center gap-1">
+                        <.icon name="hero-check-circle" class="w-3.5 h-3.5 shrink-0" />
+                        Credentials created and form pre-filled — review and save below.
+                      </p>
+                    <% match?({:error, _}, @mg_status) -> %>
+                      <p class="mt-2 text-xs text-red-600 dark:text-red-400 flex items-center gap-1">
+                        <.icon name="hero-x-circle" class="w-3.5 h-3.5 shrink-0" />
+                        {elem(@mg_status, 1)}
+                      </p>
+                  <% end %>
+                <% end %>
+              </div>
+
               <.form
                 for={@smarthost_form}
                 id="smarthost-form"

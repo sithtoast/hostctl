@@ -4,6 +4,7 @@ defmodule HostctlWeb.PanelLive.Smarthost do
   alias Hostctl.Settings
   alias Hostctl.Settings.SmarthostSetting
   alias Hostctl.MailServer
+  alias Hostctl.MailgunClient
 
   @impl true
   def mount(_params, _session, socket) do
@@ -19,7 +20,12 @@ defmodule HostctlWeb.PanelLive.Smarthost do
      |> assign(:form, form)
      |> assign(:email_installed?, email_installed?)
      |> assign(:apply_status, nil)
-     |> assign(:show_password, false)}
+     |> assign(:show_password, false)
+     |> assign(:mg_key, "")
+     |> assign(:mg_region, "us")
+     |> assign(:mg_domains, nil)
+     |> assign(:mg_domain, nil)
+     |> assign(:mg_status, nil)}
   end
 
   @impl true
@@ -80,6 +86,65 @@ defmodule HostctlWeb.PanelLive.Smarthost do
   @impl true
   def handle_event("toggle_password", _, socket) do
     {:noreply, assign(socket, :show_password, !socket.assigns.show_password)}
+  end
+
+  @impl true
+  def handle_event("fetch_mailgun_domains", %{"mg_key" => api_key, "mg_region" => region}, socket) do
+    case MailgunClient.list_domains(api_key) do
+      {:ok, domains} ->
+        {:noreply,
+         socket
+         |> assign(:mg_key, api_key)
+         |> assign(:mg_region, region)
+         |> assign(:mg_domains, domains)
+         |> assign(:mg_domain, if(domains != [], do: hd(domains).name, else: nil))
+         |> assign(
+           :mg_status,
+           if(domains == [], do: {:error, "No domains found on this Mailgun account."}, else: nil)
+         )}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(:mg_key, api_key)
+         |> assign(:mg_region, region)
+         |> assign(:mg_status, {:error, reason})}
+    end
+  end
+
+  @impl true
+  def handle_event("configure_mailgun", %{"domain" => domain_name}, socket) do
+    api_key = socket.assigns.mg_key
+    region = if socket.assigns.mg_region == "eu", do: :eu, else: :us
+
+    case MailgunClient.create_smtp_credential(api_key, domain_name, region) do
+      {:ok, %{login: login, password: password}} ->
+        smtp_host =
+          if region == :eu, do: "[smtp.eu.mailgun.org]", else: "[smtp.mailgun.org]"
+
+        prefilled = %{
+          "enabled" => "true",
+          "host" => smtp_host,
+          "port" => "587",
+          "auth_required" => "true",
+          "username" => login,
+          "password" => password
+        }
+
+        form =
+          to_form(Settings.change_smarthost_setting(socket.assigns.setting, prefilled),
+            as: :smarthost
+          )
+
+        {:noreply,
+         socket
+         |> assign(:form, form)
+         |> assign(:mg_domain, domain_name)
+         |> assign(:mg_status, :ok)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :mg_status, {:error, reason})}
+    end
   end
 
   @impl true
@@ -157,6 +222,113 @@ defmodule HostctlWeb.PanelLive.Smarthost do
               </div>
           <% end %>
         <% end %>
+
+        <%!-- Mailgun quick setup card --%>
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
+          <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center gap-2">
+            <.icon name="hero-bolt" class="w-4 h-4 text-purple-500" />
+            <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+              Quick Setup with Mailgun
+            </h2>
+          </div>
+          <div class="p-6 space-y-4">
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+              Connect your Mailgun account to automatically create SMTP credentials
+              and pre-fill the relay configuration below.
+            </p>
+
+            <%!-- Step 1: enter API key and fetch domains --%>
+            <form id="mg-fetch-form" phx-submit="fetch_mailgun_domains" class="flex flex-wrap gap-2">
+              <input
+                type="password"
+                name="mg_key"
+                placeholder="Mailgun Private API key (key-...)"
+                autocomplete="off"
+                class="flex-1 min-w-0 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-indigo-400 focus:outline-none text-gray-900 dark:text-white placeholder-gray-400"
+              />
+              <select
+                name="mg_region"
+                class="px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-indigo-400 focus:outline-none text-gray-900 dark:text-white"
+              >
+                <option value="us" selected>US region</option>
+                <option value="eu">EU region</option>
+              </select>
+              <button
+                type="submit"
+                id="mg-fetch-btn"
+                class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-900 dark:text-white text-sm font-medium transition-colors"
+              >
+                <.icon name="hero-magnifying-glass" class="w-4 h-4" /> Find my domains
+              </button>
+            </form>
+
+            <%!-- Step 2: domain list (shown after fetch) --%>
+            <%= if @mg_domains && @mg_domains != [] do %>
+              <div class="space-y-2">
+                <p class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                  Select a domain — clicking it creates SMTP credentials and pre-fills the form:
+                </p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <%= for mg_d <- @mg_domains do %>
+                    <button
+                      type="button"
+                      id={"mg-domain-#{mg_d.name}"}
+                      phx-click="configure_mailgun"
+                      phx-value-domain={mg_d.name}
+                      class={[
+                        "flex items-center justify-between px-4 py-3 rounded-lg border text-left transition-colors",
+                        if(@mg_domain == mg_d.name && @mg_status == :ok,
+                          do:
+                            "border-indigo-500 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-900 dark:text-indigo-100",
+                          else:
+                            "border-gray-200 dark:border-gray-700 hover:border-indigo-300 dark:hover:border-indigo-600 text-gray-900 dark:text-white"
+                        )
+                      ]}
+                    >
+                      <div>
+                        <p class="text-sm font-medium">{mg_d.name}</p>
+                        <p class="text-xs text-gray-500 dark:text-gray-400">{mg_d.smtp_login}</p>
+                      </div>
+                      <span class={[
+                        "text-xs px-2 py-0.5 rounded-full font-medium",
+                        if(mg_d.state == "active",
+                          do: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+                          else: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                        )
+                      ]}>
+                        {mg_d.state}
+                      </span>
+                    </button>
+                  <% end %>
+                </div>
+              </div>
+            <% end %>
+
+            <%!-- Status feedback --%>
+            <%= if @mg_status do %>
+              <%= cond do %>
+                <% @mg_status == :ok -> %>
+                  <div class="flex items-center gap-2 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800">
+                    <.icon
+                      name="hero-check-circle"
+                      class="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0"
+                    />
+                    <p class="text-sm text-emerald-800 dark:text-emerald-300">
+                      SMTP credentials created for <strong>{@mg_domain}</strong>. The form below has been pre-filled — review and save.
+                    </p>
+                  </div>
+                <% match?({:error, _}, @mg_status) -> %>
+                  <div class="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800">
+                    <.icon
+                      name="hero-x-circle"
+                      class="w-4 h-4 text-red-600 dark:text-red-400 shrink-0"
+                    />
+                    <p class="text-sm text-red-800 dark:text-red-300">{elem(@mg_status, 1)}</p>
+                  </div>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
 
         <%!-- Settings card --%>
         <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
