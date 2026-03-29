@@ -145,8 +145,8 @@ defmodule Hostctl.FeatureSetup do
 
     Enum.each(feature.services, fn service ->
       broadcast(feature.key, :log, "Stopping #{service}...")
-      System.cmd("sudo", ["systemctl", "stop", service], stderr_to_stdout: true)
-      System.cmd("sudo", ["systemctl", "disable", service], stderr_to_stdout: true)
+      escaped_cmd("systemctl", ["stop", service], stderr_to_stdout: true)
+      escaped_cmd("systemctl", ["disable", service], stderr_to_stdout: true)
     end)
 
     Settings.save_feature_setting(feature.key, %{
@@ -193,11 +193,12 @@ defmodule Hostctl.FeatureSetup do
   defp install_packages(%{key: key, packages: packages}) do
     broadcast(key, :log, "Installing packages: #{Enum.join(packages, ", ")}...")
 
-    # Non-interactive apt install
-    env = [{"DEBIAN_FRONTEND", "noninteractive"}]
-    args = ["apt-get", "install", "-y", "--no-install-recommends"] ++ packages
+    args = ["install", "-y", "--no-install-recommends"] ++ packages
 
-    case System.cmd("sudo", args, stderr_to_stdout: true, env: env) do
+    case escaped_cmd("apt-get", args,
+           env: [{"DEBIAN_FRONTEND", "noninteractive"}],
+           stderr_to_stdout: true
+         ) do
       {output, 0} ->
         for line <- String.split(output, "\n", trim: true) do
           broadcast(key, :log, line)
@@ -222,7 +223,7 @@ defmodule Hostctl.FeatureSetup do
     Enum.reduce_while(services, :ok, fn service, :ok ->
       broadcast(key, :log, "Enabling and starting #{service}...")
 
-      case System.cmd("sudo", ["systemctl", "enable", "--now", service],
+      case escaped_cmd("systemctl", ["enable", "--now", service],
              stderr_to_stdout: true
            ) do
         {_, 0} ->
@@ -249,9 +250,9 @@ defmodule Hostctl.FeatureSetup do
     conf_dir = "/etc/vsftpd/vsftpd_user_conf"
     users_file = "/etc/vsftpd/virtual_users.txt"
 
-    with :ok <- run_cmd(key, "sudo", ["mkdir", "-p", conf_dir]),
-         :ok <- run_cmd(key, "sudo", ["touch", users_file]),
-         :ok <- run_cmd(key, "sudo", ["chmod", "600", users_file]),
+    with :ok <- run_cmd(key, "mkdir", ["-p", conf_dir]),
+         :ok <- run_cmd(key, "touch", [users_file]),
+         :ok <- run_cmd(key, "chmod", ["600", users_file]),
          :ok <- write_vsftpd_pam(key),
          :ok <- write_vsftpd_conf(key) do
       broadcast(key, :log, "vsftpd configuration complete.")
@@ -306,8 +307,24 @@ defmodule Hostctl.FeatureSetup do
   # Helpers
   # ---------------------------------------------------------------------------
 
+  # Run a command outside the service's ProtectSystem=strict mount namespace.
+  # systemd-run creates a transient unit that talks to PID 1 over D-Bus,
+  # so the spawned process has a clean, unrestricted filesystem view.
+  defp escaped_cmd(cmd, args, opts) do
+    {env_vars, cmd_opts} = Keyword.pop(opts, :env, [])
+
+    env_args =
+      Enum.flat_map(env_vars, fn {k, v} ->
+        ["--property", "Environment=#{k}=#{v}"]
+      end)
+
+    systemd_args = ["systemd-run", "--pipe", "--wait", "--collect", "--quiet"] ++ env_args
+
+    System.cmd("sudo", systemd_args ++ [cmd | args], cmd_opts)
+  end
+
   defp run_cmd(key, cmd, args) do
-    case System.cmd(cmd, args, stderr_to_stdout: true) do
+    case escaped_cmd(cmd, args, stderr_to_stdout: true) do
       {_, 0} ->
         :ok
 
@@ -324,9 +341,9 @@ defmodule Hostctl.FeatureSetup do
 
     with :ok <- File.write(tmp, content),
          {_, 0} <-
-           System.cmd("sudo", ["mv", tmp, path], stderr_to_stdout: true),
+           escaped_cmd("mv", [tmp, path], stderr_to_stdout: true),
          {_, 0} <-
-           System.cmd("sudo", ["chmod", "644", path], stderr_to_stdout: true) do
+           escaped_cmd("chmod", ["644", path], stderr_to_stdout: true) do
       :ok
     else
       {:error, reason} ->

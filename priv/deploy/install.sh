@@ -532,18 +532,7 @@ step "Configuring feature management permissions"
 FEATURES_SUDOERS="/etc/sudoers.d/hostctl-features"
 cat > "$FEATURES_SUDOERS" <<SUDOERS
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/true
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get install *
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl enable *
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl disable *
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start *
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop *
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl reload *
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/mkdir -p /etc/vsftpd/*
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/touch /etc/vsftpd/*
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chmod * /etc/vsftpd/*
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/mv /tmp/hostctl_feature_* *
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chmod * /etc/pam.d/*
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chmod * /etc/vsftpd.conf
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemd-run *
 SUDOERS
 chmod 440 "$FEATURES_SUDOERS"
 visudo -cf "$FEATURES_SUDOERS" >/dev/null \
