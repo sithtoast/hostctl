@@ -338,4 +338,69 @@ defmodule Hostctl.MailServer do
         {:error, :sync_failed}
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Postfix virtual mailbox sync
+  # ---------------------------------------------------------------------------
+
+  @virtual_domains_path "/etc/postfix/virtual_domains"
+  @virtual_mailbox_path "/etc/postfix/virtual_mailbox"
+
+  @doc """
+  Rebuilds Postfix virtual mailbox tables from all email accounts in the database
+  and reloads Postfix so inbound mail is accepted and delivered to the right maildir.
+
+  Called after every email account create/delete.
+  Returns `:ok` or `{:error, reason}`.
+  """
+  def sync_virtual_mailboxes do
+    if enabled?() do
+      do_sync_virtual_mailboxes()
+    else
+      :ok
+    end
+  end
+
+  defp do_sync_virtual_mailboxes do
+    accounts = Hosting.list_all_email_accounts_with_domains()
+
+    domains =
+      accounts
+      |> Enum.map(fn {_username, domain_name, _pw} -> domain_name end)
+      |> Enum.uniq()
+      |> Enum.map(&"#{&1} OK")
+      |> Enum.join("\n")
+
+    mailboxes =
+      accounts
+      |> Enum.map(fn {username, domain_name, _pw} ->
+        "#{username}@#{domain_name} #{domain_name}/#{username}/Maildir/"
+      end)
+      |> Enum.join("\n")
+
+    domains_content = if domains == "", do: "", else: domains <> "\n"
+    mailboxes_content = if mailboxes == "", do: "", else: mailboxes <> "\n"
+
+    with :ok <- write_file(@virtual_domains_path, domains_content),
+         :ok <- write_file(@virtual_mailbox_path, mailboxes_content),
+         :ok <- run_postmap(@virtual_domains_path),
+         :ok <- run_postmap(@virtual_mailbox_path),
+         :ok <- set_virtual_mailbox_directives(),
+         :ok <- reload_postfix() do
+      :ok
+    end
+  end
+
+  defp set_virtual_mailbox_directives do
+    directives = [
+      "virtual_mailbox_domains=hash:#{@virtual_domains_path}",
+      "virtual_mailbox_base=/var/mail/vhosts",
+      "virtual_mailbox_maps=hash:#{@virtual_mailbox_path}",
+      "virtual_minimum_uid=5000",
+      "virtual_uid_maps=static:5000",
+      "virtual_gid_maps=static:5000"
+    ]
+
+    run_postconf_e(directives)
+  end
 end

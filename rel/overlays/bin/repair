@@ -488,6 +488,37 @@ else
   ok "Dovecot not installed — skipping"
 fi
 
+# =============================================================================
+# 7.6. Postfix virtual mailbox maps
+# =============================================================================
+section "7.6. Postfix virtual mailbox maps"
+
+if dpkg -l postfix &>/dev/null 2>&1; then
+  VDOMAINS="/etc/postfix/virtual_domains"
+  VMAILBOX="/etc/postfix/virtual_mailbox"
+
+  # Check that virtual_mailbox_domains is configured
+  if ! postconf virtual_mailbox_domains 2>/dev/null | grep -q "hash:"; then
+    # Ensure empty map files exist so postmap doesn't fail
+    [[ -f "$VDOMAINS" ]] || touch "$VDOMAINS"
+    [[ -f "$VMAILBOX" ]] || touch "$VMAILBOX"
+    postmap "$VDOMAINS" 2>/dev/null || true
+    postmap "$VMAILBOX" 2>/dev/null || true
+    postconf -e "virtual_mailbox_domains=hash:$VDOMAINS"
+    postconf -e "virtual_mailbox_base=/var/mail/vhosts"
+    postconf -e "virtual_mailbox_maps=hash:$VMAILBOX"
+    postconf -e "virtual_minimum_uid=5000"
+    postconf -e "virtual_uid_maps=static:5000"
+    postconf -e "virtual_gid_maps=static:5000"
+    fix "Configured Postfix virtual mailbox maps"
+    FIXED=$((FIXED + 1))
+  else
+    ok "Postfix virtual mailbox maps configured"
+  fi
+else
+  ok "Postfix not installed — skipping"
+fi
+
 
 section "8. Apply changes"
 

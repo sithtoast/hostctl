@@ -356,7 +356,11 @@ defmodule Hostctl.Hosting do
       |> EmailAccount.changeset(attrs)
       |> Repo.insert()
 
-    if match?({:ok, _}, result), do: MailServer.sync_dovecot_passwd()
+    if match?({:ok, _}, result) do
+      MailServer.sync_dovecot_passwd()
+      MailServer.sync_virtual_mailboxes()
+    end
+
     result
   end
 
@@ -372,7 +376,12 @@ defmodule Hostctl.Hosting do
 
   def delete_email_account(%EmailAccount{} = account) do
     result = Repo.delete(account)
-    if match?({:ok, _}, result), do: MailServer.sync_dovecot_passwd()
+
+    if match?({:ok, _}, result) do
+      MailServer.sync_dovecot_passwd()
+      MailServer.sync_virtual_mailboxes()
+    end
+
     result
   end
 
@@ -680,30 +689,63 @@ defmodule Hostctl.Hosting do
          sending_dns_records: sending,
          receiving_dns_records: receiving
        }) do
+    all_mg_records = sending ++ receiving
+
+    # Build normalised hostctl-style records from Mailgun's response
+    cf_records =
+      Enum.map(all_mg_records, fn mg_record ->
+        %{
+          type: mg_record["record_type"],
+          name: mg_record["name"] || "@",
+          value: mg_record["value"],
+          priority: mg_record["priority"],
+          ttl: 3600
+        }
+      end)
+
+    # Sync to local hostctl DNS zone (best-effort)
+    sync_mailgun_dns_to_local_zone(domain_name, cf_records)
+
     case Settings.get_dns_provider_setting() do
       %{provider: "cloudflare", cloudflare_api_token: token}
       when is_binary(token) and token != "" ->
         case Cloudflare.find_zone(token, domain_name) do
           {:ok, zone_id} ->
             Logger.info(
-              "[Mailgun] Syncing #{length(sending) + length(receiving)} DNS records to Cloudflare zone #{zone_id}"
+              "[Mailgun] Syncing #{length(cf_records)} DNS records to Cloudflare zone #{zone_id}"
             )
 
-            Enum.each(sending ++ receiving, fn mg_record ->
-              cf_record = %{
-                type: mg_record["record_type"],
-                name: mg_record["name"] || "@",
-                value: mg_record["value"],
-                priority: mg_record["priority"],
-                ttl: 3600
-              }
+            # Fetch existing records so we can replace conflicting TXT/MX entries
+            existing =
+              case Cloudflare.list_records(token, zone_id) do
+                {:ok, records} -> records
+                _ -> []
+              end
 
-              case Cloudflare.create_record(token, zone_id, cf_record) do
-                {:ok, _} ->
-                  :ok
+            # Delete any existing TXT or MX record whose name matches a Mailgun record we're about to set
+            mg_names = MapSet.new(cf_records, & &1.name)
+            mg_types = MapSet.new(cf_records, & &1.type)
 
+            Enum.each(existing, fn ex ->
+              ex_name = ex["name"]
+              # Cloudflare returns FQDNs; normalise by stripping trailing dot
+              normalised_name = String.trim_trailing(ex_name, ".")
+              ex_type = ex["type"]
+
+              if MapSet.member?(mg_types, ex_type) and
+                   (MapSet.member?(mg_names, normalised_name) or
+                      MapSet.member?(mg_names, ex_name)) do
+                Logger.info("[Mailgun] Replacing existing #{ex_type} record: #{ex_name}")
+                Cloudflare.delete_record(token, zone_id, ex["id"])
+              end
+            end)
+
+            # Create the Mailgun records
+            Enum.each(cf_records, fn record ->
+              case Cloudflare.create_record(token, zone_id, record) do
+                {:ok, _} -> :ok
                 {:error, reason} ->
-                  Logger.warning("[Mailgun] DNS sync failed for #{cf_record.name}: #{reason}")
+                  Logger.warning("[Mailgun] DNS sync failed for #{record.name}: #{reason}")
               end
             end)
 
@@ -718,5 +760,38 @@ defmodule Hostctl.Hosting do
     end
 
     :ok
+  end
+
+  defp sync_mailgun_dns_to_local_zone(domain_name, mg_records) do
+    with %Domain{} = domain <- Repo.get_by(Domain, name: domain_name),
+         %DnsZone{} = zone <- Repo.get_by(DnsZone, domain_id: domain.id) do
+      mg_types = Enum.map(mg_records, & &1.type) |> MapSet.new()
+      mg_names = Enum.map(mg_records, & &1.name) |> MapSet.new()
+
+      # Remove existing local records that conflict with what Mailgun provides
+      existing =
+        Repo.all(from r in DnsRecord, where: r.dns_zone_id == ^zone.id)
+
+      Enum.each(existing, fn record ->
+        if MapSet.member?(mg_types, record.type) and MapSet.member?(mg_names, record.name) do
+          maybe_sync_delete_to_cloudflare(record)
+          Repo.delete(record)
+        end
+      end)
+
+      # Insert the new Mailgun records
+      Enum.each(mg_records, fn attrs ->
+        %DnsRecord{dns_zone_id: zone.id}
+        |> DnsRecord.changeset(attrs)
+        |> Repo.insert()
+        |> case do
+          {:ok, record} -> maybe_sync_create_to_cloudflare(zone, record)
+          _ -> :ok
+        end
+      end)
+    else
+      _ ->
+        Logger.info("[Mailgun] Local DNS zone not found for #{domain_name}, skipping local sync")
+    end
   end
 end

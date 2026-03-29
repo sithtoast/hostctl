@@ -315,7 +315,8 @@ defmodule Hostctl.FeatureSetup do
   def setup_postfix(key) do
     broadcast(key, :log, "Applying Postfix configuration...")
 
-    with :ok <- configure_dovecot_virtual_users(key) do
+    with :ok <- configure_dovecot_virtual_users(key),
+         :ok <- MailServer.sync_virtual_mailboxes() do
       smarthost = Settings.get_smarthost_setting()
 
       if smarthost.enabled do
