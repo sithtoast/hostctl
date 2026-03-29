@@ -55,7 +55,7 @@ defmodule Hostctl.FeatureSetup do
       key: "roundcube",
       label: "Roundcube Webmail",
       description:
-        "Feature-rich webmail client with full IMAP support, address book, and plugin system. Accessible on port 8080 at /roundcube.",
+        "Feature-rich webmail client with full IMAP support, address book, and plugin system. Accessible at /roundcube.",
       icon: "hero-inbox-stack",
       packages: [
         "roundcube",
@@ -73,7 +73,7 @@ defmodule Hostctl.FeatureSetup do
       key: "snappymail",
       label: "SnappyMail",
       description:
-        "Lightweight, modern webmail client (successor to RainLoop). Fast, mobile-friendly UI accessible on port 8080 at /snappymail.",
+        "Lightweight, modern webmail client (successor to RainLoop). Fast, mobile-friendly UI accessible at /snappymail.",
       icon: "hero-bolt",
       packages: [
         "apache2",
@@ -413,7 +413,7 @@ defmodule Hostctl.FeatureSetup do
          :ok <- write_file_via_sudo(key, "/etc/roundcube/config.inc.php", config),
          :ok <- enable_apache_conf(key, "roundcube") do
       broadcast(key, :log, "Roundcube configuration complete.")
-      broadcast(key, :log, "Webmail is available at http://<server>:8080/roundcube")
+      broadcast(key, :log, "Webmail is available at /roundcube")
       :ok
     end
   end
@@ -431,12 +431,12 @@ defmodule Hostctl.FeatureSetup do
          :ok <- write_snappymail_apache_conf(key),
          :ok <- enable_apache_conf(key, "snappymail") do
       broadcast(key, :log, "SnappyMail configuration complete.")
-      broadcast(key, :log, "Webmail is available at http://<server>:8080/snappymail")
+      broadcast(key, :log, "Webmail is available at /snappymail")
 
       broadcast(
         key,
         :log,
-        "Admin panel: http://<server>:8080/snappymail/?admin (default password: 12345)"
+        "Admin panel: /snappymail/?admin (default password: 12345)"
       )
 
       :ok
@@ -488,10 +488,10 @@ defmodule Hostctl.FeatureSetup do
   end
 
   defp setup_apache_port(key) do
-    broadcast(key, :log, "Configuring Apache to listen on port 8080...")
+    broadcast(key, :log, "Configuring Apache to listen on 127.0.0.1:8080...")
 
     ports_conf = """
-    Listen 8080
+    Listen 127.0.0.1:8080
     """
 
     server_conf = """
