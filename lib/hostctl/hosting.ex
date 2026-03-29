@@ -219,16 +219,17 @@ defmodule Hostctl.Hosting do
            Settings.get_dns_provider_setting(),
          domain <- Repo.preload(zone, :domain).domain,
          {:ok, cloudflare_zone_id} <- Cloudflare.find_zone(token, domain.name),
-         {:ok, linked_zone} <- update_dns_zone(zone, %{cloudflare_zone_id: cloudflare_zone_id}) do
-      # Push all existing local records to Cloudflare (best-effort)
+         {:ok, linked_zone} <- update_dns_zone(zone, %{cloudflare_zone_id: cloudflare_zone_id}),
+         {:ok, cf_records} <- Cloudflare.list_records(token, cloudflare_zone_id) do
       records = Repo.all(from r in DnsRecord, where: r.dns_zone_id == ^linked_zone.id)
 
       Enum.each(records, fn record ->
-        case Cloudflare.create_record(token, cloudflare_zone_id, record) do
-          {:ok, cf_record_id} ->
-            Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_record_id))
+        case cf_upsert(token, cloudflare_zone_id, cf_records, record, domain.name) do
+          {:ok, cf_id} ->
+            Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_id))
+
           {:error, reason} ->
-            Logger.warning("[Cloudflare] Failed to push #{record.type} #{record.name}: #{reason}")
+            Logger.warning("[Cloudflare] Failed to push #{record.type} #{record.name}: #{inspect(reason)}")
         end
       end)
 
@@ -251,33 +252,23 @@ defmodule Hostctl.Hosting do
       when is_binary(cf_zone_id) do
     with %{provider: "cloudflare", cloudflare_api_token: token}
          when is_binary(token) and token != "" <-
-           Settings.get_dns_provider_setting() do
-      records = Repo.all(from r in DnsRecord, where: r.dns_zone_id == ^zone.id)
+           Settings.get_dns_provider_setting(),
+         {:ok, cf_records} <- Cloudflare.list_records(token, cf_zone_id) do
+      domain_name = Repo.preload(zone, :domain).domain.name
+      local_records = Repo.all(from r in DnsRecord, where: r.dns_zone_id == ^zone.id)
 
       {synced, failed} =
-        Enum.reduce(records, {0, 0}, fn record, {ok_count, err_count} ->
-          result =
-            if is_binary(record.cloudflare_record_id) do
-              Cloudflare.update_record(token, cf_zone_id, record.cloudflare_record_id, record)
-            else
-              case Cloudflare.create_record(token, cf_zone_id, record) do
-                {:ok, cf_id} ->
-                  Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_id))
-                  :ok
-
-                {:error, _} = err ->
-                  err
+        Enum.reduce(local_records, {0, 0}, fn record, {ok_count, err_count} ->
+          case cf_upsert(token, cf_zone_id, cf_records, record, domain_name) do
+            {:ok, cf_id} ->
+              if record.cloudflare_record_id != cf_id do
+                Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_id))
               end
-            end
 
-          case result do
-            :ok -> {ok_count + 1, err_count}
+              {ok_count + 1, err_count}
 
             {:error, reason} ->
-              Logger.warning(
-                "[Cloudflare] Sync failed for #{record.name}: #{inspect(reason)}"
-              )
-
+              Logger.warning("[Cloudflare] Sync failed for #{record.name}: #{inspect(reason)}")
               {ok_count, err_count + 1}
           end
         end)
@@ -787,37 +778,20 @@ defmodule Hostctl.Hosting do
               "[Mailgun] Syncing #{length(cf_records)} DNS records to Cloudflare zone #{zone_id}"
             )
 
-            # Fetch existing records so we can replace conflicting TXT/MX entries
-            existing =
+            existing_cf =
               case Cloudflare.list_records(token, zone_id) do
                 {:ok, records} -> records
                 _ -> []
               end
 
-            # Delete any existing TXT or MX record whose name matches a Mailgun record we're about to set
-            mg_names = MapSet.new(cf_records, & &1.name)
-            mg_types = MapSet.new(cf_records, & &1.type)
-
-            Enum.each(existing, fn ex ->
-              ex_name = ex["name"]
-              # Cloudflare returns FQDNs; normalise by stripping trailing dot
-              normalised_name = String.trim_trailing(ex_name, ".")
-              ex_type = ex["type"]
-
-              if MapSet.member?(mg_types, ex_type) and
-                   (MapSet.member?(mg_names, normalised_name) or
-                      MapSet.member?(mg_names, ex_name)) do
-                Logger.info("[Mailgun] Replacing existing #{ex_type} record: #{ex_name}")
-                Cloudflare.delete_record(token, zone_id, ex["id"])
-              end
-            end)
-
-            # Create the Mailgun records
+            # Upsert each record: find by name+type in CF list, update or create.
+            # This avoids stale-ID errors and handles the case where sync_mailgun_dns_to_local_zone
+            # already pushed some records via maybe_sync_create_to_cloudflare.
             Enum.each(cf_records, fn record ->
-              case Cloudflare.create_record(token, zone_id, record) do
+              case cf_upsert(token, zone_id, existing_cf, record, domain_name) do
                 {:ok, _} -> :ok
                 {:error, reason} ->
-                  Logger.warning("[Mailgun] DNS sync failed for #{record.name}: #{reason}")
+                  Logger.warning("[Mailgun] DNS sync failed for #{record.name}: #{inspect(reason)}")
               end
             end)
 
@@ -838,7 +812,7 @@ defmodule Hostctl.Hosting do
   # provisioning as a fallback — Mailgun's DMARC API often returns nothing.
   # Upserts the _dmarc TXT record using Mailgun-provided records when available,
   # falling back to a sensible default. Always upserts so re-provisioning updates
-  # any stale value.
+  # any stale value. Uses cf_upsert to avoid stale cloudflare_record_id issues.
   defp ensure_dmarc_record(domain_name, mailgun_dmarc_records) do
     with %Domain{} = domain <- Repo.get_by(Domain, name: domain_name),
          %DnsZone{} = zone <- Repo.get_by(DnsZone, domain_id: domain.id) do
@@ -850,31 +824,33 @@ defmodule Hostctl.Hosting do
                r.name == dmarc_name or r.name == "_dmarc" or
                  String.starts_with?(to_string(r.name), "_dmarc")
              end) do
-          %{value: v} when is_binary(v) and v != "" ->
-            v
-
-          _ ->
-            "v=DMARC1; p=none; pct=100; fo=1; ri=3600; rua=mailto:postmaster@#{domain_name}"
+          %{value: v} when is_binary(v) and v != "" -> v
+          _ -> "v=DMARC1; p=none; pct=100; fo=1; ri=3600; rua=mailto:postmaster@#{domain_name}"
         end
 
       attrs = %{type: "TXT", name: dmarc_name, value: dmarc_value, ttl: 300}
 
-      # Delete any existing _dmarc record (plain Repo.delete_all so Cloudflare
-      # sync doesn't fire twice — we'll push the new record right after)
+      # Delete old local record without touching CF (stale IDs cause CF errors).
+      # We'll push to CF fresh right after.
       existing = Repo.get_by(DnsRecord, dns_zone_id: zone.id, type: "TXT", name: dmarc_name)
+      if existing, do: Repo.delete(existing)
 
-      if existing do
-        maybe_sync_delete_to_cloudflare(existing)
-        Repo.delete(existing)
-      end
-
-      %DnsRecord{dns_zone_id: zone.id}
-      |> DnsRecord.changeset(attrs)
-      |> Repo.insert()
-      |> case do
+      case %DnsRecord{dns_zone_id: zone.id} |> DnsRecord.changeset(attrs) |> Repo.insert() do
         {:ok, record} ->
           Logger.info("[DMARC] Upserted #{dmarc_name} = #{dmarc_value}")
-          maybe_sync_create_to_cloudflare(zone, record)
+
+          # Sync to CF via upsert (matches by name+type, never uses stale stored IDs)
+          if is_binary(zone.cloudflare_zone_id) do
+            with %{provider: "cloudflare", cloudflare_api_token: token}
+                 when is_binary(token) and token != "" <- Settings.get_dns_provider_setting(),
+                 {:ok, cf_records} <- Cloudflare.list_records(token, zone.cloudflare_zone_id),
+                 {:ok, cf_id} <-
+                   cf_upsert(token, zone.cloudflare_zone_id, cf_records, record, domain_name) do
+              Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_id))
+            else
+              _ -> :ok
+            end
+          end
 
         {:error, changeset} ->
           Logger.warning("[DMARC] Failed to upsert record: #{inspect(changeset.errors)}")
@@ -882,6 +858,39 @@ defmodule Hostctl.Hosting do
     end
 
     :ok
+  end
+
+  # Upserts a record in Cloudflare by matching on name+type against the live CF
+  # record list. Never relies on stored cloudflare_record_id. Updates the
+  # existing CF record if found, otherwise creates a new one.
+  # Returns {:ok, cf_record_id} or {:error, reason}.
+  defp cf_upsert(token, cf_zone_id, cf_records, record, domain_name) do
+    fqdn = to_cf_fqdn(record.name, domain_name)
+
+    match =
+      Enum.find(cf_records, fn cf ->
+        cf_name = String.trim_trailing(cf["name"] || "", ".")
+        cf["type"] == record.type and (cf_name == fqdn or cf_name == record.name)
+      end)
+
+    case match do
+      %{"id" => cf_id} ->
+        case Cloudflare.update_record(token, cf_zone_id, cf_id, record) do
+          :ok -> {:ok, cf_id}
+          {:error, _} = err -> err
+        end
+
+      nil ->
+        Cloudflare.create_record(token, cf_zone_id, record)
+    end
+  end
+
+  defp to_cf_fqdn("@", domain_name), do: domain_name
+
+  defp to_cf_fqdn(name, domain_name) do
+    if name == domain_name or String.ends_with?(name, ".#{domain_name}"),
+      do: name,
+      else: "#{name}.#{domain_name}"
   end
 
   defp sync_mailgun_dns_to_local_zone(domain_name, mg_records) do
