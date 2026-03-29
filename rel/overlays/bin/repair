@@ -252,13 +252,94 @@ else
 fi
 
 # =============================================================================
-# 7. Reload & restart
+# 7. Apache / webmail (Roundcube, SnappyMail)
 # =============================================================================
-head "7. Apply changes"
+head "7. Apache webmail proxy"
+
+if command -v apache2 &>/dev/null; then
+  # Ensure Apache listens on 127.0.0.1:8080 only (Phoenix owns port 80)
+  PORTS_CONF="/etc/apache2/ports.conf"
+  DESIRED_PORTS="Listen 127.0.0.1:8080"
+  if [[ -f "$PORTS_CONF" ]]; then
+    current_ports="$(cat "$PORTS_CONF")"
+    if echo "$current_ports" | grep -qE '^\s*Listen\s+(0\.0\.0\.0:)?80\b'; then
+      echo "$DESIRED_PORTS" > "$PORTS_CONF"
+      fix "ports.conf → 127.0.0.1:8080 (was binding to port 80)"
+      FIXED=$((FIXED + 1))
+    elif ! echo "$current_ports" | grep -q '127\.0\.0\.1:8080'; then
+      echo "$DESIRED_PORTS" > "$PORTS_CONF"
+      fix "ports.conf → 127.0.0.1:8080"
+      FIXED=$((FIXED + 1))
+    else
+      ok "ports.conf already set to 127.0.0.1:8080"
+    fi
+  fi
+
+  # Ensure ServerName is set to suppress warnings
+  SN_CONF="/etc/apache2/conf-available/servername.conf"
+  if [[ ! -f "$SN_CONF" ]] || ! grep -q 'ServerName' "$SN_CONF"; then
+    echo "ServerName localhost" > "$SN_CONF"
+    a2enconf -q servername 2>/dev/null || true
+    fix "ServerName → localhost"
+    FIXED=$((FIXED + 1))
+  else
+    ok "ServerName configured"
+  fi
+
+  # Restart Apache if it exists but isn't running or was reconfigured
+  if ! systemctl is-active --quiet apache2; then
+    systemctl enable --now apache2 2>/dev/null && fix "Apache started" || err "Apache failed to start"
+    FIXED=$((FIXED + 1))
+  else
+    ok "Apache is running"
+  fi
+
+  # Fix Roundcube SQLite config if roundcube is installed but using MySQL
+  if dpkg -l roundcube-core &>/dev/null 2>&1; then
+    RC_CONF="/etc/roundcube/config.inc.php"
+    if [[ -f "$RC_CONF" ]] && grep -q 'mysql\|pgsql' "$RC_CONF" 2>/dev/null; then
+      fix "Roundcube config references MySQL/PostgreSQL — rewriting for SQLite"
+      mkdir -p /var/lib/roundcube
+      chown www-data:www-data /var/lib/roundcube
+
+      # Install SQLite packages if missing
+      if ! dpkg -l roundcube-sqlite3 &>/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends roundcube-sqlite3 php-sqlite3 >/dev/null 2>&1
+        fix "Installed roundcube-sqlite3 and php-sqlite3"
+      fi
+
+      cat > "$RC_CONF" <<'RCEOF'
+<?php
+$config['db_dsnw'] = 'sqlite:////var/lib/roundcube/roundcube.db?mode=0640';
+$config['imap_host'] = 'localhost:143';
+$config['smtp_host'] = 'localhost:587';
+$config['smtp_auth_type'] = 'LOGIN';
+$config['product_name'] = 'hostctl Webmail';
+$config['plugins'] = ['archive', 'zipdownload'];
+$config['skin'] = 'elastic';
+RCEOF
+      FIXED=$((FIXED + 1))
+    else
+      ok "Roundcube config"
+    fi
+  fi
+else
+  ok "Apache not installed — skipping"
+fi
+
+# =============================================================================
+# 8. Reload & restart
+# =============================================================================
+head "8. Apply changes"
 
 if [[ $FIXED -gt 0 ]]; then
   systemctl daemon-reload
   fix "systemd daemon reloaded"
+
+  if systemctl is-active --quiet apache2 2>/dev/null; then
+    systemctl restart apache2
+    fix "Apache restarted"
+  fi
 
   if systemctl is-active --quiet "$APP_NAME"; then
     systemctl restart "$APP_NAME"
