@@ -222,9 +222,9 @@ defmodule HostctlWeb.DatabaseLive.Index do
               class="space-y-4"
             >
               <%!-- Base errors (e.g. MySQL connection failure) --%>
-              <%= if @db_form.errors[:base] != [] do %>
+              <%= if error = @db_form.errors[:base] do %>
                 <div class="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-3 text-sm text-red-700 dark:text-red-400">
-                  {elem(hd(@db_form.errors[:base]), 0)}
+                  {elem(error, 0)}
                 </div>
               <% end %>
               <div class="grid grid-cols-1 gap-4 sm:grid-cols-4">
@@ -500,9 +500,9 @@ defmodule HostctlWeb.DatabaseLive.Index do
                   class="space-y-3"
                 >
                   <%!-- Base (server-side) errors, e.g. MySQL connection failures --%>
-                  <%= if @db_user_form.errors[:base] != [] do %>
+                  <%= if error = @db_user_form.errors[:base] do %>
                     <div class="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-3 text-sm text-red-700 dark:text-red-400">
-                      {elem(hd(@db_user_form.errors[:base]), 0)}
+                      {elem(error, 0)}
                     </div>
                   <% end %>
                   <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
