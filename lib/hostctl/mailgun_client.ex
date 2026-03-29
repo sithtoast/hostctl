@@ -128,6 +128,35 @@ defmodule Hostctl.MailgunClient do
     end
   end
 
+  @doc """
+  Fetches the DMARC DNS records Mailgun wants configured for a domain.
+
+  Returns `{:ok, [%{type, name, value}]}` or `{:error, reason}`.
+  """
+  def get_dmarc_records(api_key, domain_name, region \\ :us) do
+    base = if region == :eu, do: @eu_base, else: @us_base
+    encoded = URI.encode(domain_name, &URI.char_unreserved?/1)
+    url = "#{base}/v1/dmarc-records/#{encoded}"
+    Logger.info("[Mailgun] GET #{url}")
+
+    Req.get(url, auth: {"api", api_key})
+    |> parse(fn body ->
+      records =
+        (body["items"] || [])
+        |> Enum.map(fn r ->
+          %{
+            type: r["record_type"] || "TXT",
+            name: r["name"],
+            value: r["value"],
+            ttl: 300
+          }
+        end)
+        |> Enum.filter(& &1.name)
+
+      {:ok, records}
+    end)
+  end
+
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------

@@ -218,8 +218,21 @@ defmodule Hostctl.Hosting do
          when is_binary(token) and token != "" <-
            Settings.get_dns_provider_setting(),
          domain <- Repo.preload(zone, :domain).domain,
-         {:ok, cloudflare_zone_id} <- Cloudflare.find_zone(token, domain.name) do
-      update_dns_zone(zone, %{cloudflare_zone_id: cloudflare_zone_id})
+         {:ok, cloudflare_zone_id} <- Cloudflare.find_zone(token, domain.name),
+         {:ok, linked_zone} <- update_dns_zone(zone, %{cloudflare_zone_id: cloudflare_zone_id}) do
+      # Push all existing local records to Cloudflare (best-effort)
+      records = Repo.all(from r in DnsRecord, where: r.dns_zone_id == ^linked_zone.id)
+
+      Enum.each(records, fn record ->
+        case Cloudflare.create_record(token, cloudflare_zone_id, record) do
+          {:ok, cf_record_id} ->
+            Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_record_id))
+          {:error, reason} ->
+            Logger.warning("[Cloudflare] Failed to push #{record.type} #{record.name}: #{reason}")
+        end
+      end)
+
+      {:ok, linked_zone}
     else
       %{provider: "local"} -> {:error, :cloudflare_not_configured}
       {:error, reason} -> {:error, reason}
@@ -664,7 +677,14 @@ defmodule Hostctl.Hosting do
     Logger.info("[Mailgun] Provisioning #{domain_name} (region: #{region})")
 
     with {:ok, domain_info} <- get_or_create_mailgun_domain(api_key, domain_name, region) do
-      sync_mailgun_dns_to_cloudflare(domain_name, domain_info)
+      # Fetch Mailgun DMARC records separately (different API endpoint)
+      dmarc_records =
+        case MailgunClient.get_dmarc_records(api_key, domain_name, region) do
+          {:ok, records} -> records
+          _ -> []
+        end
+
+      sync_mailgun_dns_to_cloudflare(domain_name, domain_info, dmarc_records)
       MailgunClient.create_smtp_credential(api_key, domain_name, region)
     end
   end
@@ -686,14 +706,12 @@ defmodule Hostctl.Hosting do
   end
 
   defp sync_mailgun_dns_to_cloudflare(domain_name, %{
-         sending_dns_records: sending,
-         receiving_dns_records: receiving
-       }) do
-    all_mg_records = sending ++ receiving
-
-    # Build normalised hostctl-style records from Mailgun's response
-    cf_records =
-      Enum.map(all_mg_records, fn mg_record ->
+         sending_dns_records: sending
+       }, dmarc_records) do
+    # Only use sending records (SPF, DKIM) — never receiving_dns_records,
+    # which are Mailgun's own inbound MX servers, not ours.
+    mg_sending_records =
+      Enum.map(sending, fn mg_record ->
         %{
           type: mg_record["record_type"],
           name: mg_record["name"] || "@",
@@ -702,6 +720,9 @@ defmodule Hostctl.Hosting do
           ttl: 3600
         }
       end)
+
+    # Merge in DMARC records fetched from the separate Mailgun endpoint
+    cf_records = mg_sending_records ++ dmarc_records
 
     # Sync to local hostctl DNS zone (best-effort)
     sync_mailgun_dns_to_local_zone(domain_name, cf_records)
