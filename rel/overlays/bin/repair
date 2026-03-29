@@ -256,7 +256,7 @@ fi
 # =============================================================================
 head "7. Apache webmail proxy"
 
-if command -v apache2 &>/dev/null; then
+if [[ -x /usr/sbin/apache2 ]] || dpkg -l apache2 &>/dev/null 2>&1; then
   # Ensure Apache listens on 127.0.0.1:8080 only (Phoenix owns port 80)
   PORTS_CONF="/etc/apache2/ports.conf"
   DESIRED_PORTS="Listen 127.0.0.1:8080"
@@ -275,6 +275,16 @@ if command -v apache2 &>/dev/null; then
     fi
   fi
 
+  # Update default VirtualHost to match port 8080
+  DEFAULT_SITE="/etc/apache2/sites-enabled/000-default.conf"
+  if [[ -f "$DEFAULT_SITE" ]] && grep -q '<VirtualHost \*:80>' "$DEFAULT_SITE"; then
+    sed -i 's/<VirtualHost \*:80>/<VirtualHost *:8080>/' "$DEFAULT_SITE"
+    fix "Default VirtualHost → *:8080"
+    FIXED=$((FIXED + 1))
+  else
+    ok "Default VirtualHost port"
+  fi
+
   # Ensure ServerName is set to suppress warnings
   SN_CONF="/etc/apache2/conf-available/servername.conf"
   if [[ ! -f "$SN_CONF" ]] || ! grep -q 'ServerName' "$SN_CONF"; then
@@ -284,6 +294,17 @@ if command -v apache2 &>/dev/null; then
     FIXED=$((FIXED + 1))
   else
     ok "ServerName configured"
+  fi
+
+  # Ensure Roundcube apache conf is enabled
+  if dpkg -l roundcube-core &>/dev/null 2>&1; then
+    if [[ ! -f /etc/apache2/conf-enabled/roundcube.conf ]]; then
+      a2enconf -q roundcube 2>/dev/null || true
+      fix "Roundcube Apache conf enabled"
+      FIXED=$((FIXED + 1))
+    else
+      ok "Roundcube Apache conf"
+    fi
   fi
 
   # Restart Apache if it exists but isn't running or was reconfigured
@@ -297,8 +318,18 @@ if command -v apache2 &>/dev/null; then
   # Fix Roundcube SQLite config if roundcube is installed but using MySQL
   if dpkg -l roundcube-core &>/dev/null 2>&1; then
     RC_CONF="/etc/roundcube/config.inc.php"
+    RC_DB_CONF="/etc/roundcube/debian-db.php"
+    needs_rewrite=false
+
+    # Check both config files — Debian splits DB config into debian-db.php
     if [[ -f "$RC_CONF" ]] && grep -q 'mysql\|pgsql' "$RC_CONF" 2>/dev/null; then
-      fix "Roundcube config references MySQL/PostgreSQL — rewriting for SQLite"
+      needs_rewrite=true
+    elif [[ -f "$RC_DB_CONF" ]] && grep -q 'mysql\|pgsql' "$RC_DB_CONF" 2>/dev/null; then
+      needs_rewrite=true
+    fi
+
+    if $needs_rewrite; then
+      fix "Roundcube DB config references MySQL/PostgreSQL — rewriting for SQLite"
       mkdir -p /var/lib/roundcube
       chown www-data:www-data /var/lib/roundcube
 
@@ -318,9 +349,16 @@ $config['product_name'] = 'hostctl Webmail';
 $config['plugins'] = ['archive', 'zipdownload'];
 $config['skin'] = 'elastic';
 RCEOF
+
+      # Neutralise debian-db.php so it doesn't override with MySQL settings
+      if [[ -f "$RC_DB_CONF" ]]; then
+        echo '<?php // managed by hostctl — DB config in config.inc.php' > "$RC_DB_CONF"
+        fix "debian-db.php neutralised"
+      fi
+
       FIXED=$((FIXED + 1))
     else
-      ok "Roundcube config"
+      ok "Roundcube DB config"
     fi
   fi
 else

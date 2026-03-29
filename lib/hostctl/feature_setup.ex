@@ -501,12 +501,36 @@ defmodule Hostctl.FeatureSetup do
     with :ok <- write_file_via_sudo(key, "/etc/apache2/ports.conf", ports_conf),
          :ok <-
            write_file_via_sudo(key, "/etc/apache2/conf-available/servername.conf", server_conf),
-         {_, 0} <- escaped_cmd("a2enconf", ["servername"], stderr_to_stdout: true) do
+         {_, 0} <- escaped_cmd("a2enconf", ["servername"], stderr_to_stdout: true),
+         :ok <- fix_default_vhost(key) do
       :ok
     else
       {output, code} ->
         broadcast(key, :log, "Failed to configure Apache port (exit #{code}): #{output}")
         {:error, {:apache_port_failed, code}}
+    end
+  end
+
+  # Update the default VirtualHost to match port 8080 instead of 80
+  defp fix_default_vhost(key) do
+    broadcast(key, :log, "Updating default VirtualHost to port 8080...")
+
+    case escaped_cmd(
+           "sed",
+           [
+             "-i",
+             "s/<VirtualHost \\*:80>/<VirtualHost *:8080>/",
+             "/etc/apache2/sites-enabled/000-default.conf"
+           ],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        :ok
+
+      {_, _} ->
+        # File may not exist on minimal installs — not fatal
+        broadcast(key, :log, "No default VirtualHost to update (OK)")
+        :ok
     end
   end
 
