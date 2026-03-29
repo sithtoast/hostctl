@@ -55,23 +55,25 @@ defmodule Hostctl.FeatureSetup do
       key: "roundcube",
       label: "Roundcube Webmail",
       description:
-        "Feature-rich webmail client with full IMAP support, address book, and plugin system. Accessible at /roundcube.",
+        "Feature-rich webmail client with full IMAP support, address book, and plugin system. Accessible on port 8080 at /roundcube.",
       icon: "hero-inbox-stack",
       packages: [
         "roundcube",
         "roundcube-core",
+        "roundcube-sqlite3",
         "roundcube-plugins",
         "apache2",
-        "libapache2-mod-php"
+        "libapache2-mod-php",
+        "php-sqlite3"
       ],
-      services: ["apache2"],
+      services: [],
       setup_fn: :setup_roundcube
     },
     %{
       key: "snappymail",
       label: "SnappyMail",
       description:
-        "Lightweight, modern webmail client (successor to RainLoop). Fast, mobile-friendly UI accessible at /snappymail.",
+        "Lightweight, modern webmail client (successor to RainLoop). Fast, mobile-friendly UI accessible on port 8080 at /snappymail.",
       icon: "hero-bolt",
       packages: [
         "apache2",
@@ -82,7 +84,7 @@ defmodule Hostctl.FeatureSetup do
         "php-json",
         "unzip"
       ],
-      services: ["apache2"],
+      services: [],
       setup_fn: :setup_snappymail
     }
   ]
@@ -225,7 +227,10 @@ defmodule Hostctl.FeatureSetup do
 
   defp install_packages(%{packages: []}), do: :ok
 
-  defp install_packages(%{key: key, packages: packages}) do
+  defp install_packages(%{key: key} = feature) do
+    :ok = preseed_debconf(feature)
+
+    packages = feature.packages
     broadcast(key, :log, "Installing packages: #{Enum.join(packages, ", ")}...")
 
     args = ["install", "-y", "--no-install-recommends"] ++ packages
@@ -251,6 +256,32 @@ defmodule Hostctl.FeatureSetup do
         {:error, {:apt_failed, code}}
     end
   end
+
+  # Pre-seed debconf selections to avoid interactive prompts during apt install.
+  # Override Roundcube's default MySQL backend with SQLite.
+  defp preseed_debconf(%{key: "roundcube"} = feature) do
+    broadcast(feature.key, :log, "Pre-seeding debconf for Roundcube (SQLite backend)...")
+
+    selections = """
+    roundcube-core roundcube/dbconfig-install boolean true
+    roundcube-core roundcube/database-type select sqlite3
+    """
+
+    case escaped_cmd(
+           "sh",
+           ["-c", "echo '#{Base.encode64(selections)}' | base64 -d | debconf-set-selections"],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        :ok
+
+      {output, code} ->
+        broadcast(feature.key, :log, "debconf pre-seed failed (exit #{code}): #{output}")
+        :ok
+    end
+  end
+
+  defp preseed_debconf(_feature), do: :ok
 
   defp enable_services(%{services: []}), do: :ok
 
@@ -364,9 +395,9 @@ defmodule Hostctl.FeatureSetup do
   def setup_roundcube(key) do
     broadcast(key, :log, "Configuring Roundcube Webmail...")
 
-    # Configure Roundcube to connect to local IMAP/SMTP
     config = """
     <?php
+    $config['db_dsnw'] = 'sqlite:////var/lib/roundcube/roundcube.db?mode=0640';
     $config['imap_host'] = 'localhost:143';
     $config['smtp_host'] = 'localhost:587';
     $config['smtp_auth_type'] = 'LOGIN';
@@ -376,10 +407,13 @@ defmodule Hostctl.FeatureSetup do
     $config['skin'] = 'elastic';
     """
 
-    with :ok <- write_file_via_sudo(key, "/etc/roundcube/config.inc.php", config),
+    with :ok <- setup_apache_port(key),
+         :ok <- run_cmd(key, "mkdir", ["-p", "/var/lib/roundcube"]),
+         :ok <- run_cmd(key, "chown", ["www-data:www-data", "/var/lib/roundcube"]),
+         :ok <- write_file_via_sudo(key, "/etc/roundcube/config.inc.php", config),
          :ok <- enable_apache_conf(key, "roundcube") do
       broadcast(key, :log, "Roundcube configuration complete.")
-      broadcast(key, :log, "Webmail is available at http://<server>/roundcube")
+      broadcast(key, :log, "Webmail is available at http://<server>:8080/roundcube")
       :ok
     end
   end
@@ -390,18 +424,19 @@ defmodule Hostctl.FeatureSetup do
 
     install_dir = "/var/www/snappymail"
 
-    with :ok <- run_cmd(key, "mkdir", ["-p", install_dir]),
+    with :ok <- setup_apache_port(key),
+         :ok <- run_cmd(key, "mkdir", ["-p", install_dir]),
          :ok <- download_snappymail(key, install_dir),
          :ok <- run_cmd(key, "chown", ["-R", "www-data:www-data", install_dir]),
          :ok <- write_snappymail_apache_conf(key),
          :ok <- enable_apache_conf(key, "snappymail") do
       broadcast(key, :log, "SnappyMail configuration complete.")
-      broadcast(key, :log, "Webmail is available at http://<server>/snappymail")
+      broadcast(key, :log, "Webmail is available at http://<server>:8080/snappymail")
 
       broadcast(
         key,
         :log,
-        "Admin panel: http://<server>/snappymail/?admin (default password: 12345)"
+        "Admin panel: http://<server>:8080/snappymail/?admin (default password: 12345)"
       )
 
       :ok
@@ -452,16 +487,55 @@ defmodule Hostctl.FeatureSetup do
     write_file_via_sudo(key, "/etc/apache2/conf-available/snappymail.conf", conf)
   end
 
+  defp setup_apache_port(key) do
+    broadcast(key, :log, "Configuring Apache to listen on port 8080...")
+
+    ports_conf = """
+    Listen 8080
+    """
+
+    server_conf = """
+    ServerName localhost
+    """
+
+    with :ok <- write_file_via_sudo(key, "/etc/apache2/ports.conf", ports_conf),
+         :ok <-
+           write_file_via_sudo(key, "/etc/apache2/conf-available/servername.conf", server_conf),
+         {_, 0} <- escaped_cmd("a2enconf", ["servername"], stderr_to_stdout: true) do
+      :ok
+    else
+      {output, code} ->
+        broadcast(key, :log, "Failed to configure Apache port (exit #{code}): #{output}")
+        {:error, {:apache_port_failed, code}}
+    end
+  end
+
   defp enable_apache_conf(key, conf_name) do
     broadcast(key, :log, "Enabling Apache config for #{conf_name}...")
 
     with {_, 0} <- escaped_cmd("a2enconf", [conf_name], stderr_to_stdout: true),
-         {_, 0} <- escaped_cmd("systemctl", ["reload", "apache2"], stderr_to_stdout: true) do
+         :ok <- restart_apache(key) do
       :ok
     else
       {output, code} ->
         broadcast(key, :log, "Failed to enable Apache config (exit #{code}): #{output}")
         {:error, {:apache_conf_failed, code}}
+    end
+  end
+
+  defp restart_apache(key) do
+    broadcast(key, :log, "Restarting Apache...")
+
+    # Enable and start (or restart) Apache — handles both fresh installs and reconfigs
+    case escaped_cmd("systemctl", ["enable", "--now", "apache2"], stderr_to_stdout: true) do
+      {_, 0} ->
+        # If already running, a restart ensures config is picked up
+        escaped_cmd("systemctl", ["restart", "apache2"], stderr_to_stdout: true)
+        :ok
+
+      {output, code} ->
+        broadcast(key, :log, "Failed to start Apache (exit #{code}): #{output}")
+        {:error, {:apache_start_failed, code}}
     end
   end
 

@@ -97,8 +97,8 @@ defmodule HostctlWeb.EmailLive.Index do
 
   defp webmail_links do
     [
-      {"roundcube", "Roundcube", "/roundcube", "hero-inbox-stack"},
-      {"snappymail", "SnappyMail", "/snappymail", "hero-bolt"}
+      {"roundcube", "Roundcube", ":8080/roundcube", "hero-inbox-stack"},
+      {"snappymail", "SnappyMail", ":8080/snappymail", "hero-bolt"}
     ]
     |> Enum.filter(fn {key, _, _, _} -> Settings.feature_enabled?(key) end)
   end
