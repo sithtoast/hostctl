@@ -90,7 +90,28 @@ defmodule HostctlWeb.DomainLive.Show do
   end
 
   def handle_event("set_section", %{"section" => section}, socket) do
-    {:noreply, assign(socket, :active_section, String.to_existing_atom(section))}
+    section = String.to_existing_atom(section)
+    domain = socket.assigns.domain
+
+    # Re-stream collections when their tab becomes visible, because
+    # phx-update="stream" containers that weren't in the DOM at mount
+    # time will have lost their initial data.
+    socket =
+      case section do
+        :subdomains ->
+          stream(socket, :subdomains, Hosting.list_subdomains(domain), reset: true)
+
+        :cron ->
+          stream(socket, :cron_jobs, Hosting.list_cron_jobs(domain), reset: true)
+
+        :ftp ->
+          stream(socket, :ftp_accounts, Hosting.list_ftp_accounts(domain), reset: true)
+
+        _ ->
+          socket
+      end
+
+    {:noreply, assign(socket, :active_section, section)}
   end
 
   def handle_event("sync_nginx", _params, socket) do
