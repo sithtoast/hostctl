@@ -174,6 +174,34 @@ defmodule HostctlWeb.DnsLive.Index do
     end
   end
 
+  def handle_event("sync_to_cloudflare", _, socket) do
+    case Hosting.sync_zone_to_cloudflare(socket.assigns.zone) do
+      {:ok, %{synced: count, failed: 0}} ->
+        zone = Hosting.get_dns_zone_with_records!(socket.assigns.domain)
+
+        {:noreply,
+         socket
+         |> assign(:zone, zone)
+         |> stream(:dns_records, zone.dns_records, reset: true)
+         |> put_flash(:info, "Synced #{count} record(s) to Cloudflare.")}
+
+      {:ok, %{synced: ok, failed: failed}} ->
+        zone = Hosting.get_dns_zone_with_records!(socket.assigns.domain)
+
+        {:noreply,
+         socket
+         |> assign(:zone, zone)
+         |> stream(:dns_records, zone.dns_records, reset: true)
+         |> put_flash(:error, "Synced #{ok} record(s) to Cloudflare. #{failed} failed — check logs.")}
+
+      {:error, :not_linked} ->
+        {:noreply, put_flash(socket, :error, "Zone is not linked to Cloudflare.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Cloudflare sync failed — check settings.")}
+    end
+  end
+
   # --------------------------------------------------------------------------
   # Helpers
   # --------------------------------------------------------------------------
@@ -211,8 +239,13 @@ defmodule HostctlWeb.DnsLive.Index do
                 <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-100 dark:bg-orange-900/20 text-orange-700 dark:text-orange-400 text-xs font-semibold">
                   <.icon name="hero-cloud" class="w-3.5 h-3.5" /> Cloudflare Active
                 </span>
-                <button
-                  id="unlink-cf-btn"
+                <button                  id="sync-cf-btn"
+                  phx-click="sync_to_cloudflare"
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-100 hover:bg-orange-200 dark:bg-orange-900/20 dark:hover:bg-orange-900/30 text-orange-700 dark:text-orange-400 text-xs font-semibold transition-colors"
+                >
+                  <.icon name="hero-arrow-path" class="w-3.5 h-3.5" /> Sync
+                </button>
+                <button                  id="unlink-cf-btn"
                   phx-click="unlink_cloudflare_zone"
                   class="text-xs text-gray-400 hover:text-red-500 transition-colors"
                 >
@@ -458,13 +491,22 @@ defmodule HostctlWeb.DnsLive.Index do
 
         <%!-- Cloudflare footer (zone is linked) --%>
         <%= if cloudflare_enabled?(@dns_setting) && @zone.cloudflare_zone_id do %>
-          <div class="flex items-center gap-3 px-4 py-3 rounded-xl bg-orange-50 dark:bg-orange-900/10 border border-orange-200 dark:border-orange-800 text-xs text-orange-700 dark:text-orange-400">
-            <.icon name="hero-cloud" class="w-4 h-4 shrink-0" />
-            <span>
-              Syncing to Cloudflare zone <code class="font-mono bg-orange-100 dark:bg-orange-900/30 px-1 rounded">
-                {@zone.cloudflare_zone_id}
-              </code>. New records are pushed to Cloudflare automatically.
-            </span>
+          <div class="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-orange-50 dark:bg-orange-900/10 border border-orange-200 dark:border-orange-800 text-xs text-orange-700 dark:text-orange-400">
+            <div class="flex items-center gap-3">
+              <.icon name="hero-cloud" class="w-4 h-4 shrink-0" />
+              <span>
+                Syncing to Cloudflare zone <code class="font-mono bg-orange-100 dark:bg-orange-900/30 px-1 rounded">
+                  {@zone.cloudflare_zone_id}
+                </code>. New records are pushed to Cloudflare automatically.
+              </span>
+            </div>
+            <button
+              id="sync-cf-footer-btn"
+              phx-click="sync_to_cloudflare"
+              class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-200 hover:bg-orange-300 dark:bg-orange-900/40 dark:hover:bg-orange-900/60 text-orange-800 dark:text-orange-300 font-semibold transition-colors"
+            >
+              <.icon name="hero-arrow-path" class="w-3.5 h-3.5" /> Sync all to Cloudflare
+            </button>
           </div>
         <% end %>
       </div>

@@ -240,6 +240,56 @@ defmodule Hostctl.Hosting do
     end
   end
 
+  @doc """
+  Pushes all local DNS records for the given zone to Cloudflare. Records that
+  already have a `cloudflare_record_id` are updated; others are created and the
+  ID is stored locally.
+
+  Returns `{:ok, %{synced: n, failed: n}}` or `{:error, :not_linked | :cloudflare_not_configured}`.
+  """
+  def sync_zone_to_cloudflare(%DnsZone{cloudflare_zone_id: cf_zone_id} = zone)
+      when is_binary(cf_zone_id) do
+    with %{provider: "cloudflare", cloudflare_api_token: token}
+         when is_binary(token) and token != "" <-
+           Settings.get_dns_provider_setting() do
+      records = Repo.all(from r in DnsRecord, where: r.dns_zone_id == ^zone.id)
+
+      {synced, failed} =
+        Enum.reduce(records, {0, 0}, fn record, {ok_count, err_count} ->
+          result =
+            if is_binary(record.cloudflare_record_id) do
+              Cloudflare.update_record(token, cf_zone_id, record.cloudflare_record_id, record)
+            else
+              case Cloudflare.create_record(token, cf_zone_id, record) do
+                {:ok, cf_id} ->
+                  Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_id))
+                  :ok
+
+                {:error, _} = err ->
+                  err
+              end
+            end
+
+          case result do
+            :ok -> {ok_count + 1, err_count}
+
+            {:error, reason} ->
+              Logger.warning(
+                "[Cloudflare] Sync failed for #{record.name}: #{inspect(reason)}"
+              )
+
+              {ok_count, err_count + 1}
+          end
+        end)
+
+      {:ok, %{synced: synced, failed: failed}}
+    else
+      _ -> {:error, :cloudflare_not_configured}
+    end
+  end
+
+  def sync_zone_to_cloudflare(_zone), do: {:error, :not_linked}
+
   def create_dns_record(%DnsZone{} = zone, attrs) do
     result =
       %DnsRecord{dns_zone_id: zone.id}
@@ -685,6 +735,7 @@ defmodule Hostctl.Hosting do
         end
 
       sync_mailgun_dns_to_cloudflare(domain_name, domain_info, dmarc_records)
+      ensure_dmarc_record(domain_name)
       MailgunClient.create_smtp_credential(api_key, domain_name, region)
     end
   end
@@ -778,6 +829,34 @@ defmodule Hostctl.Hosting do
 
       _ ->
         Logger.info("[Mailgun] Cloudflare not configured, skipping DNS sync")
+    end
+
+    :ok
+  end
+
+  # Ensures a _dmarc TXT record exists for the domain. Called after Mailgun
+  # provisioning as a fallback — Mailgun's DMARC API often returns nothing.
+  defp ensure_dmarc_record(domain_name) do
+    with %Domain{} = domain <- Repo.get_by(Domain, name: domain_name),
+         %DnsZone{} = zone <- Repo.get_by(DnsZone, domain_id: domain.id) do
+      dmarc_name = "_dmarc.#{domain_name}"
+
+      unless Repo.get_by(DnsRecord, dns_zone_id: zone.id, type: "TXT", name: dmarc_name) do
+        attrs = %{
+          type: "TXT",
+          name: dmarc_name,
+          value: "v=DMARC1; p=none; rua=mailto:postmaster@#{domain_name}",
+          ttl: 300
+        }
+
+        %DnsRecord{dns_zone_id: zone.id}
+        |> DnsRecord.changeset(attrs)
+        |> Repo.insert()
+        |> case do
+          {:ok, record} -> maybe_sync_create_to_cloudflare(zone, record)
+          _ -> :ok
+        end
+      end
     end
 
     :ok
