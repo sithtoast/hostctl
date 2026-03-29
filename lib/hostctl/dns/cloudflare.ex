@@ -105,14 +105,14 @@ defmodule Hostctl.DNS.Cloudflare do
 
   defp build_record_body(record) do
     body = %{
-      "type" => record.type,
-      "name" => record.name,
-      "content" => record.value,
-      "ttl" => record.ttl || 3600
+      "type" => Map.get(record, :type),
+      "name" => Map.get(record, :name),
+      "content" => Map.get(record, :value),
+      "ttl" => Map.get(record, :ttl) || 3600
     }
 
-    if record.priority do
-      Map.put(body, "priority", record.priority)
+    if Map.get(record, :priority) do
+      Map.put(body, "priority", Map.get(record, :priority))
     else
       body
     end

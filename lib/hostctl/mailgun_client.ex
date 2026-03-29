@@ -25,7 +25,7 @@ defmodule Hostctl.MailgunClient do
   Returns `{:ok, [%{name, smtp_login, state}]}` or `{:error, reason}`.
   """
   def list_domains(api_key) do
-    Req.get("#{@us_base}/v4/domains", auth: {"api", api_key})
+    Req.get("#{@us_base}/v4/domains", auth: {:basic, "api:#{api_key}"})
     |> parse(fn body ->
       items = body["items"] || []
 
@@ -54,7 +54,7 @@ defmodule Hostctl.MailgunClient do
     url = "#{base}/v4/domains/#{encoded}"
     Logger.info("[Mailgun] GET #{url}")
 
-    case Req.get(url, auth: {"api", api_key}) do
+    case Req.get(url, auth: {:basic, "api:#{api_key}"}) do
       {:ok, %Req.Response{status: 404}} ->
         Logger.info("[Mailgun] Domain #{domain_name} not found (404)")
         {:error, "HTTP 404"}
@@ -81,7 +81,7 @@ defmodule Hostctl.MailgunClient do
     base = if region == :eu, do: @eu_base, else: @us_base
     Logger.info("[Mailgun] Creating domain #{domain_name} in #{region} region")
 
-    Req.post("#{base}/v4/domains", auth: {"api", api_key}, form: [name: domain_name])
+    Req.post("#{base}/v4/domains", auth: {:basic, "api:#{api_key}"}, form: [name: domain_name])
     |> parse(fn body ->
       {:ok,
        %{
@@ -111,7 +111,7 @@ defmodule Hostctl.MailgunClient do
     creds_url = "#{base}/v3/domains/#{encoded_domain}/credentials"
 
     case Req.post(creds_url,
-           auth: {"api", api_key},
+           auth: {:basic, "api:#{api_key}"},
            form: [login: login, password: password]
          )
          |> parse(fn _ -> {:ok, :created} end) do
@@ -121,7 +121,7 @@ defmodule Hostctl.MailgunClient do
       {:error, _} ->
         # Credential likely already exists — update the password instead
         Req.put("#{creds_url}/#{login}",
-          auth: {"api", api_key},
+          auth: {:basic, "api:#{api_key}"},
           form: [password: password]
         )
         |> parse(fn _ -> {:ok, %{login: "#{login}@#{domain_name}", password: password}} end)
@@ -139,7 +139,7 @@ defmodule Hostctl.MailgunClient do
     url = "#{base}/v1/dmarc/records/#{encoded}"
     Logger.info("[Mailgun] DMARC GET #{url}")
 
-    case Req.get(url, auth: {"api", api_key}) do
+    case Req.get(url, auth: {:basic, "api:#{api_key}"}) do
       {:ok, %Req.Response{status: status, body: body}} ->
         Logger.info("[Mailgun] DMARC status=#{status} body=#{inspect(body)}")
 
