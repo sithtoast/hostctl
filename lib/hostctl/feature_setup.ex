@@ -336,19 +336,29 @@ defmodule Hostctl.FeatureSetup do
   end
 
   defp write_file_via_sudo(key, path, content) do
-    # Write to a temp file then move with sudo to avoid permission issues
-    tmp = "/tmp/hostctl_feature_#{:erlang.phash2(path)}"
+    # Pipe base64-encoded content through systemd-run tee.
+    # systemd-run creates a transient unit with a clean mount namespace,
+    # so we can't use temp files (they wouldn't be visible across namespaces).
+    # Path is always a hardcoded config path from our code, never user input.
+    encoded = Base.encode64(content)
 
-    with :ok <- File.write(tmp, content),
-         {_, 0} <-
-           escaped_cmd("mv", [tmp, path], stderr_to_stdout: true),
-         {_, 0} <-
-           escaped_cmd("chmod", ["644", path], stderr_to_stdout: true) do
-      :ok
-    else
-      {:error, reason} ->
-        broadcast(key, :log, "Failed to write #{path}: #{inspect(reason)}")
-        {:error, {:write_failed, path}}
+    case System.cmd(
+           "sh",
+           [
+             "-c",
+             ~s(echo '#{encoded}' | base64 -d | sudo systemd-run --pipe --wait --collect --quiet tee -- "$1" > /dev/null),
+             "--",
+             path
+           ],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        case escaped_cmd("chmod", ["644", path], stderr_to_stdout: true) do
+          {_, 0} -> :ok
+          {output, code} ->
+            broadcast(key, :log, "Failed to chmod #{path} (exit #{code}): #{output}")
+            {:error, {:write_failed, path}}
+        end
 
       {output, code} ->
         broadcast(key, :log, "Failed to write #{path} (exit #{code}): #{output}")
