@@ -14,7 +14,7 @@ defmodule HostctlWeb.PanelLive.Smarthost do
     {:ok,
      socket
      |> assign(:page_title, "Smarthost")
-     |> assign(:active_tab, :panel_settings)
+     |> assign(:active_tab, :panel_smarthost)
      |> assign(:setting, setting)
      |> assign(:form, form)
      |> assign(:email_installed?, email_installed?)

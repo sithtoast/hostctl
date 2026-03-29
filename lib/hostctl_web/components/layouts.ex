@@ -92,6 +92,12 @@ defmodule HostctlWeb.Layouts do
               active={@active_tab == :panel_features}
             />
             <.nav_item
+              icon="hero-envelope-open"
+              label="Smarthost"
+              href={~p"/panel/smarthost"}
+              active={@active_tab == :panel_smarthost}
+            />
+            <.nav_item
               icon="hero-adjustments-horizontal"
               label="Panel Settings"
               href={~p"/panel/settings"}
