@@ -537,7 +537,7 @@ defmodule Hostctl.Hosting do
   def update_ftp_account(%FtpAccount{} = account, attrs) do
     result =
       account
-      |> FtpAccount.changeset(attrs)
+      |> FtpAccount.update_changeset(attrs)
       |> Repo.update()
 
     case result do
@@ -564,5 +564,9 @@ defmodule Hostctl.Hosting do
 
   def change_ftp_account(%FtpAccount{} = account, attrs \\ %{}) do
     FtpAccount.changeset(account, attrs)
+  end
+
+  def change_ftp_account_for_update(%FtpAccount{} = account, attrs \\ %{}) do
+    FtpAccount.update_changeset(account, attrs)
   end
 end

@@ -40,6 +40,15 @@ defmodule HostctlWeb.DomainLive.Show do
         []
       end
 
+    # Build home directory options from the domain's document_root
+    domain_root = Path.dirname(domain.document_root)
+
+    ftp_home_options =
+      [
+        {domain_root, domain_root},
+        {domain.document_root, domain.document_root}
+      ]
+
     {:ok,
      socket
      |> stream(:ssl_log_lines, existing_log_lines)
@@ -48,6 +57,9 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign(:domain, domain)
      |> assign(:ssl_cert, ssl_cert)
      |> assign(:active_section, :overview)
+     |> assign(:editing_ftp_id, nil)
+     |> assign(:ftp_edit_form, nil)
+     |> assign(:ftp_home_options, ftp_home_options)
      |> stream(:subdomains, subdomains)
      |> stream(:cron_jobs, cron_jobs)
      |> stream(:ftp_accounts, ftp_accounts)
@@ -222,6 +234,63 @@ defmodule HostctlWeb.DomainLive.Show do
 
       {:error, changeset} ->
         {:noreply, assign(socket, :ftp_form, to_form(changeset))}
+    end
+  end
+
+  def handle_event("edit_ftp", %{"id" => id}, socket) do
+    ftp_accounts = Hosting.list_ftp_accounts(socket.assigns.domain)
+    account = Enum.find(ftp_accounts, &(to_string(&1.id) == id))
+
+    if account do
+      form = Hosting.change_ftp_account_for_update(account) |> to_form()
+
+      {:noreply,
+       socket
+       |> assign(:editing_ftp_id, account.id)
+       |> assign(:ftp_edit_form, form)
+       |> stream_insert(:ftp_accounts, account)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("cancel_edit_ftp", _params, socket) do
+    {:noreply, assign(socket, :editing_ftp_id, nil)}
+  end
+
+  def handle_event("validate_edit_ftp", %{"ftp_account" => params}, socket) do
+    ftp_accounts = Hosting.list_ftp_accounts(socket.assigns.domain)
+    account = Enum.find(ftp_accounts, &(&1.id == socket.assigns.editing_ftp_id))
+
+    if account do
+      form =
+        Hosting.change_ftp_account_for_update(account, params)
+        |> to_form(action: :validate)
+
+      {:noreply, assign(socket, :ftp_edit_form, form)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("save_edit_ftp", %{"ftp_account" => params}, socket) do
+    ftp_accounts = Hosting.list_ftp_accounts(socket.assigns.domain)
+    account = Enum.find(ftp_accounts, &(&1.id == socket.assigns.editing_ftp_id))
+
+    if account do
+      case Hosting.update_ftp_account(account, params) do
+        {:ok, updated} ->
+          {:noreply,
+           socket
+           |> stream_insert(:ftp_accounts, updated)
+           |> assign(:editing_ftp_id, nil)
+           |> put_flash(:info, "FTP account #{updated.username} updated.")}
+
+        {:error, changeset} ->
+          {:noreply, assign(socket, :ftp_edit_form, to_form(changeset))}
+      end
+    else
+      {:noreply, socket}
     end
   end
 
@@ -704,9 +773,9 @@ defmodule HostctlWeb.DomainLive.Show do
                 <.input field={@ftp_form[:password]} type="password" label="Password" />
                 <.input
                   field={@ftp_form[:home_dir]}
-                  type="text"
-                  placeholder="/var/www"
+                  type="select"
                   label="Home directory"
+                  options={@ftp_home_options}
                 />
                 <div class="sm:col-span-3 flex justify-end">
                   <button
@@ -729,31 +798,81 @@ defmodule HostctlWeb.DomainLive.Show do
               <div
                 :for={{id, account} <- @streams.ftp_accounts}
                 id={id}
-                class="flex items-center justify-between px-6 py-3"
+                class="px-6 py-3"
               >
-                <div>
-                  <p class="text-sm font-medium text-gray-900 dark:text-white">{account.username}</p>
-                  <p class="text-xs text-gray-500">{account.home_dir || "/"}</p>
-                </div>
-                <div class="flex items-center gap-3">
-                  <span class={[
-                    "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
-                    if(account.status == "active",
-                      do: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-                      else: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                    )
-                  ]}>
-                    {account.status}
-                  </span>
-                  <button
-                    phx-click="delete_ftp"
-                    phx-value-id={account.id}
-                    data-confirm="Delete this FTP account?"
-                    class="text-xs text-red-500 hover:text-red-600"
+                <%= if @editing_ftp_id == account.id do %>
+                  <.form
+                    for={@ftp_edit_form}
+                    id={"ftp-edit-form-#{account.id}"}
+                    phx-change="validate_edit_ftp"
+                    phx-submit="save_edit_ftp"
+                    class="grid grid-cols-1 gap-3 sm:grid-cols-4 items-end"
                   >
-                    Delete
-                  </button>
-                </div>
+                    <div>
+                      <p class="text-xs text-gray-500 mb-1">Username</p>
+                      <p class="text-sm font-medium text-gray-900 dark:text-white">{account.username}</p>
+                    </div>
+                    <.input
+                      field={@ftp_edit_form[:password]}
+                      type="password"
+                      label="New password (optional)"
+                    />
+                    <.input
+                      field={@ftp_edit_form[:home_dir]}
+                      type="select"
+                      label="Home directory"
+                      options={@ftp_home_options}
+                    />
+                    <div class="flex items-center gap-2">
+                      <button
+                        type="submit"
+                        class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded-lg transition-colors"
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        phx-click="cancel_edit_ftp"
+                        class="px-3 py-1.5 text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-700 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </.form>
+                <% else %>
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <p class="text-sm font-medium text-gray-900 dark:text-white">{account.username}</p>
+                      <p class="text-xs text-gray-500">{account.home_dir || "/"}</p>
+                    </div>
+                    <div class="flex items-center gap-3">
+                      <span class={[
+                        "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
+                        if(account.status == "active",
+                          do: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+                          else: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                        )
+                      ]}>
+                        {account.status}
+                      </span>
+                      <button
+                        phx-click="edit_ftp"
+                        phx-value-id={account.id}
+                        class="text-xs text-indigo-500 hover:text-indigo-600"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        phx-click="delete_ftp"
+                        phx-value-id={account.id}
+                        data-confirm="Delete this FTP account?"
+                        class="text-xs text-red-500 hover:text-red-600"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                <% end %>
               </div>
             </div>
           </div>

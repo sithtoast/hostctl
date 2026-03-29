@@ -16,6 +16,7 @@ defmodule Hostctl.Hosting.FtpAccount do
     timestamps(type: :utc_datetime)
   end
 
+  @doc "Changeset for creating a new FTP account. Username and password are required."
   def changeset(ftp_account, attrs) do
     ftp_account
     |> cast(attrs, [:username, :password, :home_dir, :status])
@@ -26,8 +27,33 @@ defmodule Hostctl.Hosting.FtpAccount do
     |> validate_length(:username, max: 32)
     |> validate_length(:password, min: 8, max: 72)
     |> validate_inclusion(:status, ~w(active suspended))
+    |> validate_home_dir()
     |> unique_constraint(:username)
     |> put_hashed_password()
+  end
+
+  @doc "Changeset for updating an existing FTP account. Password is optional."
+  def update_changeset(ftp_account, attrs) do
+    ftp_account
+    |> cast(attrs, [:password, :home_dir, :status])
+    |> validate_length(:password, min: 8, max: 72)
+    |> validate_inclusion(:status, ~w(active suspended))
+    |> validate_home_dir()
+    |> put_hashed_password()
+  end
+
+  defp validate_home_dir(changeset) do
+    case get_field(changeset, :home_dir) do
+      nil ->
+        changeset
+
+      home_dir ->
+        if String.match?(home_dir, ~r|^/var/www/[^/]+(/.*)?$|) do
+          changeset
+        else
+          add_error(changeset, :home_dir, "must be within /var/www/<domain>")
+        end
+    end
   end
 
   defp put_hashed_password(changeset) do
