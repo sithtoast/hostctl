@@ -18,6 +18,7 @@ defmodule Hostctl.FeatureSetup do
   require Logger
 
   alias Hostctl.Settings
+  alias Hostctl.MailServer
 
   @features [
     %{
@@ -38,7 +39,7 @@ defmodule Hostctl.FeatureSetup do
       icon: "hero-envelope",
       packages: ["postfix", "dovecot-imapd", "dovecot-pop3d"],
       services: ["postfix", "dovecot"],
-      setup_fn: nil
+      setup_fn: :setup_postfix
     },
     %{
       key: "cron",
@@ -223,9 +224,7 @@ defmodule Hostctl.FeatureSetup do
     Enum.reduce_while(services, :ok, fn service, :ok ->
       broadcast(key, :log, "Enabling and starting #{service}...")
 
-      case escaped_cmd("systemctl", ["enable", "--now", service],
-             stderr_to_stdout: true
-           ) do
+      case escaped_cmd("systemctl", ["enable", "--now", service], stderr_to_stdout: true) do
         {_, 0} ->
           {:cont, :ok}
 
@@ -242,6 +241,30 @@ defmodule Hostctl.FeatureSetup do
   # ---------------------------------------------------------------------------
   # Feature-specific setup
   # ---------------------------------------------------------------------------
+
+  @doc false
+  def setup_postfix(key) do
+    broadcast(key, :log, "Applying Postfix configuration...")
+
+    smarthost = Settings.get_smarthost_setting()
+
+    if smarthost.enabled do
+      broadcast(key, :log, "Smarthost is configured — applying relay settings to Postfix...")
+
+      case MailServer.apply_smarthost(smarthost) do
+        :ok ->
+          broadcast(key, :log, "Smarthost configured successfully.")
+          :ok
+
+        {:error, reason} ->
+          broadcast(key, :log, "Smarthost configuration failed: #{inspect(reason)}")
+          {:error, reason}
+      end
+    else
+      broadcast(key, :log, "No smarthost configured — skipping relay setup.")
+      :ok
+    end
+  end
 
   @doc false
   def setup_vsftpd(key) do
@@ -354,7 +377,9 @@ defmodule Hostctl.FeatureSetup do
          ) do
       {_, 0} ->
         case escaped_cmd("chmod", ["644", path], stderr_to_stdout: true) do
-          {_, 0} -> :ok
+          {_, 0} ->
+            :ok
+
           {output, code} ->
             broadcast(key, :log, "Failed to chmod #{path} (exit #{code}): #{output}")
             {:error, {:write_failed, path}}

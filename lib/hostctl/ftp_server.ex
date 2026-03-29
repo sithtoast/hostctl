@@ -210,16 +210,12 @@ defmodule Hostctl.FtpServer do
     db = virtual_users_db()
     cmd = Keyword.get(config(), :db_load_cmd, "db_load")
 
-    case escaped_cmd(cmd, ["-T", "-t", "hash", "-f", file, "#{db}.db"],
-           stderr_to_stdout: true
-         ) do
+    case escaped_cmd(cmd, ["-T", "-t", "hash", "-f", file, "#{db}.db"], stderr_to_stdout: true) do
       {_, 0} ->
         :ok
 
       {output, exit_code} ->
-        Logger.error(
-          "[FtpServer] db_load failed (exit #{exit_code}): #{String.trim(output)}"
-        )
+        Logger.error("[FtpServer] db_load failed (exit #{exit_code}): #{String.trim(output)}")
 
         {:error, {:db_load_failed, exit_code, output}}
     end

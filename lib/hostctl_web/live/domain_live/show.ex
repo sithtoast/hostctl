@@ -386,22 +386,20 @@ defmodule HostctlWeb.DomainLive.Show do
 
         <%!-- Section tabs --%>
         <div class="flex gap-1 p-1 bg-gray-100 dark:bg-gray-800 rounded-lg w-fit">
-          <%
-            base_tabs = [
-              {"Overview", :overview, "hero-home"},
-              {"Subdomains", :subdomains, "hero-link"},
-              {"DNS", :dns, "hero-server"},
-              {"SSL", :ssl, "hero-lock-closed"},
-              {"Cron Jobs", :cron, "hero-clock"}
-            ]
+          <% base_tabs = [
+            {"Overview", :overview, "hero-home"},
+            {"Subdomains", :subdomains, "hero-link"},
+            {"DNS", :dns, "hero-server"},
+            {"SSL", :ssl, "hero-lock-closed"},
+            {"Cron Jobs", :cron, "hero-clock"}
+          ]
 
-            tabs =
-              if Settings.feature_enabled?("ftp") do
-                base_tabs ++ [{"FTP", :ftp, "hero-folder"}]
-              else
-                base_tabs
-              end
-          %>
+          tabs =
+            if Settings.feature_enabled?("ftp") do
+              base_tabs ++ [{"FTP", :ftp, "hero-folder"}]
+            else
+              base_tabs
+            end %>
           <%= for {label, section, icon} <- tabs do %>
             <button
               phx-click="set_section"
@@ -831,7 +829,9 @@ defmodule HostctlWeb.DomainLive.Show do
                   >
                     <div>
                       <p class="text-xs text-gray-500 mb-1">Username</p>
-                      <p class="text-sm font-medium text-gray-900 dark:text-white">{account.username}</p>
+                      <p class="text-sm font-medium text-gray-900 dark:text-white">
+                        {account.username}
+                      </p>
                     </div>
                     <.input
                       field={@ftp_edit_form[:password]}
@@ -863,7 +863,9 @@ defmodule HostctlWeb.DomainLive.Show do
                 <% else %>
                   <div class="flex items-center justify-between">
                     <div>
-                      <p class="text-sm font-medium text-gray-900 dark:text-white">{account.username}</p>
+                      <p class="text-sm font-medium text-gray-900 dark:text-white">
+                        {account.username}
+                      </p>
                       <p class="text-xs text-gray-500">{account.home_dir || "/"}</p>
                     </div>
                     <div class="flex items-center gap-3">

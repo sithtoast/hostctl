@@ -9,6 +9,7 @@ defmodule Hostctl.Settings do
   alias Hostctl.Settings.DnsProviderSetting
   alias Hostctl.Settings.DnsTemplateRecord
   alias Hostctl.Settings.FeatureSetting
+  alias Hostctl.Settings.SmarthostSetting
 
   # ---------------------------------------------------------------------------
   # Network interface detection
@@ -430,6 +431,40 @@ defmodule Hostctl.Settings do
       %FeatureSetting{enabled: true, status: "installed"} -> true
       _ -> false
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Smarthost settings
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Returns the current smarthost setting, or a default struct if none exists.
+  """
+  def get_smarthost_setting do
+    Repo.one(from s in SmarthostSetting, order_by: [asc: s.id], limit: 1) ||
+      %SmarthostSetting{}
+  end
+
+  @doc """
+  Upserts the smarthost setting. Only one row is maintained globally.
+  """
+  def save_smarthost_setting(attrs) do
+    case get_smarthost_setting() do
+      %SmarthostSetting{id: nil} = new ->
+        new
+        |> SmarthostSetting.changeset(attrs)
+        |> Repo.insert()
+
+      existing ->
+        existing
+        |> SmarthostSetting.changeset(attrs)
+        |> Repo.update()
+    end
+  end
+
+  @doc "Returns a changeset for the smarthost setting."
+  def change_smarthost_setting(%SmarthostSetting{} = setting, attrs \\ %{}) do
+    SmarthostSetting.changeset(setting, attrs)
   end
 
   defp primary_server_ips do

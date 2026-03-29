@@ -147,7 +147,10 @@ defmodule HostctlWeb.PanelLive.Features do
                 <%= if feature.packages != [] do %>
                   <p class="mt-2 text-xs text-gray-400 dark:text-gray-500">
                     Packages:
-                    <span :for={pkg <- feature.packages} class="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 font-mono text-xs mr-1">
+                    <span
+                      :for={pkg <- feature.packages}
+                      class="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 font-mono text-xs mr-1"
+                    >
                       {pkg}
                     </span>
                   </p>
@@ -208,8 +211,7 @@ defmodule HostctlWeb.PanelLive.Features do
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
             <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-800">
               <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
-                Setup log
-                <span class="ml-1 text-gray-400 font-normal">({@active_feature})</span>
+                Setup log <span class="ml-1 text-gray-400 font-normal">({@active_feature})</span>
               </h3>
               <button
                 phx-click="close_log"
