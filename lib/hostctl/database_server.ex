@@ -40,7 +40,8 @@ defmodule Hostctl.DatabaseServer do
 
         {:error, reason} ->
           Logger.error(
-            "[DatabaseServer] Failed to create MySQL database #{database.name}: #{inspect(reason)}"
+            "[DatabaseServer] Failed to create MySQL database #{database.name}: #{inspect(reason)}. " <>
+              "Ensure MYSQL_ROOT_URL is set in the env file and the service has been restarted."
           )
 
           {:error, reason}
@@ -211,7 +212,9 @@ defmodule Hostctl.DatabaseServer do
       username: Keyword.get(config(), :username, "root"),
       password: Keyword.get(config(), :password, ""),
       database: "mysql",
-      ssl: Keyword.get(config(), :ssl, false)
+      ssl: Keyword.get(config(), :ssl, false),
+      pool_size: 1,
+      backoff_type: :stop
     ]
 
     case MyXQL.start_link(opts) do
@@ -230,7 +233,7 @@ defmodule Hostctl.DatabaseServer do
   defp query(conn, sql, params \\ []) do
     case MyXQL.query(conn, sql, params) do
       {:ok, _result} -> :ok
-      {:error, %MyXQL.Error{} = error} -> {:error, error}
+      {:error, error} -> {:error, error}
     end
   end
 
