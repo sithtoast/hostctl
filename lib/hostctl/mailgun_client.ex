@@ -54,7 +54,8 @@ defmodule Hostctl.MailgunClient do
     base = if region == :eu, do: @eu_base, else: @us_base
     password = :crypto.strong_rand_bytes(24) |> Base.url_encode64(padding: false)
     login = "hostctl"
-    creds_url = "#{base}/v3/#{URI.encode(domain_name, &URI.char_unreserved?/1)}/credentials"
+    encoded_domain = URI.encode(domain_name, &URI.char_unreserved?/1)
+    creds_url = "#{base}/v3/domains/#{encoded_domain}/credentials"
 
     case Req.post(creds_url,
            auth: {"api", api_key},
