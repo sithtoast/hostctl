@@ -78,7 +78,7 @@ defmodule HostctlWeb.Plugs.WebmailProxy do
   defp rewrite_location(location, conn) do
     case URI.parse(location) do
       %URI{host: "127.0.0.1", port: 8080, path: path, query: query} ->
-        base = conn.scheme <> "://" <> conn.host
+        base = Atom.to_string(conn.scheme) <> "://" <> conn.host
         base = if conn.port not in [80, 443], do: base <> ":#{conn.port}", else: base
         uri = base <> (path || "/")
         if query, do: uri <> "?" <> query, else: uri
