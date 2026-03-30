@@ -166,7 +166,8 @@ defmodule Hostctl.Backup do
             name: sub.name,
             full_name: "#{sub.name}.#{domain.name}",
             document_root: sub.document_root,
-            include_files: if(ss, do: ss.include_files, else: true)
+            include_files: if(ss, do: ss.include_files, else: true),
+            s3_mode: if(ss, do: ss.s3_mode, else: nil)
           }
         end)
 
@@ -175,6 +176,7 @@ defmodule Hostctl.Backup do
         name: domain.name,
         document_root: domain.document_root,
         include_files: domain_setting.include_files,
+        s3_mode: domain_setting.s3_mode,
         subdomains: subdomains
       }
     end)
@@ -191,6 +193,36 @@ defmodule Hostctl.Backup do
       setting ->
         setting
         |> SubdomainSetting.changeset(%{include_files: include_files})
+        |> Repo.update()
+    end
+  end
+
+  @doc "Upserts the `s3_mode` override for a single domain (nil clears override)."
+  def set_domain_s3_mode(domain_id, s3_mode) when s3_mode in ["archive", "stream", nil] do
+    case Repo.get_by(DomainSetting, domain_id: domain_id) do
+      nil ->
+        %DomainSetting{domain_id: domain_id}
+        |> DomainSetting.changeset(%{include_files: true, s3_mode: s3_mode})
+        |> Repo.insert()
+
+      setting ->
+        setting
+        |> DomainSetting.changeset(%{s3_mode: s3_mode})
+        |> Repo.update()
+    end
+  end
+
+  @doc "Upserts the `s3_mode` override for a single subdomain (nil clears override)."
+  def set_subdomain_s3_mode(subdomain_id, s3_mode) when s3_mode in ["archive", "stream", nil] do
+    case Repo.get_by(SubdomainSetting, subdomain_id: subdomain_id) do
+      nil ->
+        %SubdomainSetting{subdomain_id: subdomain_id}
+        |> SubdomainSetting.changeset(%{include_files: true, s3_mode: s3_mode})
+        |> Repo.insert()
+
+      setting ->
+        setting
+        |> SubdomainSetting.changeset(%{s3_mode: s3_mode})
         |> Repo.update()
     end
   end

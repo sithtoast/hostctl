@@ -105,6 +105,42 @@ defmodule HostctlWeb.PanelLive.Backup do
   end
 
   @impl true
+  def handle_event(
+        "set_domain_s3_mode",
+        %{"domain-id" => id_str, "mode" => mode},
+        socket
+      ) do
+    domain_id = String.to_integer(id_str)
+    effective_mode = if mode == "global", do: nil, else: mode
+
+    case Backup.set_domain_s3_mode(domain_id, effective_mode) do
+      {:ok, _} ->
+        {:noreply, assign(socket, :domain_groups, Backup.list_domain_groups())}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to update domain S3 mode.")}
+    end
+  end
+
+  @impl true
+  def handle_event(
+        "set_subdomain_s3_mode",
+        %{"subdomain-id" => id_str, "mode" => mode},
+        socket
+      ) do
+    subdomain_id = String.to_integer(id_str)
+    effective_mode = if mode == "global", do: nil, else: mode
+
+    case Backup.set_subdomain_s3_mode(subdomain_id, effective_mode) do
+      {:ok, _} ->
+        {:noreply, assign(socket, :domain_groups, Backup.list_domain_groups())}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to update subdomain S3 mode.")}
+    end
+  end
+
+  @impl true
   def handle_event("run_now", _, %{assigns: %{running: true}} = socket) do
     {:noreply, put_flash(socket, :error, "A backup is already running.")}
   end
@@ -471,6 +507,63 @@ defmodule HostctlWeb.PanelLive.Backup do
                     />
                   </div>
                 </div>
+
+                <%!-- Upload mode --%>
+                <div class="border border-gray-200 dark:border-gray-700 rounded-xl p-4 space-y-3">
+                  <p class="text-sm font-medium text-gray-700 dark:text-gray-300">Upload mode</p>
+                  <label class="flex items-start gap-3 cursor-pointer group">
+                    <input
+                      type="radio"
+                      name={@form[:s3_mode].name}
+                      id="s3_mode_archive"
+                      value="archive"
+                      checked={
+                        Phoenix.HTML.Form.normalize_value(
+                          "checkbox",
+                          @form[:s3_mode].value == "archive"
+                        )
+                      }
+                      class="mt-0.5 w-4 h-4 border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <div>
+                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                        Single archive <span class="text-xs font-normal text-gray-400">.tar.gz</span>
+                      </span>
+                      <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                        Combines everything into one compressed archive before uploading.
+                        Requires temporary free disk space equal to the compressed archive size.
+                      </p>
+                    </div>
+                  </label>
+                  <label class="flex items-start gap-3 cursor-pointer group">
+                    <input
+                      type="radio"
+                      name={@form[:s3_mode].name}
+                      id="s3_mode_stream"
+                      value="stream"
+                      checked={
+                        Phoenix.HTML.Form.normalize_value(
+                          "checkbox",
+                          @form[:s3_mode].value == "stream"
+                        )
+                      }
+                      class="mt-0.5 w-4 h-4 border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <div>
+                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                        Stream directly to S3
+                        <span class="text-xs font-normal text-gray-400">
+                          recommended for large sites / limited disk
+                        </span>
+                      </span>
+                      <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                        Pipes each domain's files directly to S3 via multipart upload—no temp files
+                        written to disk. Produces one <code>.tar.gz</code>
+                        per domain under the prefix folder.
+                      </p>
+                    </div>
+                  </label>
+                </div>
               </div>
             <% end %>
 
@@ -559,8 +652,17 @@ defmodule HostctlWeb.PanelLive.Backup do
                 <span class="flex-1 text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                   Domain / Subdomain
                 </span>
-                <span class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-32 text-center">
+                <span class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-20 text-center">
                   Include files
+                </span>
+                <span
+                  class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-52 text-center"
+                  title={"Global default: #{@setting.s3_mode || "archive"}"}
+                >
+                  S3 mode
+                  <span class="normal-case font-normal text-gray-400 dark:text-gray-500">
+                    (global: {@setting.s3_mode || "archive"})
+                  </span>
                 </span>
               </div>
 
@@ -590,7 +692,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                       {group.document_root}
                     </p>
                   </div>
-                  <div class="w-32 flex justify-center">
+                  <div class="w-20 flex justify-center">
                     <button
                       id={"toggle-domain-#{group.id}"}
                       phx-click="toggle_domain_files"
@@ -623,6 +725,31 @@ defmodule HostctlWeb.PanelLive.Backup do
                       />
                     </button>
                   </div>
+                  <%!-- S3 mode selector for domain --%>
+                  <div class="w-52 flex justify-center">
+                    <div class="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden text-xs">
+                      <%= for {label, val} <- [{"Global", "global"}, {"Archive", "archive"}, {"Stream", "stream"}] do %>
+                        <button
+                          id={"domain-s3mode-#{group.id}-#{val}"}
+                          phx-click="set_domain_s3_mode"
+                          phx-value-domain-id={group.id}
+                          phx-value-mode={val}
+                          class={[
+                            "px-3 py-1.5 font-medium transition-colors",
+                            if(
+                              (val == "global" and is_nil(group.s3_mode)) or
+                                group.s3_mode == val,
+                              do: "bg-indigo-600 text-white",
+                              else:
+                                "bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800"
+                            )
+                          ]}
+                        >
+                          {label}
+                        </button>
+                      <% end %>
+                    </div>
+                  </div>
                 </div>
 
                 <%!-- Subdomain rows (indented) --%>
@@ -645,7 +772,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                         </p>
                       </div>
                     </div>
-                    <div class="w-32 flex justify-center">
+                    <div class="w-20 flex justify-center">
                       <button
                         id={"toggle-subdomain-#{sub.id}"}
                         phx-click="toggle_subdomain_files"
@@ -677,6 +804,31 @@ defmodule HostctlWeb.PanelLive.Backup do
                           ]}
                         />
                       </button>
+                    </div>
+                    <%!-- S3 mode selector for subdomain --%>
+                    <div class="w-52 flex justify-center">
+                      <div class="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden text-xs">
+                        <%= for {label, val} <- [{"Global", "global"}, {"Archive", "archive"}, {"Stream", "stream"}] do %>
+                          <button
+                            id={"subdomain-s3mode-#{sub.id}-#{val}"}
+                            phx-click="set_subdomain_s3_mode"
+                            phx-value-subdomain-id={sub.id}
+                            phx-value-mode={val}
+                            class={[
+                              "px-3 py-1.5 font-medium transition-colors",
+                              if(
+                                (val == "global" and is_nil(sub.s3_mode)) or
+                                  sub.s3_mode == val,
+                                do: "bg-indigo-600 text-white",
+                                else:
+                                  "bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800"
+                              )
+                            ]}
+                          >
+                            {label}
+                          </button>
+                        <% end %>
+                      </div>
                     </div>
                   </div>
                 <% end %>

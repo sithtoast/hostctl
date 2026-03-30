@@ -172,6 +172,71 @@ defmodule Hostctl.Backup.Runner do
 
     broadcast({:backup_started, log.id})
 
+    # When S3-only streaming mode is selected, stream each piece directly to S3
+    # without any local temp files, keeping peak disk usage near zero.
+    if settings.s3_enabled and settings.s3_mode == "stream" do
+      execute_stream_backup(log, settings)
+    else
+      execute_archive_backup(log, settings)
+    end
+  end
+
+  # S3-only path: stream database and domain files directly to S3 via multipart
+  # upload. No tmp files are created; data flows through memory in chunks.
+  defp execute_stream_backup(log, settings) do
+    timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
+    prefix = "#{settings.s3_path_prefix || "hostctl-backups"}/hostctl-backup-#{timestamp}"
+    tar = System.find_executable("tar") || "tar"
+
+    result =
+      try do
+        if settings.backup_database do
+          broadcast_progress("Streaming database to S3…")
+          stream_database_to_s3(settings, "#{prefix}/database.sql.gz")
+          broadcast_progress("Database backup complete.")
+        end
+
+        if settings.backup_files do
+          broadcast_progress("Streaming domain files to S3…")
+          stream_domains_to_s3(settings, prefix, tar)
+          broadcast_progress("Domain file streaming complete.")
+        end
+
+        apply_s3_retention(settings)
+
+        updates = %{
+          status: "success",
+          completed_at: DateTime.utc_now(),
+          destination: "s3",
+          s3_key: prefix
+        }
+
+        {:ok, updated_log} = Backup.update_log(log, updates)
+        broadcast({:backup_completed, updated_log})
+        {:ok, updated_log}
+      rescue
+        e ->
+          message = Exception.message(e)
+          Logger.error("[Backup.Runner] Stream backup failed: #{message}")
+
+          {:ok, failed_log} =
+            Backup.update_log(log, %{
+              status: "failed",
+              completed_at: DateTime.utc_now(),
+              error_message: message
+            })
+
+          broadcast({:backup_failed, failed_log})
+          {:error, message}
+      end
+
+    result
+  end
+
+  # Local (or local+S3) path: build a tmp dir, combine into a single archive,
+  # store locally and/or upload to S3. Needs temporary disk space equal to the
+  # compressed archive size.
+  defp execute_archive_backup(log, settings) do
     uid = :erlang.unique_integer([:positive])
     tmp_dir = Path.join(System.tmp_dir!(), "hostctl-backup-#{uid}")
     timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
@@ -190,7 +255,7 @@ defmodule Hostctl.Backup.Runner do
 
         if settings.backup_files do
           broadcast_progress("Backing up domain files…")
-          backup_domain_files(tmp_dir)
+          backup_domain_files(tmp_dir, settings)
           broadcast_progress("Domain files backup complete.")
         end
 
@@ -302,31 +367,50 @@ defmodule Hostctl.Backup.Runner do
     end
   end
 
-  defp backup_domain_files(tmp_dir) do
+  defp backup_domain_files(tmp_dir, settings) do
     included_ids = Backup.file_backup_domain_ids()
+    tar = System.find_executable("tar") || "tar"
 
     domains =
       Repo.all(
         from d in Domain,
+          left_join: ds in Hostctl.Backup.DomainSetting,
+          on: ds.domain_id == d.id,
           where: d.id in ^included_ids,
-          select: [:id, :name, :document_root]
+          select: {d.id, d.name, d.document_root, ds.s3_mode}
       )
 
     files_dir = Path.join(tmp_dir, "domains")
     File.mkdir_p!(files_dir)
-    tar = System.find_executable("tar") || "tar"
 
-    domains
-    |> Enum.filter(fn d -> d.document_root && File.dir?(d.document_root) end)
-    |> Enum.each(fn domain ->
-      archive = Path.join(files_dir, "#{domain.name}.tar.gz")
-      System.cmd(tar, ["-czf", archive, "-C", domain.document_root, "."], stderr_to_stdout: true)
+    Enum.each(domains, fn {_id, name, doc_root, per_mode} ->
+      effective_mode = per_mode || settings.s3_mode || "archive"
+
+      cond do
+        is_nil(doc_root) or not File.dir?(doc_root) ->
+          :skip
+
+        effective_mode == "stream" and settings.s3_enabled ->
+          prefix = "#{settings.s3_path_prefix || "hostctl-backups"}/domains"
+          s3_key = "#{prefix}/#{name}.tar.gz"
+          broadcast_progress("  → Streaming #{name} to S3…")
+          stream = command_to_stream(tar, ["-czf", "-", "-C", doc_root, "."])
+
+          case S3.upload_stream(settings, s3_key, stream) do
+            {:ok, _} -> :ok
+            {:error, reason} -> raise "S3 stream upload failed for #{name}: #{reason}"
+          end
+
+        true ->
+          archive = Path.join(files_dir, "#{name}.tar.gz")
+          System.cmd(tar, ["-czf", archive, "-C", doc_root, "."], stderr_to_stdout: true)
+      end
     end)
 
-    backup_subdomains(files_dir, tar)
+    backup_subdomains(files_dir, settings, tar)
   end
 
-  defp backup_subdomains(files_dir, tar) do
+  defp backup_subdomains(files_dir, settings, tar) do
     excluded_ids = Backup.file_backup_excluded_subdomain_ids()
 
     subdomains =
@@ -334,16 +418,182 @@ defmodule Hostctl.Backup.Runner do
         from s in Subdomain,
           join: d in Domain,
           on: d.id == s.domain_id,
+          left_join: ss in Hostctl.Backup.SubdomainSetting,
+          on: ss.subdomain_id == s.id,
           where: s.id not in ^excluded_ids,
-          select: %{id: s.id, name: s.name, domain_name: d.name, document_root: s.document_root}
+          select: %{
+            name: s.name,
+            domain_name: d.name,
+            document_root: s.document_root,
+            s3_mode: ss.s3_mode
+          }
       )
 
-    subdomains
-    |> Enum.filter(fn s -> s.document_root && File.dir?(s.document_root) end)
-    |> Enum.each(fn sub ->
-      archive = Path.join(files_dir, "#{sub.name}.#{sub.domain_name}.tar.gz")
-      System.cmd(tar, ["-czf", archive, "-C", sub.document_root, "."], stderr_to_stdout: true)
+    Enum.each(subdomains, fn sub ->
+      effective_mode = sub.s3_mode || settings.s3_mode || "archive"
+      filename = "#{sub.name}.#{sub.domain_name}.tar.gz"
+
+      cond do
+        is_nil(sub.document_root) or not File.dir?(sub.document_root) ->
+          :skip
+
+        effective_mode == "stream" and settings.s3_enabled ->
+          prefix = "#{settings.s3_path_prefix || "hostctl-backups"}/domains"
+          s3_key = "#{prefix}/#{filename}"
+          broadcast_progress("  → Streaming #{filename} to S3…")
+          stream = command_to_stream(tar, ["-czf", "-", "-C", sub.document_root, "."])
+
+          case S3.upload_stream(settings, s3_key, stream) do
+            {:ok, _} -> :ok
+            {:error, reason} -> raise "S3 stream upload failed for #{filename}: #{reason}"
+          end
+
+        true ->
+          archive = Path.join(files_dir, filename)
+          System.cmd(tar, ["-czf", archive, "-C", sub.document_root, "."], stderr_to_stdout: true)
+      end
     end)
+  end
+
+  # ---------------------------------------------------------------------------
+  # S3 streaming helpers (zero extra disk usage)
+  # ---------------------------------------------------------------------------
+
+  # Runs pg_dump, gzip-compresses the output in memory, and uploads to S3.
+  # Avoids writing any temp files. Reasonable for database dumps up to a few GB.
+  defp stream_database_to_s3(settings, s3_key) do
+    config = Hostctl.Repo.config()
+    host = to_string(Keyword.get(config, :hostname, "localhost"))
+    port = to_string(Keyword.get(config, :port, 5432))
+    database = Keyword.get(config, :database)
+    username = Keyword.get(config, :username)
+    password = to_string(Keyword.get(config, :password) || "")
+    pg_dump = System.find_executable("pg_dump") || "pg_dump"
+
+    args = [
+      "--host",
+      host,
+      "--port",
+      port,
+      "--username",
+      username,
+      "--no-password",
+      "--format",
+      "plain",
+      database
+    ]
+
+    case System.cmd(pg_dump, args, env: [{"PGPASSWORD", password}], stderr_to_stdout: true) do
+      {dump_data, 0} ->
+        compressed = :zlib.gzip(dump_data)
+
+        case S3.upload_binary(settings, s3_key, compressed) do
+          {:ok, _} -> :ok
+          {:error, reason} -> raise "Database S3 upload failed: #{reason}"
+        end
+
+      {output, code} ->
+        raise "pg_dump failed (exit #{code}): #{output}"
+    end
+  end
+
+  # Streams each domain and subdomain's document root directly to S3 via
+  # `tar czf -` piped through a Port. No temp files are written.
+  # Entries with a per-domain override of "archive" are collected into a tmp
+  # dir instead and included in the combined archive at the end.
+  defp stream_domains_to_s3(settings, prefix, tar) do
+    included_ids = Backup.file_backup_domain_ids()
+    excluded_sub_ids = Backup.file_backup_excluded_subdomain_ids()
+
+    domains =
+      Repo.all(
+        from d in Domain,
+          left_join: ds in Hostctl.Backup.DomainSetting,
+          on: ds.domain_id == d.id,
+          where: d.id in ^included_ids,
+          select: {d.name, d.document_root, ds.s3_mode}
+      )
+
+    subdomains =
+      Repo.all(
+        from s in Subdomain,
+          join: d in Domain,
+          on: d.id == s.domain_id,
+          left_join: ss in Hostctl.Backup.SubdomainSetting,
+          on: ss.subdomain_id == s.id,
+          where: s.id not in ^excluded_sub_ids,
+          select: {s.name, d.name, s.document_root, ss.s3_mode}
+      )
+
+    entries =
+      Enum.map(domains, fn {name, doc_root, mode} -> {"#{name}.tar.gz", doc_root, mode} end) ++
+        Enum.map(subdomains, fn {sname, dname, doc_root, mode} ->
+          {"#{sname}.#{dname}.tar.gz", doc_root, mode}
+        end)
+
+    entries
+    |> Enum.filter(fn {_, doc_root, _} -> doc_root && File.dir?(doc_root) end)
+    |> Enum.each(fn {filename, doc_root, per_mode} ->
+      effective_mode = per_mode || "stream"
+      s3_key = "#{prefix}/domains/#{filename}"
+
+      if effective_mode == "archive" do
+        # Per-domain override: tar to a tmp file then upload
+        tmp = Path.join(System.tmp_dir!(), "hostctl-override-#{filename}")
+
+        try do
+          System.cmd(tar, ["-czf", tmp, "-C", doc_root, "."], stderr_to_stdout: true)
+          broadcast_progress("  → Uploading #{filename} (archive override)…")
+
+          case S3.upload(settings, tmp, s3_key) do
+            {:ok, _} -> :ok
+            {:error, reason} -> raise "S3 upload failed for #{filename}: #{reason}"
+          end
+        after
+          File.rm(tmp)
+        end
+      else
+        broadcast_progress("  → Streaming #{filename}…")
+        stream = command_to_stream(tar, ["-czf", "-", "-C", doc_root, "."])
+
+        case S3.upload_stream(settings, s3_key, stream) do
+          {:ok, _} -> :ok
+          {:error, reason} -> raise "S3 stream upload failed for #{filename}: #{reason}"
+        end
+      end
+    end)
+  end
+
+  # Returns a lazy Stream that opens a Port running `executable args` and
+  # yields each chunk of stdout as it arrives.
+  defp command_to_stream(executable, args) do
+    Stream.resource(
+      fn ->
+        Port.open({:spawn_executable, executable}, [:binary, :exit_status, args: args])
+      end,
+      fn port ->
+        receive do
+          {^port, {:data, chunk}} ->
+            {[chunk], port}
+
+          {^port, {:exit_status, 0}} ->
+            {:halt, port}
+
+          {^port, {:exit_status, code}} ->
+            raise "Command exited with code #{code}"
+        after
+          :timer.minutes(30) ->
+            raise "Command timed out after 30 minutes"
+        end
+      end,
+      fn port ->
+        try do
+          Port.close(port)
+        rescue
+          _ -> :ok
+        end
+      end
+    )
   end
 
   defp create_archive(archive_path, source_dir) do

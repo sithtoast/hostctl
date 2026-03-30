@@ -6,6 +6,7 @@ defmodule Hostctl.Backup.SubdomainSetting do
 
   schema "subdomain_backup_settings" do
     field :include_files, :boolean, default: true
+    field :s3_mode, :string
 
     belongs_to :subdomain, Subdomain
 
@@ -14,7 +15,10 @@ defmodule Hostctl.Backup.SubdomainSetting do
 
   def changeset(setting, attrs) do
     setting
-    |> cast(attrs, [:include_files])
+    |> cast(attrs, [:include_files, :s3_mode])
     |> validate_required([:include_files])
+    |> validate_inclusion(:s3_mode, ["archive", "stream", nil],
+      message: "must be archive, stream, or unset"
+    )
   end
 end

@@ -24,6 +24,7 @@ defmodule Hostctl.Backup.Setting do
 
     field :backup_database, :boolean, default: true
     field :backup_files, :boolean, default: false
+    field :s3_mode, :string, default: "archive"
 
     timestamps(type: :utc_datetime)
   end
@@ -46,7 +47,8 @@ defmodule Hostctl.Backup.Setting do
     :schedule_minute,
     :schedule_day_of_week,
     :backup_database,
-    :backup_files
+    :backup_files,
+    :s3_mode
   ]
 
   def changeset(setting, attrs) do
@@ -68,6 +70,7 @@ defmodule Hostctl.Backup.Setting do
       less_than_or_equal_to: 7
     )
     |> validate_inclusion(:schedule_frequency, ["daily", "weekly"])
+    |> validate_inclusion(:s3_mode, ["archive", "stream"])
     |> validate_s3_fields()
     |> validate_local_fields()
   end

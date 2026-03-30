@@ -35,6 +35,57 @@ defmodule Hostctl.Backup.S3 do
   end
 
   @doc """
+  Uploads an in-memory binary directly to S3 via a single PUT request.
+  Returns `{:ok, s3_key}` or `{:error, reason}`.
+  """
+  def upload_binary(%{} = cfg, s3_key, body) when is_binary(body) do
+    put_binary(cfg, s3_key, body)
+  end
+
+  @doc """
+  Uploads an enumerable/stream of binary chunks to S3 using multipart upload.
+  Buffers chunks up to `@part_size` bytes before uploading each part.
+  Returns `{:ok, s3_key}` or `{:error, reason}`.
+  """
+  def upload_stream(%{} = cfg, s3_key, chunk_stream) do
+    initial = {:ok, %{upload_id: nil, buffer: <<>>, part_num: 1, parts: []}}
+
+    final =
+      Enum.reduce_while(chunk_stream, initial, fn chunk, {:ok, state} ->
+        buffer = state.buffer <> chunk
+
+        if byte_size(buffer) >= @part_size do
+          <<part_bytes::binary-size(@part_size), rest::binary>> = buffer
+
+          with {:ok, upload_id} <- lazy_initiate_multipart(state.upload_id, cfg, s3_key),
+               {:ok, etag} <-
+                 upload_single_part(cfg, s3_key, upload_id, state.part_num, part_bytes) do
+            {:cont,
+             {:ok,
+              %{
+                state
+                | upload_id: upload_id,
+                  buffer: rest,
+                  part_num: state.part_num + 1,
+                  parts: [{state.part_num, etag} | state.parts]
+              }}}
+          else
+            {:error, reason} ->
+              if state.upload_id, do: abort_multipart(cfg, s3_key, state.upload_id)
+              {:halt, {:error, reason}}
+          end
+        else
+          {:cont, {:ok, %{state | buffer: buffer}}}
+        end
+      end)
+
+    case final do
+      {:error, reason} -> {:error, reason}
+      {:ok, state} -> flush_stream_upload(cfg, s3_key, state)
+    end
+  end
+
+  @doc """
   Lists all objects under the given prefix in an S3 bucket.
   Returns `{:ok, [%{key: key, last_modified: datetime_string}]}` or `{:error, reason}`.
   """
@@ -120,42 +171,110 @@ defmodule Hostctl.Backup.S3 do
 
   defp single_upload(%{} = cfg, local_path, s3_key) do
     with {:ok, body} <- File.read(local_path) do
-      now = DateTime.utc_now()
-      payload_hash = sha256_hex(body)
-      path = object_path(cfg.s3_bucket, s3_key)
-      host = endpoint_host(cfg.s3_endpoint)
-
-      headers =
-        sign(
-          "PUT",
-          path,
-          "",
-          [
-            {"content-length", to_string(byte_size(body))},
-            {"content-type", "application/octet-stream"},
-            {"host", host},
-            {"x-amz-content-sha256", payload_hash},
-            {"x-amz-date", fmt_datetime(now)}
-          ],
-          payload_hash,
-          now,
-          cfg
-        )
-
-      url = endpoint_url(cfg.s3_endpoint) <> path
-
-      case Req.put(url, headers: headers, body: body) do
-        {:ok, %Req.Response{status: s}} when s in 200..299 ->
-          {:ok, s3_key}
-
-        {:ok, %Req.Response{status: s, body: b}} ->
-          {:error, "S3 PUT failed #{s}: #{body_text(b)}"}
-
-        {:error, reason} ->
-          {:error, "S3 PUT request failed: #{inspect(reason)}"}
-      end
+      put_binary(cfg, s3_key, body)
     else
       {:error, reason} -> {:error, "Cannot read file: #{inspect(reason)}"}
+    end
+  end
+
+  defp put_binary(%{} = cfg, s3_key, body) do
+    now = DateTime.utc_now()
+    payload_hash = sha256_hex(body)
+    path = object_path(cfg.s3_bucket, s3_key)
+    host = endpoint_host(cfg.s3_endpoint)
+
+    headers =
+      sign(
+        "PUT",
+        path,
+        "",
+        [
+          {"content-length", to_string(byte_size(body))},
+          {"content-type", "application/octet-stream"},
+          {"host", host},
+          {"x-amz-content-sha256", payload_hash},
+          {"x-amz-date", fmt_datetime(now)}
+        ],
+        payload_hash,
+        now,
+        cfg
+      )
+
+    url = endpoint_url(cfg.s3_endpoint) <> path
+
+    case Req.put(url, headers: headers, body: body) do
+      {:ok, %Req.Response{status: s}} when s in 200..299 ->
+        {:ok, s3_key}
+
+      {:ok, %Req.Response{status: s, body: b}} ->
+        {:error, "S3 PUT failed #{s}: #{body_text(b)}"}
+
+      {:error, reason} ->
+        {:error, "S3 PUT request failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp abort_multipart(%{} = cfg, s3_key, upload_id) do
+    now = DateTime.utc_now()
+    path = object_path(cfg.s3_bucket, s3_key)
+    host = endpoint_host(cfg.s3_endpoint)
+    payload_hash = sha256_hex("")
+    query = "uploadId=#{encode_value(upload_id)}"
+
+    headers =
+      sign(
+        "DELETE",
+        path,
+        query,
+        [
+          {"host", host},
+          {"x-amz-content-sha256", payload_hash},
+          {"x-amz-date", fmt_datetime(now)}
+        ],
+        payload_hash,
+        now,
+        cfg
+      )
+
+    url = endpoint_url(cfg.s3_endpoint) <> path <> "?" <> query
+    Req.delete(url, headers: headers)
+    :ok
+  end
+
+  defp lazy_initiate_multipart(nil, cfg, s3_key), do: initiate_multipart(cfg, s3_key)
+  defp lazy_initiate_multipart(upload_id, _cfg, _s3_key), do: {:ok, upload_id}
+
+  defp flush_stream_upload(cfg, s3_key, %{parts: [], buffer: buffer}) do
+    # All data fit without filling a single part – use a single PUT
+    put_binary(cfg, s3_key, buffer)
+  end
+
+  defp flush_stream_upload(cfg, s3_key, %{
+         upload_id: upload_id,
+         buffer: buffer,
+         part_num: part_num,
+         parts: parts
+       }) do
+    finalize =
+      if byte_size(buffer) > 0 do
+        case upload_single_part(cfg, s3_key, upload_id, part_num, buffer) do
+          {:ok, etag} -> {:ok, Enum.reverse([{part_num, etag} | parts])}
+          {:error, reason} -> {:error, reason}
+        end
+      else
+        {:ok, Enum.reverse(parts)}
+      end
+
+    case finalize do
+      {:ok, all_parts} ->
+        case complete_multipart(cfg, s3_key, upload_id, all_parts) do
+          :ok -> {:ok, s3_key}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        abort_multipart(cfg, s3_key, upload_id)
+        {:error, reason}
     end
   end
 
@@ -210,7 +329,7 @@ defmodule Hostctl.Backup.S3 do
   defp upload_all_parts(%{} = cfg, local_path, s3_key, upload_id) do
     result =
       local_path
-      |> File.stream!([], @part_size)
+      |> File.stream!(@part_size)
       |> Enum.with_index(1)
       |> Enum.reduce_while({:ok, []}, fn {chunk, part_num}, {:ok, acc} ->
         chunk_bin = IO.iodata_to_binary(chunk)
@@ -351,7 +470,6 @@ defmodule Hostctl.Backup.S3 do
   end
 
   defp canonical_query_string(""), do: ""
-  defp canonical_query_string(nil), do: ""
 
   defp canonical_query_string(qs) do
     qs
