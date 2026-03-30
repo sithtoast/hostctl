@@ -12,7 +12,8 @@ defmodule Hostctl.Hosting.Domain do
     SslCertificate,
     CronJob,
     FtpAccount,
-    DomainSmarthostSetting
+    DomainSmarthostSetting,
+    BandwidthSnapshot
   }
 
   schema "domains" do
@@ -22,6 +23,7 @@ defmodule Hostctl.Hosting.Domain do
     field :status, :string, default: "active"
     field :ssl_enabled, :boolean, default: false
     field :disk_usage_mb, :integer, default: 0
+    field :bandwidth_used_mb, :integer, default: 0
     field :apply_dns_template, :boolean, default: true
 
     belongs_to :user, User
@@ -33,6 +35,7 @@ defmodule Hostctl.Hosting.Domain do
     has_many :cron_jobs, CronJob
     has_many :ftp_accounts, FtpAccount
     has_one :smarthost_setting, DomainSmarthostSetting
+    has_many :bandwidth_snapshots, BandwidthSnapshot
 
     timestamps(type: :utc_datetime)
   end
@@ -73,5 +76,12 @@ defmodule Hostctl.Hosting.Domain do
     else
       changeset
     end
+  end
+
+  def metrics_changeset(domain, attrs) do
+    domain
+    |> cast(attrs, [:disk_usage_mb, :bandwidth_used_mb])
+    |> validate_number(:disk_usage_mb, greater_than_or_equal_to: 0)
+    |> validate_number(:bandwidth_used_mb, greater_than_or_equal_to: 0)
   end
 end

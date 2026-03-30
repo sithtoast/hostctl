@@ -219,6 +219,12 @@ defmodule HostctlWeb.DomainLive.Index do
                     PHP
                   </th>
                   <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                    Disk
+                  </th>
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                    Bandwidth
+                  </th>
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     SSL
                   </th>
                   <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
@@ -257,10 +263,14 @@ defmodule HostctlWeb.DomainLive.Index do
                         </div>
                         <div class="min-w-0">
                           <%= if domain.user.name do %>
-                            <p class="text-xs font-medium text-gray-900 dark:text-white truncate">{domain.user.name}</p>
+                            <p class="text-xs font-medium text-gray-900 dark:text-white truncate">
+                              {domain.user.name}
+                            </p>
                             <p class="text-xs text-gray-400 truncate">{domain.user.email}</p>
                           <% else %>
-                            <p class="text-xs text-gray-700 dark:text-gray-300 truncate">{domain.user.email}</p>
+                            <p class="text-xs text-gray-700 dark:text-gray-300 truncate">
+                              {domain.user.email}
+                            </p>
                           <% end %>
                         </div>
                       </div>
@@ -270,6 +280,22 @@ defmodule HostctlWeb.DomainLive.Index do
                     <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
                       PHP {domain.php_version}
                     </span>
+                  </td>
+                  <td class="px-6 py-4">
+                    <div class="flex items-center gap-1.5">
+                      <.icon name="hero-circle-stack" class="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                      <span class="text-xs font-medium text-gray-700 dark:text-gray-300">
+                        {format_mb(domain.disk_usage_mb)}
+                      </span>
+                    </div>
+                  </td>
+                  <td class="px-6 py-4">
+                    <div class="flex items-center gap-1.5">
+                      <.icon name="hero-arrow-up-tray" class="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span class="text-xs font-medium text-gray-700 dark:text-gray-300">
+                        {format_mb(domain.bandwidth_used_mb)}
+                      </span>
+                    </div>
                   </td>
                   <td class="px-6 py-4">
                     <%= if domain.ssl_enabled do %>
@@ -323,5 +349,13 @@ defmodule HostctlWeb.DomainLive.Index do
       </div>
     </Layouts.app>
     """
+  end
+
+  defp format_mb(mb) when is_integer(mb) do
+    cond do
+      mb >= 1024 -> "#{Float.round(mb / 1024, 2)} GB"
+      mb > 0 -> "#{mb} MB"
+      true -> "0 MB"
+    end
   end
 end

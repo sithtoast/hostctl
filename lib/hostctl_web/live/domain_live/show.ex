@@ -25,6 +25,7 @@ defmodule HostctlWeb.DomainLive.Show do
       else
         scope
       end
+
     subdomains = Hosting.list_subdomains(domain)
     ssl_cert = Hosting.get_ssl_certificate(domain)
     cron_jobs = Hosting.list_cron_jobs(domain)
@@ -88,7 +89,11 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign_smarthost_form()
      |> assign(:mg_key, "")
      |> assign(:mg_region, "us")
-     |> assign(:mg_status, nil)}
+     |> assign(:mg_status, nil)
+     |> assign(
+       :bandwidth_chart_data,
+       bandwidth_chart_data(Hosting.list_bandwidth_snapshots(domain))
+     )}
   end
 
   def handle_params(_params, _url, socket) do
@@ -599,6 +604,89 @@ defmodule HostctlWeb.DomainLive.Show do
               }
               icon="hero-lock-closed"
             />
+          </div>
+
+          <%!-- Resource Usage --%>
+          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-4">Resource Usage</h3>
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div class="flex items-center gap-4 p-4 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/50">
+                <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-indigo-100 dark:bg-indigo-900/50 shrink-0">
+                  <.icon
+                    name="hero-circle-stack"
+                    class="w-5 h-5 text-indigo-600 dark:text-indigo-400"
+                  />
+                </div>
+                <div>
+                  <p class="text-xs text-indigo-600 dark:text-indigo-400 font-medium uppercase tracking-wide">
+                    Disk Usage
+                  </p>
+                  <p class="text-2xl font-bold text-indigo-700 dark:text-indigo-300 leading-tight">
+                    {format_mb(@domain.disk_usage_mb)}
+                  </p>
+                </div>
+              </div>
+              <div class="flex items-center gap-4 p-4 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/50">
+                <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-emerald-100 dark:bg-emerald-900/50 shrink-0">
+                  <.icon
+                    name="hero-arrow-up-tray"
+                    class="w-5 h-5 text-emerald-600 dark:text-emerald-400"
+                  />
+                </div>
+                <div>
+                  <p class="text-xs text-emerald-600 dark:text-emerald-400 font-medium uppercase tracking-wide">
+                    Bandwidth Used
+                  </p>
+                  <p class="text-2xl font-bold text-emerald-700 dark:text-emerald-300 leading-tight">
+                    {format_mb(@domain.bandwidth_used_mb)}
+                  </p>
+                  <p class="text-xs text-emerald-500 dark:text-emerald-400 mt-0.5">this month</p>
+                </div>
+              </div>
+            </div>
+
+            <%!-- Bandwidth history chart --%>
+            <%= if @bandwidth_chart_data != [] do %>
+              <div class="mt-6">
+                <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-3">
+                  Bandwidth — last 6 months
+                </p>
+                <% max_mb =
+                  Enum.max_by(@bandwidth_chart_data, & &1.mb_used, fn -> %{mb_used: 1} end).mb_used %>
+                <% max_mb = max(max_mb, 1) %>
+                <div class="flex items-end gap-2 h-24">
+                  <%= for bar <- @bandwidth_chart_data do %>
+                    <% pct = round(bar.mb_used / max_mb * 100) %>
+                    <div class="flex-1 flex flex-col items-center gap-1">
+                      <span class="text-xs text-gray-500 dark:text-gray-400">
+                        <%= if bar.mb_used > 0 do %>
+                          {format_mb(bar.mb_used)}
+                        <% end %>
+                      </span>
+                      <div
+                        class="w-full bg-gray-100 dark:bg-gray-800 rounded-t relative"
+                        style="height: 56px"
+                      >
+                        <div
+                          class={[
+                            "absolute bottom-0 left-0 right-0 rounded-t transition-all duration-500",
+                            if(bar.current?,
+                              do: "bg-emerald-500",
+                              else: "bg-emerald-300 dark:bg-emerald-700"
+                            )
+                          ]}
+                          style={"height: #{pct}%"}
+                        >
+                        </div>
+                      </div>
+                      <span class="text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap">
+                        {bar.label}
+                      </span>
+                    </div>
+                  <% end %>
+                </div>
+              </div>
+            <% end %>
           </div>
 
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
@@ -1245,6 +1333,48 @@ defmodule HostctlWeb.DomainLive.Show do
   attr :label, :string, required: true
   attr :value, :string, required: true
   attr :icon, :string, required: true
+
+  defp format_mb(mb) when is_integer(mb) do
+    cond do
+      mb >= 1024 -> "#{Float.round(mb / 1024, 2)} GB"
+      mb > 0 -> "#{mb} MB"
+      true -> "0 MB"
+    end
+  end
+
+  # Builds a 6-slot chart dataset (most recent month last).
+  # Slots with no snapshot default to 0. The current month is flagged with current?: true.
+  defp bandwidth_chart_data(snapshots) do
+    today = Date.utc_today()
+    snapshot_map = Map.new(snapshots, &{{&1.year, &1.month}, &1.mb_used})
+
+    for offset <- 5..0//-1 do
+      total = today.year * 12 + today.month - 1 - offset
+      year = div(total, 12)
+      month = rem(total, 12) + 1
+
+      %{
+        year: year,
+        month: month,
+        label: "#{month_short(month)} #{rem(year, 100)}",
+        mb_used: Map.get(snapshot_map, {year, month}, 0),
+        current?: offset == 0
+      }
+    end
+  end
+
+  defp month_short(1), do: "Jan"
+  defp month_short(2), do: "Feb"
+  defp month_short(3), do: "Mar"
+  defp month_short(4), do: "Apr"
+  defp month_short(5), do: "May"
+  defp month_short(6), do: "Jun"
+  defp month_short(7), do: "Jul"
+  defp month_short(8), do: "Aug"
+  defp month_short(9), do: "Sep"
+  defp month_short(10), do: "Oct"
+  defp month_short(11), do: "Nov"
+  defp month_short(12), do: "Dec"
 
   defp info_card(assigns) do
     ~H"""

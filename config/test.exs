@@ -44,6 +44,9 @@ config :hostctl, :database_server, enabled: false
 # Disable mail server integration during tests
 config :hostctl, :mail_server, enabled: false
 
+# Disable the metrics collector in tests (no Nginx logs or filesystem to scan)
+config :hostctl, Hostctl.Metrics.Collector, enabled: false
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

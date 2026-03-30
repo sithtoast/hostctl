@@ -25,7 +25,8 @@ defmodule Hostctl.Hosting do
     SslCertificate,
     CronJob,
     FtpAccount,
-    DomainSmarthostSetting
+    DomainSmarthostSetting,
+    BandwidthSnapshot
   }
 
   # ---------------------------------------------------------------------------
@@ -117,6 +118,49 @@ defmodule Hostctl.Hosting do
       error ->
         error
     end
+  end
+
+  def update_domain_metrics(%Domain{} = domain, attrs) do
+    domain
+    |> Domain.metrics_changeset(attrs)
+    |> Repo.update()
+  end
+
+  def upsert_bandwidth_snapshot(%Domain{} = domain, year, month, mb_used) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    result =
+      Repo.insert(
+        %BandwidthSnapshot{
+          domain_id: domain.id,
+          year: year,
+          month: month,
+          mb_used: mb_used,
+          inserted_at: now,
+          updated_at: now
+        },
+        on_conflict: [set: [mb_used: mb_used, updated_at: now]],
+        conflict_target: [:domain_id, :year, :month]
+      )
+
+    # Keep the quick-access field on the domain in sync for the current month.
+    today = DateTime.utc_now()
+
+    if year == today.year and month == today.month do
+      update_domain_metrics(domain, %{bandwidth_used_mb: mb_used})
+    end
+
+    result
+  end
+
+  def list_bandwidth_snapshots(%Domain{} = domain, limit \\ 6) do
+    Repo.all(
+      from s in BandwidthSnapshot,
+        where: s.domain_id == ^domain.id,
+        order_by: [desc: s.year, desc: s.month],
+        limit: ^limit
+    )
+    |> Enum.reverse()
   end
 
   def change_domain(%Domain{} = domain, attrs \\ %{}) do

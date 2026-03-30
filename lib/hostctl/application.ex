@@ -7,15 +7,26 @@ defmodule Hostctl.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      HostctlWeb.Telemetry,
-      Hostctl.Repo,
-      {DNSCluster, query: Application.get_env(:hostctl, :dns_cluster_query) || :ignore},
-      {Phoenix.PubSub, name: Hostctl.PubSub},
-      {Task.Supervisor, name: Hostctl.TaskSupervisor},
-      # Start to serve requests, typically the last entry
-      HostctlWeb.Endpoint
-    ]
+    metrics_children =
+      if Application.get_env(:hostctl, Hostctl.Metrics.Collector, [])[:enabled] != false do
+        [Hostctl.Metrics.Collector]
+      else
+        []
+      end
+
+    children =
+      [
+        HostctlWeb.Telemetry,
+        Hostctl.Repo,
+        {DNSCluster, query: Application.get_env(:hostctl, :dns_cluster_query) || :ignore},
+        {Phoenix.PubSub, name: Hostctl.PubSub},
+        {Task.Supervisor, name: Hostctl.TaskSupervisor}
+      ] ++
+        metrics_children ++
+        [
+          # Start to serve requests, typically the last entry
+          HostctlWeb.Endpoint
+        ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
