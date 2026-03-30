@@ -306,6 +306,7 @@ echo -e "  Erlang/OTP    : $OTP_MAJOR  (rabbitmq/rabbitmq-erlang PPA)"
 echo -e "  Elixir        : $ELIXIR_VERSION  (github.com/elixir-lang/elixir)"
 echo -e "  PostgreSQL    : $POSTGRES_MAJOR  (postgresql.org apt repo)"
 echo -e "  Database      : $DB_FLAVOR_LABEL  ($DB_PACKAGES)"
+echo -e "  FTP service   : vsftpd"
 echo -e "  App directory : $APP_DIR"
 echo -e "  System user   : $SERVICE_USER"
 echo -e "  Database      : $DB_NAME"
@@ -380,6 +381,10 @@ apt-get install -y --no-install-recommends \
   --download-only \
   build-essential git libssl-dev unzip locales >/dev/null
 
+info "Pre-downloading FTP packages..."
+apt-get install -y --no-install-recommends --download-only \
+  vsftpd db-util >/dev/null
+
 if [[ "$SKIP_NGINX" == false ]] && ! command -v nginx &>/dev/null; then
   apt-get install -y --no-install-recommends --download-only nginx >/dev/null
 fi
@@ -418,13 +423,14 @@ success "All prerequisites downloaded. No system changes made yet -- starting in
 step "Installing system packages"
 
 apt-get install -y --no-install-recommends \
-  build-essential git libssl-dev unzip locales
+  build-essential git libssl-dev unzip locales vsftpd db-util
 
 if ! locale -a 2>/dev/null | grep -q "en_US.utf8"; then
   locale-gen en_US.UTF-8
 fi
 update-locale LANG=en_US.UTF-8
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+systemctl enable --now vsftpd >/dev/null 2>&1 || true
 success "System packages installed"
 
 # 2b. Erlang (from PPA cache) + Elixir (from downloaded zip) ------------------
