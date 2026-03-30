@@ -88,6 +88,13 @@ defmodule HostctlWeb.DomainLive.Index do
   def handle_event("save", %{"domain" => params}, socket) do
     case Hosting.create_domain(socket.assigns.current_scope, params) do
       {:ok, domain} ->
+        domain =
+          if socket.assigns.is_admin? do
+            Hosting.get_domain_for_admin!(domain.id)
+          else
+            domain
+          end
+
         {:noreply,
          socket
          |> assign(:domains_empty?, false)
