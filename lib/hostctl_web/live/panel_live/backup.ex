@@ -60,11 +60,33 @@ defmodule HostctlWeb.PanelLive.Backup do
       {:ok, updated} ->
         form = to_form(Backup.change_settings(updated), as: :backup_setting)
 
-        {:noreply,
-         socket
-         |> assign(:setting, updated)
-         |> assign(:form, form)
-         |> put_flash(:info, "Backup settings saved.")}
+        socket =
+          socket
+          |> assign(:setting, updated)
+          |> assign(:form, form)
+          |> put_flash(:info, "Backup settings saved.")
+
+        socket =
+          if updated.local_enabled do
+            local_path = updated.local_path || "/var/backups/hostctl"
+
+            case File.mkdir_p(local_path) do
+              :ok ->
+                put_flash(socket, :info, "Backup settings saved. Local directory #{local_path} is ready.")
+
+              {:error, reason} ->
+                put_flash(
+                  socket,
+                  :warning,
+                  "Settings saved, but could not create local backup directory #{local_path}: #{:file.format_error(reason)}. " <>
+                    "Fix by running: sudo /opt/hostctl/bin/repair"
+                )
+            end
+          else
+            socket
+          end
+
+        {:noreply, socket}
 
       {:error, changeset} ->
         {:noreply, assign(socket, :form, to_form(changeset, as: :backup_setting))}

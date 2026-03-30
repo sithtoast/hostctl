@@ -92,6 +92,7 @@ ensure_dir "$APP_DIR"                         "root:$SERVICE_USER" "755" "App di
 ensure_dir "/var/log/$APP_NAME"               "root:$SERVICE_USER" "775" "Log directory"
 ensure_dir "/var/www"                          "root:$SERVICE_USER" "775" "Webroot"
 ensure_dir "/etc/$APP_NAME"                   "root:$SERVICE_USER" "750" "Config directory"
+ensure_dir "/var/backups/$APP_NAME"           "$SERVICE_USER:$SERVICE_USER" "750" "Backup directory"
 
 if command -v nginx &>/dev/null; then
   ensure_dir "/etc/nginx/sites-available"     "root:$SERVICE_USER" "775" "Nginx sites-available"
@@ -154,18 +155,18 @@ $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemd-run *"
 ensure_sudoers "/etc/sudoers.d/hostctl-features" "Feature management" "$FEATURES_CONTENT"
 
 # =============================================================================
-# 4. Systemd unit — ensure ReadWritePaths includes /run/sudo
+# 4. Systemd unit — ensure ReadWritePaths includes runtime + backup paths
 # =============================================================================
 section "4. Systemd service"
 
-REQUIRED_RW_PATHS="$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg"
+REQUIRED_RW_PATHS="$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /var/backups/$APP_NAME /tmp /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg"
 
 if [[ -f "$SERVICE_FILE" ]]; then
   # Check if ReadWritePaths includes all required paths
   if grep -q '^ReadWritePaths=' "$SERVICE_FILE"; then
     current_rw="$(grep '^ReadWritePaths=' "$SERVICE_FILE" | head -1)"
     rw_ok=true
-    for rw_path in /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg; do
+    for rw_path in /var/backups/$APP_NAME /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg; do
       if ! echo "$current_rw" | grep -q "$rw_path"; then
         rw_ok=false
         break

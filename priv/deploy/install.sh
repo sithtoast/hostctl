@@ -563,6 +563,12 @@ chown "root:$SERVICE_USER" "/var/log/$APP_NAME"
 chmod 775 "/var/log/$APP_NAME"
 success "Log directory: /var/log/$APP_NAME"
 
+# 3d-1b. Backup directory ------------------------------------------------------
+mkdir -p "/var/backups/$APP_NAME"
+chown "$SERVICE_USER:$SERVICE_USER" "/var/backups/$APP_NAME"
+chmod 750 "/var/backups/$APP_NAME"
+success "Backup directory: /var/backups/$APP_NAME"
+
 # 3d-2. Webroot directory -----------------------------------------------------
 step "Setting up webroot and Nginx site config directories"
 
@@ -698,7 +704,7 @@ StandardError=journal
 SyslogIdentifier=$APP_NAME
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /tmp /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg
+ReadWritePaths=$APP_DIR $SOURCE_DIR /var/log/$APP_NAME /var/www /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/ssl/hostctl /var/lib/hostctl /var/backups/$APP_NAME /tmp /run/sudo /var/cache/apt /var/lib/apt /var/lib/dpkg
 
 [Install]
 WantedBy=multi-user.target
