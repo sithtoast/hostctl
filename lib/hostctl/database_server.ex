@@ -178,16 +178,21 @@ defmodule Hostctl.DatabaseServer do
 
   defp do_create_user(username, password, db_name) do
     # Username is validated to be alphanumeric + underscores only (see DbUser.changeset),
-    # so interpolation is safe. MariaDB does not accept ? placeholders in user@host position.
+    # so interpolation is safe. MariaDB does not accept ? placeholders in DDL statements
+    # (CREATE USER / IDENTIFIED BY), so we interpolate the escaped password directly.
+    esc_pw = escape_string(password)
+
     with_connection(fn conn ->
       with :ok <-
-             query(conn, "CREATE USER IF NOT EXISTS '#{username}'@'localhost' IDENTIFIED BY ?", [
-               password
-             ]),
+             query(
+               conn,
+               "CREATE USER IF NOT EXISTS '#{username}'@'localhost' IDENTIFIED BY '#{esc_pw}'"
+             ),
            :ok <-
-             query(conn, "CREATE USER IF NOT EXISTS '#{username}'@'%' IDENTIFIED BY ?", [
-               password
-             ]),
+             query(
+               conn,
+               "CREATE USER IF NOT EXISTS '#{username}'@'%' IDENTIFIED BY '#{esc_pw}'"
+             ),
            :ok <-
              query(
                conn,
@@ -212,10 +217,15 @@ defmodule Hostctl.DatabaseServer do
   end
 
   defp do_update_password(username, password) do
+    esc_pw = escape_string(password)
+
     with_connection(fn conn ->
       with :ok <-
-             query(conn, "ALTER USER '#{username}'@'localhost' IDENTIFIED BY ?", [password]),
-           :ok <- query(conn, "ALTER USER '#{username}'@'%' IDENTIFIED BY ?", [password]),
+             query(
+               conn,
+               "ALTER USER '#{username}'@'localhost' IDENTIFIED BY '#{esc_pw}'"
+             ),
+           :ok <- query(conn, "ALTER USER '#{username}'@'%' IDENTIFIED BY '#{esc_pw}'"),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
       end
@@ -252,6 +262,14 @@ defmodule Hostctl.DatabaseServer do
       {:ok, _result} -> :ok
       {:error, error} -> {:error, error}
     end
+  end
+
+  # Escape a string for safe interpolation into a MySQL/MariaDB single-quoted literal.
+  # Escapes backslashes first, then single quotes.
+  defp escape_string(str) do
+    str
+    |> String.replace("\\\\", "\\\\\\\\")
+    |> String.replace("'", "''") 
   end
 
   defp enabled?, do: Keyword.get(config(), :enabled, false)
