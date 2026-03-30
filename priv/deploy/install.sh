@@ -692,6 +692,7 @@ Requires=postgresql.service
 Type=exec
 User=$SERVICE_USER
 Group=$SERVICE_USER
+SupplementaryGroups=adm
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
 ExecStart=$APP_DIR/bin/server

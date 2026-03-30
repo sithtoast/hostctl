@@ -114,16 +114,27 @@ defmodule Hostctl.Metrics.Collector do
     # $time_local looks like: [29/Mar/2026:10:30:45  — we filter by "/Mon/YYYY:" substring.
     month_tag = "/#{month_abbrev(month)}/#{year}:"
 
-    if File.exists?(log_path) do
-      log_path
-      |> File.stream!([], :line)
-      |> Stream.filter(&String.contains?(&1, month_tag))
-      |> Stream.map(&parse_bytes_from_line/1)
-      |> Stream.reject(&is_nil/1)
-      |> Enum.sum()
-      |> bytes_to_mb()
-    else
-      0
+    case File.open(log_path, [:read], fn io_device ->
+           io_device
+           |> IO.stream(:line)
+           |> Stream.filter(&String.contains?(&1, month_tag))
+           |> Stream.map(&parse_bytes_from_line/1)
+           |> Stream.reject(&is_nil/1)
+           |> Enum.sum()
+           |> bytes_to_mb()
+         end) do
+      {:ok, mb} ->
+        mb
+
+      {:error, :enoent} ->
+        0
+
+      {:error, reason} ->
+        Logger.warning(
+          "Bandwidth collection skipped for #{log_path}: #{:file.format_error(reason)}"
+        )
+
+        0
     end
   end
 
