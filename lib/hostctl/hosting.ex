@@ -343,6 +343,51 @@ defmodule Hostctl.Hosting do
 
   def sync_zone_to_cloudflare(_zone), do: {:error, :not_linked}
 
+  @doc """
+  Lists the current DNS records from the linked Cloudflare zone.
+
+  Returns `{:ok, records}` or `{:error, :not_linked | :cloudflare_not_configured | reason}`.
+  """
+  def list_cloudflare_zone_records(%DnsZone{cloudflare_zone_id: cf_zone_id})
+      when is_binary(cf_zone_id) do
+    with %{provider: "cloudflare", cloudflare_api_token: token}
+         when is_binary(token) and token != "" <- Settings.get_dns_provider_setting(),
+         {:ok, records} <- Cloudflare.list_records(token, cf_zone_id) do
+      {:ok, Enum.sort_by(records, &{&1["type"] || "", &1["name"] || "", &1["content"] || ""})}
+    else
+      %{provider: "local"} -> {:error, :cloudflare_not_configured}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :cloudflare_not_configured}
+    end
+  end
+
+  def list_cloudflare_zone_records(_zone), do: {:error, :not_linked}
+
+  @doc """
+  Imports Cloudflare DNS records into the local zone.
+
+  Supported record types are inserted or updated locally and linked to their
+  Cloudflare record IDs. Unsupported records are skipped.
+  """
+  def import_cloudflare_zone_records(%DnsZone{} = zone, cloudflare_records)
+      when is_list(cloudflare_records) do
+    Enum.reduce(cloudflare_records, {:ok, %{imported: 0, updated: 0, skipped: 0}}, fn cf_record,
+                                                                                      {:ok, acc} ->
+      case normalize_cloudflare_record(cf_record) do
+        {:ok, attrs} ->
+          case upsert_cloudflare_record(zone, attrs) do
+            :imported -> {:ok, %{acc | imported: acc.imported + 1}}
+            :updated -> {:ok, %{acc | updated: acc.updated + 1}}
+            :skipped -> {:ok, %{acc | skipped: acc.skipped + 1}}
+            {:error, reason} -> {:error, reason}
+          end
+
+        :skip ->
+          {:ok, %{acc | skipped: acc.skipped + 1}}
+      end
+    end)
+  end
+
   def create_dns_record(%DnsZone{} = zone, attrs) do
     result =
       %DnsRecord{dns_zone_id: zone.id}
@@ -434,6 +479,86 @@ defmodule Hostctl.Hosting do
   end
 
   defp maybe_sync_delete_to_cloudflare(_record), do: :ok
+
+  defp normalize_cloudflare_record(
+         %{"id" => id, "type" => type, "name" => name, "content" => content} = record
+       )
+       when is_binary(id) and is_binary(type) and is_binary(name) and is_binary(content) do
+    if type in DnsRecord.valid_types() do
+      {:ok,
+       %{
+         cloudflare_record_id: id,
+         type: type,
+         name: name,
+         value: content,
+         ttl: normalize_cloudflare_ttl(record["ttl"]),
+         priority: record["priority"]
+       }}
+    else
+      :skip
+    end
+  end
+
+  defp normalize_cloudflare_record(_record), do: :skip
+
+  defp normalize_cloudflare_ttl(ttl) when is_integer(ttl) and ttl > 0, do: ttl
+  defp normalize_cloudflare_ttl(_ttl), do: 3600
+
+  defp upsert_cloudflare_record(%DnsZone{} = zone, attrs) do
+    case find_existing_cloudflare_record(zone, attrs) do
+      nil ->
+        %DnsRecord{dns_zone_id: zone.id, cloudflare_record_id: attrs.cloudflare_record_id}
+        |> DnsRecord.changeset(Map.take(attrs, [:type, :name, :value, :ttl, :priority]))
+        |> Repo.insert()
+        |> case do
+          {:ok, _record} -> :imported
+          {:error, changeset} -> {:error, changeset}
+        end
+
+      %DnsRecord{} = record ->
+        changes = %{
+          type: attrs.type,
+          name: attrs.name,
+          value: attrs.value,
+          ttl: attrs.ttl,
+          priority: attrs.priority,
+          cloudflare_record_id: attrs.cloudflare_record_id
+        }
+
+        if record_matches_cloudflare?(record, changes) do
+          :skipped
+        else
+          record
+          |> Ecto.Changeset.change(changes)
+          |> Repo.update()
+          |> case do
+            {:ok, _record} -> :updated
+            {:error, changeset} -> {:error, changeset}
+          end
+        end
+    end
+  end
+
+  defp find_existing_cloudflare_record(%DnsZone{} = zone, attrs) do
+    Repo.one(
+      from r in DnsRecord,
+        where:
+          r.dns_zone_id == ^zone.id and
+            (r.cloudflare_record_id == ^attrs.cloudflare_record_id or
+               (r.type == ^attrs.type and r.name == ^attrs.name and r.value == ^attrs.value)),
+        order_by: [asc: r.id],
+        limit: 1
+    )
+  end
+
+  defp record_matches_cloudflare?(%DnsRecord{} = record, changes) do
+    record.type == changes.type and
+      record.name == changes.name and
+      record.value == changes.value and
+      record.ttl == changes.ttl and
+      record.priority == changes.priority and
+      record.cloudflare_record_id == changes.cloudflare_record_id
+  end
 
   defp apply_dns_template(%DnsZone{} = zone, domain_name) do
     Settings.resolve_dns_template(domain_name)

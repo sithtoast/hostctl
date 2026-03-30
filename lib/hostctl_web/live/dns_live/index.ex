@@ -17,6 +17,8 @@ defmodule HostctlWeb.DnsLive.Index do
      |> assign(:domain, domain)
      |> assign(:zone, zone)
      |> assign(:dns_setting, dns_setting)
+     |> assign(:cloudflare_records, [])
+     |> assign(:cloudflare_records_loaded, false)
      |> assign(:editing_record_id, nil)
      |> assign(:edit_form, nil)
      |> assign_new_form()
@@ -205,12 +207,71 @@ defmodule HostctlWeb.DnsLive.Index do
     end
   end
 
+  def handle_event("refresh_cloudflare_records", _, socket) do
+    case Hosting.list_cloudflare_zone_records(socket.assigns.zone) do
+      {:ok, records} ->
+        {:noreply,
+         socket
+         |> assign(:cloudflare_records, records)
+         |> assign(:cloudflare_records_loaded, true)
+         |> put_flash(:info, "Loaded #{length(records)} Cloudflare record(s).")}
+
+      {:error, :not_linked} ->
+        {:noreply, put_flash(socket, :error, "Zone is not linked to Cloudflare.")}
+
+      {:error, :cloudflare_not_configured} ->
+        {:noreply, put_flash(socket, :error, "Cloudflare is not configured in Panel Settings.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Cloudflare refresh failed: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("import_cloudflare_records", _, socket) do
+    with {:ok, records} <- current_or_remote_cloudflare_records(socket),
+         {:ok, summary} <- Hosting.import_cloudflare_zone_records(socket.assigns.zone, records) do
+      zone = Hosting.get_dns_zone_with_records!(socket.assigns.domain)
+
+      {:noreply,
+       socket
+       |> assign(:zone, zone)
+       |> assign(:cloudflare_records, records)
+       |> assign(:cloudflare_records_loaded, true)
+       |> stream(:dns_records, zone.dns_records, reset: true)
+       |> put_flash(
+         :info,
+         "Imported #{summary.imported} Cloudflare record(s), updated #{summary.updated}, skipped #{summary.skipped}."
+       )}
+    else
+      {:error, :not_linked} ->
+        {:noreply, put_flash(socket, :error, "Zone is not linked to Cloudflare.")}
+
+      {:error, :cloudflare_not_configured} ->
+        {:noreply, put_flash(socket, :error, "Cloudflare is not configured in Panel Settings.")}
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        {:noreply,
+         put_flash(socket, :error, "Cloudflare import failed: #{inspect(changeset.errors)}")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Cloudflare import failed: #{inspect(reason)}")}
+    end
+  end
+
   # --------------------------------------------------------------------------
   # Helpers
   # --------------------------------------------------------------------------
 
   defp assign_new_form(socket) do
     assign(socket, :form, to_form(Hosting.change_dns_record(%DnsRecord{})))
+  end
+
+  defp current_or_remote_cloudflare_records(socket) do
+    if socket.assigns.cloudflare_records_loaded do
+      {:ok, socket.assigns.cloudflare_records}
+    else
+      Hosting.list_cloudflare_zone_records(socket.assigns.zone)
+    end
   end
 
   defp cloudflare_enabled?(dns_setting) do
@@ -512,6 +573,101 @@ defmodule HostctlWeb.DnsLive.Index do
             >
               <.icon name="hero-arrow-path" class="w-3.5 h-3.5" /> Sync all to Cloudflare
             </button>
+          </div>
+
+          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+                  Cloudflare Records
+                </h2>
+                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                  Review the live record set in Cloudflare and optionally import it into this local DNS zone.
+                </p>
+              </div>
+              <div class="flex items-center gap-2">
+                <button
+                  id="refresh-cloudflare-records-btn"
+                  phx-click="refresh_cloudflare_records"
+                  class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-orange-100 hover:bg-orange-200 dark:bg-orange-900/20 dark:hover:bg-orange-900/30 text-orange-700 dark:text-orange-400 text-sm font-semibold transition-colors"
+                >
+                  <.icon name="hero-arrow-path" class="w-4 h-4" /> Refresh from Cloudflare
+                </button>
+                <button
+                  id="import-cloudflare-records-btn"
+                  phx-click="import_cloudflare_records"
+                  class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold transition-colors"
+                >
+                  <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Import to Local DNS
+                </button>
+              </div>
+            </div>
+
+            <%= if !@cloudflare_records_loaded do %>
+              <div class="px-6 py-10 text-sm text-gray-500 dark:text-gray-400">
+                Refresh Cloudflare records to inspect the live zone before importing.
+              </div>
+            <% else %>
+              <%= if @cloudflare_records == [] do %>
+                <div class="px-6 py-10 text-sm text-gray-500 dark:text-gray-400">
+                  Cloudflare returned no DNS records for this zone.
+                </div>
+              <% else %>
+                <div class="overflow-x-auto">
+                  <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-800">
+                    <thead>
+                      <tr class="bg-gray-50 dark:bg-gray-800/50">
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Type
+                        </th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Name
+                        </th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Value
+                        </th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          TTL
+                        </th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Priority
+                        </th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Proxy
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
+                      <tr
+                        :for={record <- @cloudflare_records}
+                        class="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+                      >
+                        <td class="px-4 py-3">
+                          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold font-mono bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">
+                            {record["type"]}
+                          </span>
+                        </td>
+                        <td class="px-4 py-3 font-mono text-sm text-gray-900 dark:text-white">
+                          {record["name"]}
+                        </td>
+                        <td class="px-4 py-3 font-mono text-sm text-gray-600 dark:text-gray-300 max-w-xl truncate">
+                          {record["content"]}
+                        </td>
+                        <td class="px-4 py-3 text-sm text-gray-500">{record["ttl"] || "—"}</td>
+                        <td class="px-4 py-3 text-sm text-gray-500">{record["priority"] || "—"}</td>
+                        <td class="px-4 py-3 text-sm text-gray-500">
+                          <%= if Map.get(record, "proxied") do %>
+                            Proxied
+                          <% else %>
+                            DNS only
+                          <% end %>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              <% end %>
+            <% end %>
           </div>
         <% end %>
       </div>
