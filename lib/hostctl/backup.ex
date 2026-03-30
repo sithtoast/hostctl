@@ -69,6 +69,9 @@ defmodule Hostctl.Backup do
     |> Repo.one()
   end
 
+  @doc "Returns a backup log by id, or nil."
+  def get_log(id) when is_integer(id), do: Repo.get(Log, id)
+
   @doc "Returns true if a backup is currently marked as running."
   def backup_running? do
     Repo.exists?(from l in Log, where: l.status == "running")

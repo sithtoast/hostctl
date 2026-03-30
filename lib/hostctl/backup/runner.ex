@@ -232,6 +232,7 @@ defmodule Hostctl.Backup.Runner do
     timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
     prefix = "#{settings.s3_path_prefix || "hostctl-backups"}/hostctl-backup-#{timestamp}"
     tar = System.find_executable("tar") || "tar"
+    details = build_backup_details(settings)
 
     result =
       try do
@@ -265,7 +266,8 @@ defmodule Hostctl.Backup.Runner do
           status: "success",
           completed_at: DateTime.utc_now(),
           destination: "s3",
-          s3_key: prefix
+          s3_key: prefix,
+          details: Map.put(details, :mode, "stream")
         }
 
         {:ok, updated_log} = Backup.update_log(log, updates)
@@ -299,6 +301,7 @@ defmodule Hostctl.Backup.Runner do
     timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
     archive_name = "hostctl-backup-#{timestamp}.tar.gz"
     archive_path = Path.join(System.tmp_dir!(), archive_name)
+    details = build_backup_details(settings)
 
     File.mkdir_p!(tmp_dir)
 
@@ -369,7 +372,8 @@ defmodule Hostctl.Backup.Runner do
           file_size_bytes: file_size,
           destination: destination,
           local_path: local_backup_path,
-          s3_key: s3_key
+          s3_key: s3_key,
+          details: Map.put(details, :mode, "archive")
         }
 
         {:ok, updated_log} = Backup.update_log(log, updates)
@@ -404,6 +408,7 @@ defmodule Hostctl.Backup.Runner do
     safe_domain = String.replace(domain.name, ~r/[^a-zA-Z0-9._-]/, "_")
     archive_name = "hostctl-domain-#{safe_domain}-backup-#{timestamp}.tar.gz"
     archive_path = Path.join(System.tmp_dir!(), archive_name)
+    details = build_domain_backup_details(settings, domain)
 
     File.mkdir_p!(tmp_dir)
 
@@ -462,7 +467,8 @@ defmodule Hostctl.Backup.Runner do
           file_size_bytes: file_size,
           destination: destination,
           local_path: local_backup_path,
-          s3_key: s3_key
+          s3_key: s3_key,
+          details: Map.put(details, :mode, "archive")
         }
 
         {:ok, updated_log} = Backup.update_log(log, updates)
@@ -498,6 +504,7 @@ defmodule Hostctl.Backup.Runner do
       "#{settings.s3_path_prefix || "hostctl-backups"}/hostctl-domain-backup-#{safe_domain}-#{timestamp}"
 
     tar = System.find_executable("tar") || "tar"
+    details = build_domain_backup_details(settings, domain)
 
     result =
       try do
@@ -519,7 +526,8 @@ defmodule Hostctl.Backup.Runner do
           status: "success",
           completed_at: DateTime.utc_now(),
           destination: "s3",
-          s3_key: prefix
+          s3_key: prefix,
+          details: Map.put(details, :mode, "stream")
         }
 
         {:ok, updated_log} = Backup.update_log(log, updates)
@@ -553,6 +561,73 @@ defmodule Hostctl.Backup.Runner do
       nil -> true
       %DomainSetting{include_mail: include_mail} -> include_mail
     end
+  end
+
+  defp build_backup_details(settings) do
+    included_domain_ids = Backup.file_backup_domain_ids()
+
+    domain_names =
+      Repo.all(
+        from d in Domain,
+          where: d.id in ^included_domain_ids,
+          order_by: [asc: d.name],
+          select: d.name
+      )
+
+    excluded_sub_ids = Backup.file_backup_excluded_subdomain_ids()
+
+    subdomain_names =
+      Repo.all(
+        from s in Subdomain,
+          join: d in Domain,
+          on: d.id == s.domain_id,
+          where: s.id not in ^excluded_sub_ids,
+          order_by: [asc: d.name, asc: s.name],
+          select: fragment("concat(?, '.', ?)", s.name, d.name)
+      )
+
+    mysql_db_names = mysql_databases()
+    postgresql_db_names = user_postgresql_databases()
+
+    %{
+      scope: "all",
+      includes: %{
+        database: settings.backup_database,
+        mysql: settings.backup_mysql,
+        files: settings.backup_files,
+        mail: settings.backup_mail
+      },
+      domain_names: domain_names,
+      subdomain_names: subdomain_names,
+      mail_domain_names: Backup.mail_backup_domain_names(),
+      mysql_databases: mysql_db_names,
+      postgresql_databases: postgresql_db_names
+    }
+  end
+
+  defp build_domain_backup_details(settings, %Domain{} = domain) do
+    subdomain_names =
+      Repo.all(
+        from s in Subdomain,
+          where: s.domain_id == ^domain.id,
+          order_by: [asc: s.name],
+          select: fragment("concat(?, '.', ?)", s.name, ^domain.name)
+      )
+
+    %{
+      scope: "domain",
+      includes: %{
+        database: false,
+        mysql: false,
+        files: settings.backup_files,
+        mail: settings.backup_mail and domain_mail_included?(domain.id)
+      },
+      domain_names: [domain.name],
+      subdomain_names: subdomain_names,
+      mail_domain_names: if(domain_mail_included?(domain.id), do: [domain.name], else: []),
+      mysql_databases: [],
+      postgresql_databases: []
+    }
   end
 
   defp backup_domain_scope_files(tmp_dir, %Domain{} = domain) do

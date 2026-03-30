@@ -58,6 +58,7 @@ defmodule HostctlWeb.PanelLive.Backup do
       |> assign(:restore_db_targets, db_targets)
       |> assign(:restore_bulk_confirm, false)
       |> assign(:restore_dry_run_report, [])
+      |> assign(:completed_logs, Enum.filter(logs, &(&1.status == "success")))
 
     {:ok, stream(socket, :logs, logs)}
   end
@@ -733,6 +734,77 @@ defmodule HostctlWeb.PanelLive.Backup do
   end
 
   @impl true
+  def handle_event("restore_from_log", %{"log-id" => log_id_str}, socket) do
+    log_id = String.to_integer(log_id_str)
+
+    case Backup.get_log(log_id) do
+      nil ->
+        {:noreply, put_flash(socket, :error, "Backup log entry not found.")}
+
+      log ->
+        cond do
+          is_binary(log.local_path) and log.local_path != "" and File.exists?(log.local_path) ->
+            case Archive.inspect_archive(log.local_path) do
+              {:ok, inspected} ->
+                {:noreply,
+                 socket
+                 |> clear_previous_temp_archive()
+                 |> assign(:restore_archive_path, log.local_path)
+                 |> assign(:restore_archive_temporary, false)
+                 |> assign(:restore_source_name, Path.basename(log.local_path))
+                 |> assign(:restore_items, inspected.items)
+                 |> assign(:restore_selected, MapSet.new())
+                 |> assign(:restore_index_present, inspected.index_present?)
+                 |> assign(:restore_sql_items, [])
+                 |> assign(:restore_bulk_confirm, false)
+                 |> assign(:restore_dry_run_report, [])
+                 |> put_flash(:info, "Loaded backup from history. Scroll to Restore section.")}
+
+              {:error, reason} when is_binary(reason) ->
+                {:noreply, put_flash(socket, :error, reason)}
+            end
+
+          is_binary(log.s3_key) and archive_key?(log.s3_key) ->
+            ext = if String.ends_with?(log.s3_key, ".tgz"), do: ".tgz", else: ".tar.gz"
+
+            tmp_path =
+              Path.join(
+                System.tmp_dir!(),
+                "hostctl-restore-s3-#{System.system_time(:millisecond)}-#{:erlang.unique_integer([:positive])}#{ext}"
+              )
+
+            with {:ok, ^tmp_path} <- S3.download(socket.assigns.setting, log.s3_key, tmp_path),
+                 {:ok, inspected} <- Archive.inspect_archive(tmp_path) do
+              {:noreply,
+               socket
+               |> clear_previous_temp_archive()
+               |> assign(:restore_archive_path, tmp_path)
+               |> assign(:restore_archive_temporary, true)
+               |> assign(:restore_source_name, log.s3_key)
+               |> assign(:restore_items, inspected.items)
+               |> assign(:restore_selected, MapSet.new())
+               |> assign(:restore_index_present, inspected.index_present?)
+               |> assign(:restore_sql_items, [])
+               |> assign(:restore_bulk_confirm, false)
+               |> assign(:restore_dry_run_report, [])
+               |> put_flash(:info, "Loaded S3 backup from history. Scroll to Restore section.")}
+            else
+              {:error, reason} when is_binary(reason) ->
+                {:noreply, put_flash(socket, :error, reason)}
+            end
+
+          true ->
+            {:noreply,
+             put_flash(
+               socket,
+               :error,
+               "This history entry cannot be opened directly for restore (stream prefix or missing local archive)."
+             )}
+        end
+    end
+  end
+
+  @impl true
   def handle_info({:backup_started, _log_id}, socket) do
     {:noreply, socket |> assign(:running, true) |> assign(:progress_messages, [])}
   end
@@ -749,6 +821,7 @@ defmodule HostctlWeb.PanelLive.Backup do
      socket
      |> assign(:running, false)
      |> assign(:progress_messages, [])
+     |> assign(:completed_logs, Enum.filter(logs, &(&1.status == "success")))
      |> stream(:logs, logs, reset: true)
      |> put_flash(
        :info,
@@ -764,6 +837,7 @@ defmodule HostctlWeb.PanelLive.Backup do
      socket
      |> assign(:running, false)
      |> assign(:progress_messages, [])
+     |> assign(:completed_logs, Enum.filter(logs, &(&1.status == "success")))
      |> stream(:logs, logs, reset: true)
      |> put_flash(:error, "Backup failed: #{error}")}
   end
@@ -865,6 +939,36 @@ defmodule HostctlWeb.PanelLive.Backup do
       "postgresql" -> socket.assigns.restore_postgresql_target
       _ -> nil
     end
+  end
+
+  defp archive_key?(value) when is_binary(value) do
+    String.ends_with?(value, ".tar.gz") or String.ends_with?(value, ".tgz")
+  end
+
+  defp archive_key?(_), do: false
+
+  defp display_domain_count(log) do
+    log
+    |> domain_names_from_log()
+    |> length()
+  end
+
+  defp display_domain_preview(log) do
+    names = domain_names_from_log(log)
+
+    case names do
+      [] -> ""
+      many -> many |> Enum.take(3) |> Enum.join(", ")
+    end
+  end
+
+  defp domain_names_from_log(log) do
+    details = log.details || %{}
+    names = Map.get(details, :domain_names) || Map.get(details, "domain_names") || []
+
+    names
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
   end
 
   defp restore_kind_label("panel_postgresql"), do: "Panel DB"
@@ -2295,12 +2399,91 @@ defmodule HostctlWeb.PanelLive.Backup do
                       {log.error_message}
                     </p>
                   <% end %>
+
+                  <%= if display_domain_count(log) > 0 do %>
+                    <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 truncate">
+                      Domains: {display_domain_count(log)}
+                      <span :if={display_domain_preview(log) != ""}>
+                        ({display_domain_preview(log)})
+                      </span>
+                    </p>
+                  <% end %>
                 </div>
 
                 <%!-- Size --%>
                 <div class="shrink-0 text-sm text-gray-500 dark:text-gray-400">
                   {format_bytes(log.file_size_bytes)}
                 </div>
+
+                <button
+                  :if={log.status == "success"}
+                  id={"history-restore-#{log.id}"}
+                  type="button"
+                  phx-click="restore_from_log"
+                  phx-value-log-id={log.id}
+                  class="shrink-0 px-2.5 py-1 rounded-md bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
+                >
+                  Restore
+                </button>
+              </div>
+            <% end %>
+          </div>
+        </div>
+
+        <%!-- Completed backups quick access --%>
+        <div class="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-800 overflow-hidden">
+          <div class="px-6 py-5 border-b border-gray-200 dark:border-gray-800">
+            <h2 class="text-base font-semibold text-gray-900 dark:text-white">Completed Backups</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              Quick restore shortcuts for successful backups.
+            </p>
+          </div>
+
+          <div class="divide-y divide-gray-100 dark:divide-gray-800">
+            <div
+              :if={@completed_logs == []}
+              class="px-6 py-10 text-sm text-gray-400 dark:text-gray-500"
+            >
+              No completed backups yet.
+            </div>
+
+            <%= for log <- @completed_logs do %>
+              <div id={"completed-backup-#{log.id}"} class="px-6 py-4 flex items-center gap-4">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-sm font-medium text-gray-900 dark:text-white">
+                      {if log.completed_at,
+                        do: Calendar.strftime(log.completed_at, "%Y-%m-%d %H:%M UTC"),
+                        else: "Completed"}
+                    </span>
+                    <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400">
+                      {trigger_label(log.trigger)}
+                    </span>
+                    <span :if={log.destination} class="text-xs text-gray-400 dark:text-gray-500">
+                      {log.destination}
+                    </span>
+                  </div>
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 truncate">
+                    Domains: {display_domain_count(log)}
+                    <span :if={display_domain_preview(log) != ""}>
+                      ({display_domain_preview(log)})
+                    </span>
+                  </p>
+                </div>
+
+                <div class="text-sm text-gray-500 dark:text-gray-400 shrink-0">
+                  {format_bytes(log.file_size_bytes)}
+                </div>
+
+                <button
+                  id={"completed-restore-#{log.id}"}
+                  type="button"
+                  phx-click="restore_from_log"
+                  phx-value-log-id={log.id}
+                  class="shrink-0 px-3 py-1.5 rounded-md bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
+                >
+                  Restore
+                </button>
               </div>
             <% end %>
           </div>

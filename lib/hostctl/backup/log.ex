@@ -11,6 +11,7 @@ defmodule Hostctl.Backup.Log do
     field :destination, :string
     field :local_path, :string
     field :s3_key, :string
+    field :details, :map, default: %{}
     field :error_message, :string
 
     timestamps(type: :utc_datetime)
@@ -30,6 +31,7 @@ defmodule Hostctl.Backup.Log do
       :destination,
       :local_path,
       :s3_key,
+      :details,
       :error_message
     ])
     |> validate_inclusion(:status, @valid_statuses)
