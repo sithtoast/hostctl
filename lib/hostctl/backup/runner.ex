@@ -583,8 +583,9 @@ defmodule Hostctl.Backup.Runner do
           on: d.id == s.domain_id,
           where: s.id not in ^excluded_sub_ids,
           order_by: [asc: d.name, asc: s.name],
-          select: fragment("concat(?, '.', ?)", s.name, d.name)
+          select: {s.name, d.name}
       )
+      |> Enum.map(fn {subdomain_name, domain_name} -> "#{subdomain_name}.#{domain_name}" end)
 
     mysql_db_names = mysql_databases()
     postgresql_db_names = user_postgresql_databases()
@@ -611,8 +612,9 @@ defmodule Hostctl.Backup.Runner do
         from s in Subdomain,
           where: s.domain_id == ^domain.id,
           order_by: [asc: s.name],
-          select: fragment("concat(?, '.', ?)", s.name, ^domain.name)
+          select: s.name
       )
+      |> Enum.map(fn subdomain_name -> "#{subdomain_name}.#{domain.name}" end)
 
     %{
       scope: "domain",
