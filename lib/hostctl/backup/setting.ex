@@ -23,6 +23,8 @@ defmodule Hostctl.Backup.Setting do
     field :schedule_day_of_week, :integer, default: 1
 
     field :backup_database, :boolean, default: true
+    field :backup_mysql, :boolean, default: false
+    field :backup_mail, :boolean, default: false
     field :backup_files, :boolean, default: false
     field :s3_mode, :string, default: "archive"
 
@@ -47,6 +49,8 @@ defmodule Hostctl.Backup.Setting do
     :schedule_minute,
     :schedule_day_of_week,
     :backup_database,
+    :backup_mysql,
+    :backup_mail,
     :backup_files,
     :s3_mode
   ]

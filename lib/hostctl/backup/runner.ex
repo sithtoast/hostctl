@@ -29,7 +29,7 @@ defmodule Hostctl.Backup.Runner do
   alias Hostctl.Backup
   alias Hostctl.Backup.S3
   alias Hostctl.Repo
-  alias Hostctl.Hosting.{Domain, Subdomain}
+  alias Hostctl.Hosting.{Domain, Subdomain, Database}
 
   import Ecto.Query
 
@@ -196,10 +196,22 @@ defmodule Hostctl.Backup.Runner do
           broadcast_progress("Database backup complete.")
         end
 
+        if settings.backup_mysql do
+          broadcast_progress("Streaming MySQL databases to S3…")
+          stream_mysql_databases_to_s3(settings, prefix)
+          broadcast_progress("MySQL backup complete.")
+        end
+
         if settings.backup_files do
           broadcast_progress("Streaming domain files to S3…")
           stream_domains_to_s3(settings, prefix, tar)
           broadcast_progress("Domain file streaming complete.")
+        end
+
+        if settings.backup_mail do
+          broadcast_progress("Streaming mailboxes to S3…")
+          stream_mail_to_s3(settings, prefix, tar)
+          broadcast_progress("Mailbox streaming complete.")
         end
 
         apply_s3_retention(settings)
@@ -253,10 +265,22 @@ defmodule Hostctl.Backup.Runner do
           broadcast_progress("Database dump complete.")
         end
 
+        if settings.backup_mysql do
+          broadcast_progress("Backing up MySQL databases…")
+          dump_mysql_databases(tmp_dir)
+          broadcast_progress("MySQL dump complete.")
+        end
+
         if settings.backup_files do
           broadcast_progress("Backing up domain files…")
           backup_domain_files(tmp_dir, settings)
           broadcast_progress("Domain files backup complete.")
+        end
+
+        if settings.backup_mail do
+          broadcast_progress("Backing up mailboxes…")
+          backup_mail(tmp_dir)
+          broadcast_progress("Mailbox backup complete.")
         end
 
         broadcast_progress("Creating archive…")
@@ -367,6 +391,82 @@ defmodule Hostctl.Backup.Runner do
     end
   end
 
+  defp mysql_server_config do
+    cfg = Application.get_env(:hostctl, :database_server, [])
+    host = to_string(Keyword.get(cfg, :hostname, "localhost"))
+    port = to_string(Keyword.get(cfg, :port, 3306))
+    username = to_string(Keyword.get(cfg, :username, "root"))
+    password = to_string(Keyword.get(cfg, :password, ""))
+    {host, port, username, password}
+  end
+
+  defp mysql_databases do
+    Repo.all(from d in Database, where: d.db_type == "mysql", select: d.name, order_by: d.name)
+  end
+
+  # Dumps each hosted MySQL database to `tmp_dir/mysql/<name>.sql` using
+  # mysqldump. Skips if no MySQL databases exist.
+  defp dump_mysql_databases(tmp_dir) do
+    databases = mysql_databases()
+    if databases == [], do: :ok
+
+    {host, port, username, password} = mysql_server_config()
+    mysql_dump = System.find_executable("mysqldump") || "mysqldump"
+    mysql_dir = Path.join(tmp_dir, "mysql")
+    File.mkdir_p!(mysql_dir)
+
+    Enum.each(databases, fn db_name ->
+      dump_file = Path.join(mysql_dir, "#{db_name}.sql")
+      broadcast_progress("  → Dumping MySQL database #{db_name}…")
+
+      args = [
+        "--host",
+        host,
+        "--port",
+        port,
+        "--user",
+        username,
+        "--single-transaction",
+        "--routines",
+        "--triggers",
+        "--result-file",
+        dump_file,
+        db_name
+      ]
+
+      case System.cmd(mysql_dump, args,
+             env: [{"MYSQL_PWD", password}],
+             stderr_to_stdout: true
+           ) do
+        {_, 0} ->
+          :ok
+
+        {output, code} ->
+          raise "mysqldump failed for #{db_name} (exit #{code}): #{output}"
+      end
+    end)
+  end
+
+  @mail_base "/var/mail/vhosts"
+
+  # Archives each included domain's mailboxes to `tmp_dir/mail/<domain>.tar.gz`.
+  defp backup_mail(tmp_dir) do
+    domain_names = Backup.mail_backup_domain_names()
+    tar = System.find_executable("tar") || "tar"
+    mail_dir = Path.join(tmp_dir, "mail")
+    File.mkdir_p!(mail_dir)
+
+    Enum.each(domain_names, fn domain_name ->
+      domain_mail = Path.join(@mail_base, domain_name)
+
+      if File.dir?(domain_mail) do
+        archive = Path.join(mail_dir, "#{domain_name}.tar.gz")
+        broadcast_progress("  → Archiving mail for #{domain_name}…")
+        System.cmd(tar, ["-czf", archive, "-C", domain_mail, "."], stderr_to_stdout: true)
+      end
+    end)
+  end
+
   defp backup_domain_files(tmp_dir, settings) do
     included_ids = Backup.file_backup_domain_ids()
     tar = System.find_executable("tar") || "tar"
@@ -458,6 +558,70 @@ defmodule Hostctl.Backup.Runner do
   # ---------------------------------------------------------------------------
   # S3 streaming helpers (zero extra disk usage)
   # ---------------------------------------------------------------------------
+
+  # Runs mysqldump for each hosted MySQL database, gzip-compresses the output
+  # in memory, and uploads each to S3 as `<prefix>/mysql/<name>.sql.gz`.
+  defp stream_mysql_databases_to_s3(settings, prefix) do
+    databases = mysql_databases()
+    if databases == [], do: :ok
+
+    {host, port, username, password} = mysql_server_config()
+    mysql_dump = System.find_executable("mysqldump") || "mysqldump"
+
+    Enum.each(databases, fn db_name ->
+      broadcast_progress("  → Streaming MySQL database #{db_name} to S3…")
+      s3_key = "#{prefix}/mysql/#{db_name}.sql.gz"
+
+      args = [
+        "--host",
+        host,
+        "--port",
+        port,
+        "--user",
+        username,
+        "--single-transaction",
+        "--routines",
+        "--triggers",
+        db_name
+      ]
+
+      case System.cmd(mysql_dump, args,
+             env: [{"MYSQL_PWD", password}],
+             stderr_to_stdout: true
+           ) do
+        {dump_data, 0} ->
+          compressed = :zlib.gzip(dump_data)
+
+          case S3.upload_binary(settings, s3_key, compressed) do
+            {:ok, _} -> :ok
+            {:error, reason} -> raise "MySQL S3 upload failed for #{db_name}: #{reason}"
+          end
+
+        {output, code} ->
+          raise "mysqldump failed for #{db_name} (exit #{code}): #{output}"
+      end
+    end)
+  end
+
+  # Streams each included domain's mailboxes to S3 as `<prefix>/mail/<domain>.tar.gz`.
+  defp stream_mail_to_s3(settings, prefix, tar) do
+    domain_names = Backup.mail_backup_domain_names()
+
+    Enum.each(domain_names, fn domain_name ->
+      domain_mail = Path.join(@mail_base, domain_name)
+
+      if File.dir?(domain_mail) do
+        s3_key = "#{prefix}/mail/#{domain_name}.tar.gz"
+        broadcast_progress("  → Streaming mail for #{domain_name}…")
+        stream = command_to_stream(tar, ["-czf", "-", "-C", domain_mail, "."])
+
+        case S3.upload_stream(settings, s3_key, stream) do
+          {:ok, _} -> :ok
+          {:error, reason} -> raise "S3 mail upload failed for #{domain_name}: #{reason}"
+        end
+      end
+    end)
+  end
 
   # Runs pg_dump, gzip-compresses the output in memory, and uploads to S3.
   # Avoids writing any temp files. Reasonable for database dumps up to a few GB.

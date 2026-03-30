@@ -89,7 +89,8 @@ defmodule Hostctl.Backup do
     )
     |> Repo.all()
     |> Enum.map(fn {domain, setting} ->
-      {domain, setting || %DomainSetting{domain_id: domain.id, include_files: true}}
+      {domain,
+       setting || %DomainSetting{domain_id: domain.id, include_files: true, include_mail: true}}
     end)
   end
 
@@ -121,6 +122,33 @@ defmodule Hostctl.Backup do
         |> DomainSetting.changeset(%{include_files: include_files})
         |> Repo.update()
     end
+  end
+
+  @doc "Upserts the `include_mail` flag for a single domain."
+  def set_domain_include_mail(domain_id, include_mail) when is_boolean(include_mail) do
+    case Repo.get_by(DomainSetting, domain_id: domain_id) do
+      nil ->
+        %DomainSetting{domain_id: domain_id}
+        |> DomainSetting.changeset(%{include_mail: include_mail})
+        |> Repo.insert()
+
+      setting ->
+        setting
+        |> DomainSetting.changeset(%{include_mail: include_mail})
+        |> Repo.update()
+    end
+  end
+
+  @doc "Returns domain names that should have their mail backed up (include_mail is true)."
+  def mail_backup_domain_names do
+    explicitly_excluded =
+      Repo.all(from s in DomainSetting, where: s.include_mail == false, select: s.domain_id)
+
+    Repo.all(
+      from d in Domain,
+        where: d.id not in ^explicitly_excluded,
+        select: d.name
+    )
   end
 
   # ---------------------------------------------------------------------------
@@ -155,7 +183,8 @@ defmodule Hostctl.Backup do
     subs_by_domain = Enum.group_by(subdomain_rows, fn {sub, _} -> sub.domain_id end)
 
     Enum.map(domain_rows, fn {domain, ds} ->
-      domain_setting = ds || %DomainSetting{domain_id: domain.id, include_files: true}
+      domain_setting =
+        ds || %DomainSetting{domain_id: domain.id, include_files: true, include_mail: true}
 
       subdomains =
         subs_by_domain
@@ -176,6 +205,7 @@ defmodule Hostctl.Backup do
         name: domain.name,
         document_root: domain.document_root,
         include_files: domain_setting.include_files,
+        include_mail: domain_setting.include_mail,
         s3_mode: domain_setting.s3_mode,
         subdomains: subdomains
       }

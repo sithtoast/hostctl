@@ -106,6 +106,23 @@ defmodule HostctlWeb.PanelLive.Backup do
 
   @impl true
   def handle_event(
+        "toggle_domain_mail",
+        %{"domain-id" => id_str, "current" => current_str},
+        socket
+      ) do
+    domain_id = String.to_integer(id_str)
+
+    case Backup.set_domain_include_mail(domain_id, current_str != "true") do
+      {:ok, _} ->
+        {:noreply, assign(socket, :domain_groups, Backup.list_domain_groups())}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to update domain mail setting.")}
+    end
+  end
+
+  @impl true
+  def handle_event(
         "set_domain_s3_mode",
         %{"domain-id" => id_str, "mode" => mode},
         socket
@@ -379,6 +396,19 @@ defmodule HostctlWeb.PanelLive.Backup do
                 </label>
                 <label class="flex items-center gap-3 cursor-pointer">
                   <.input
+                    field={@form[:backup_mysql]}
+                    type="checkbox"
+                    class="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span class="text-sm text-gray-700 dark:text-gray-300">
+                    MySQL / MariaDB database dumps
+                    <span class="text-gray-400 dark:text-gray-500 text-xs">
+                      (all hosted databases)
+                    </span>
+                  </span>
+                </label>
+                <label class="flex items-center gap-3 cursor-pointer">
+                  <.input
                     field={@form[:backup_files]}
                     type="checkbox"
                     class="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
@@ -386,6 +416,19 @@ defmodule HostctlWeb.PanelLive.Backup do
                   <span class="text-sm text-gray-700 dark:text-gray-300">
                     Domain document roots
                     <span class="text-gray-400 dark:text-gray-500 text-xs">(may be large)</span>
+                  </span>
+                </label>
+                <label class="flex items-center gap-3 cursor-pointer">
+                  <.input
+                    field={@form[:backup_mail]}
+                    type="checkbox"
+                    class="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span class="text-sm text-gray-700 dark:text-gray-300">
+                    Mailboxes
+                    <span class="text-gray-400 dark:text-gray-500 text-xs">
+                      (per-domain, configurable on Domains tab)
+                    </span>
                   </span>
                 </label>
               </div>
@@ -655,6 +698,9 @@ defmodule HostctlWeb.PanelLive.Backup do
                 <span class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-20 text-center">
                   Include files
                 </span>
+                <span class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-20 text-center">
+                  Include mail
+                </span>
                 <span
                   class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-52 text-center"
                   title={"Global default: #{@setting.s3_mode || "archive"}"}
@@ -721,6 +767,40 @@ defmodule HostctlWeb.PanelLive.Backup do
                           "pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0",
                           "transition duration-200 ease-in-out",
                           if(group.include_files, do: "translate-x-5", else: "translate-x-0")
+                        ]}
+                      />
+                    </button>
+                  </div>
+                  <%!-- Include mail toggle for domain --%>
+                  <div class="w-20 flex justify-center">
+                    <button
+                      id={"toggle-domain-mail-#{group.id}"}
+                      phx-click="toggle_domain_mail"
+                      phx-value-domain-id={group.id}
+                      phx-value-current={to_string(group.include_mail)}
+                      title={
+                        if(group.include_mail,
+                          do: "Mail included – click to exclude",
+                          else: "Mail excluded – click to include"
+                        )
+                      }
+                      class={[
+                        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent",
+                        "transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2",
+                        if(group.include_mail,
+                          do: "bg-indigo-600",
+                          else: "bg-gray-200 dark:bg-gray-700"
+                        )
+                      ]}
+                      role="switch"
+                      aria-checked={to_string(group.include_mail)}
+                    >
+                      <span
+                        aria-hidden="true"
+                        class={[
+                          "pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0",
+                          "transition duration-200 ease-in-out",
+                          if(group.include_mail, do: "translate-x-5", else: "translate-x-0")
                         ]}
                       />
                     </button>
@@ -805,6 +885,8 @@ defmodule HostctlWeb.PanelLive.Backup do
                         />
                       </button>
                     </div>
+                    <%!-- Empty mail column for subdomains (mail is per-domain only) --%>
+                    <div class="w-20"></div>
                     <%!-- S3 mode selector for subdomain --%>
                     <div class="w-52 flex justify-center">
                       <div class="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden text-xs">
@@ -837,8 +919,8 @@ defmodule HostctlWeb.PanelLive.Backup do
               <%!-- Footer note --%>
               <div class="px-6 py-3 bg-gray-50 dark:bg-gray-800/30">
                 <p class="text-xs text-gray-400 dark:text-gray-500">
-                  Controls which domain and subdomain document roots are included when "Domain document roots"
-                  is enabled. The database dump is always global. Changes take effect on the next backup run.
+                  Controls which domain document roots and mailboxes are included in backups.
+                  Mail is per-domain (covers all accounts under that domain). Changes take effect on the next backup run.
                 </p>
               </div>
             </div>
