@@ -116,6 +116,12 @@ defmodule HostctlWeb.Layouts do
               active={@active_tab == :panel_backup}
             />
             <.nav_item
+              icon="hero-archive-box"
+              label="Completed Backups"
+              href={~p"/panel/backups"}
+              active={@active_tab == :panel_completed_backups}
+            />
+            <.nav_item
               icon="hero-adjustments-horizontal"
               label="Panel Settings"
               href={~p"/panel/settings"}

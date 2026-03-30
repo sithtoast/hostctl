@@ -72,9 +72,94 @@ defmodule Hostctl.Backup do
   @doc "Returns a backup log by id, or nil."
   def get_log(id) when is_integer(id), do: Repo.get(Log, id)
 
+  @doc "Lists successful completed backups with optional filters."
+  def list_completed_logs(filters \\ %{}, limit \\ 200) do
+    trigger = Map.get(filters, "trigger", "all")
+    destination = Map.get(filters, "destination", "all")
+    from_date = Map.get(filters, "from_date", "")
+    to_date = Map.get(filters, "to_date", "")
+    query = Map.get(filters, "query", "") |> to_string() |> String.trim() |> String.downcase()
+
+    logs =
+      Log
+      |> where([l], l.status == "success")
+      |> maybe_filter_trigger(trigger)
+      |> maybe_filter_destination(destination)
+      |> maybe_filter_from_date(from_date)
+      |> maybe_filter_to_date(to_date)
+      |> order_by([l], desc: l.completed_at, desc: l.inserted_at)
+      |> limit(^limit)
+      |> Repo.all()
+
+    if query == "" do
+      logs
+    else
+      Enum.filter(logs, &completed_log_matches_query?(&1, query))
+    end
+  end
+
   @doc "Returns true if a backup is currently marked as running."
   def backup_running? do
     Repo.exists?(from l in Log, where: l.status == "running")
+  end
+
+  defp maybe_filter_trigger(query, "all"), do: query
+  defp maybe_filter_trigger(query, nil), do: query
+
+  defp maybe_filter_trigger(query, trigger) do
+    where(query, [l], l.trigger == ^trigger)
+  end
+
+  defp maybe_filter_destination(query, "all"), do: query
+  defp maybe_filter_destination(query, nil), do: query
+
+  defp maybe_filter_destination(query, destination) do
+    where(query, [l], l.destination == ^destination)
+  end
+
+  defp maybe_filter_from_date(query, nil), do: query
+  defp maybe_filter_from_date(query, ""), do: query
+
+  defp maybe_filter_from_date(query, from_date) do
+    case Date.from_iso8601(from_date) do
+      {:ok, date} ->
+        {:ok, start_of_day} = NaiveDateTime.new(date, ~T[00:00:00])
+        where(query, [l], not is_nil(l.completed_at) and l.completed_at >= ^start_of_day)
+
+      _ ->
+        query
+    end
+  end
+
+  defp maybe_filter_to_date(query, nil), do: query
+  defp maybe_filter_to_date(query, ""), do: query
+
+  defp maybe_filter_to_date(query, to_date) do
+    case Date.from_iso8601(to_date) do
+      {:ok, date} ->
+        {:ok, end_of_day} = NaiveDateTime.new(date, ~T[23:59:59])
+        where(query, [l], not is_nil(l.completed_at) and l.completed_at <= ^end_of_day)
+
+      _ ->
+        query
+    end
+  end
+
+  defp completed_log_matches_query?(log, query) do
+    details = log.details || %{}
+    domain_names = Map.get(details, :domain_names) || Map.get(details, "domain_names") || []
+
+    haystack =
+      [
+        log.local_path,
+        log.s3_key,
+        log.destination,
+        log.trigger
+      ] ++ domain_names
+
+    Enum.any?(haystack, fn value ->
+      is_binary(value) and String.contains?(String.downcase(value), query)
+    end)
   end
 
   # ---------------------------------------------------------------------------

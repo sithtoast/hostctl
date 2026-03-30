@@ -64,6 +64,19 @@ defmodule HostctlWeb.PanelLive.Backup do
   end
 
   @impl true
+  def handle_params(%{"restore_log_id" => log_id_str}, _uri, socket) do
+    case Integer.parse(log_id_str) do
+      {log_id, ""} ->
+        {:noreply, load_restore_log_by_id(socket, log_id)}
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "Invalid backup log id.")}
+    end
+  end
+
+  def handle_params(_params, _uri, socket), do: {:noreply, socket}
+
+  @impl true
   def handle_event("switch_tab", %{"tab" => "domains"}, socket) do
     {:noreply,
      socket
@@ -751,72 +764,7 @@ defmodule HostctlWeb.PanelLive.Backup do
   @impl true
   def handle_event("restore_from_log", %{"log-id" => log_id_str}, socket) do
     log_id = String.to_integer(log_id_str)
-
-    case Backup.get_log(log_id) do
-      nil ->
-        {:noreply, put_flash(socket, :error, "Backup log entry not found.")}
-
-      log ->
-        cond do
-          is_binary(log.local_path) and log.local_path != "" and File.exists?(log.local_path) ->
-            case Archive.inspect_archive(log.local_path) do
-              {:ok, inspected} ->
-                {:noreply,
-                 socket
-                 |> clear_previous_temp_archive()
-                 |> assign(:restore_archive_path, log.local_path)
-                 |> assign(:restore_archive_temporary, false)
-                 |> assign(:restore_source_name, Path.basename(log.local_path))
-                 |> assign(:restore_items, inspected.items)
-                 |> assign(:restore_selected, MapSet.new())
-                 |> assign(:restore_index_present, inspected.index_present?)
-                 |> assign(:restore_sql_items, [])
-                 |> assign(:restore_bulk_confirm, false)
-                 |> assign(:restore_dry_run_report, [])
-                 |> put_flash(:info, "Loaded backup from history. Scroll to Restore section.")}
-
-              {:error, reason} when is_binary(reason) ->
-                {:noreply, put_flash(socket, :error, reason)}
-            end
-
-          is_binary(log.s3_key) and archive_key?(log.s3_key) ->
-            ext = if String.ends_with?(log.s3_key, ".tgz"), do: ".tgz", else: ".tar.gz"
-
-            tmp_path =
-              Path.join(
-                System.tmp_dir!(),
-                "hostctl-restore-s3-#{System.system_time(:millisecond)}-#{:erlang.unique_integer([:positive])}#{ext}"
-              )
-
-            with {:ok, ^tmp_path} <- S3.download(socket.assigns.setting, log.s3_key, tmp_path),
-                 {:ok, inspected} <- Archive.inspect_archive(tmp_path) do
-              {:noreply,
-               socket
-               |> clear_previous_temp_archive()
-               |> assign(:restore_archive_path, tmp_path)
-               |> assign(:restore_archive_temporary, true)
-               |> assign(:restore_source_name, log.s3_key)
-               |> assign(:restore_items, inspected.items)
-               |> assign(:restore_selected, MapSet.new())
-               |> assign(:restore_index_present, inspected.index_present?)
-               |> assign(:restore_sql_items, [])
-               |> assign(:restore_bulk_confirm, false)
-               |> assign(:restore_dry_run_report, [])
-               |> put_flash(:info, "Loaded S3 backup from history. Scroll to Restore section.")}
-            else
-              {:error, reason} when is_binary(reason) ->
-                {:noreply, put_flash(socket, :error, reason)}
-            end
-
-          true ->
-            {:noreply,
-             put_flash(
-               socket,
-               :error,
-               "This history entry cannot be opened directly for restore (stream prefix or missing local archive)."
-             )}
-        end
-    end
+    {:noreply, load_restore_log_by_id(socket, log_id)}
   end
 
   @impl true
@@ -919,6 +867,75 @@ defmodule HostctlWeb.PanelLive.Backup do
     end
 
     socket
+  end
+
+  defp load_restore_log_by_id(socket, log_id) do
+    case Backup.get_log(log_id) do
+      nil ->
+        put_flash(socket, :error, "Backup log entry not found.")
+
+      log ->
+        load_restore_log(socket, log)
+    end
+  end
+
+  defp load_restore_log(socket, log) do
+    cond do
+      is_binary(log.local_path) and log.local_path != "" and File.exists?(log.local_path) ->
+        case Archive.inspect_archive(log.local_path) do
+          {:ok, inspected} ->
+            socket
+            |> clear_previous_temp_archive()
+            |> assign(:restore_archive_path, log.local_path)
+            |> assign(:restore_archive_temporary, false)
+            |> assign(:restore_source_name, Path.basename(log.local_path))
+            |> assign(:restore_items, inspected.items)
+            |> assign(:restore_selected, MapSet.new())
+            |> assign(:restore_index_present, inspected.index_present?)
+            |> assign(:restore_sql_items, [])
+            |> assign(:restore_bulk_confirm, false)
+            |> assign(:restore_dry_run_report, [])
+            |> put_flash(:info, "Loaded backup from history. Scroll to Restore section.")
+
+          {:error, reason} when is_binary(reason) ->
+            put_flash(socket, :error, reason)
+        end
+
+      is_binary(log.s3_key) and archive_key?(log.s3_key) ->
+        ext = if String.ends_with?(log.s3_key, ".tgz"), do: ".tgz", else: ".tar.gz"
+
+        tmp_path =
+          Path.join(
+            System.tmp_dir!(),
+            "hostctl-restore-s3-#{System.system_time(:millisecond)}-#{:erlang.unique_integer([:positive])}#{ext}"
+          )
+
+        with {:ok, ^tmp_path} <- S3.download(socket.assigns.setting, log.s3_key, tmp_path),
+             {:ok, inspected} <- Archive.inspect_archive(tmp_path) do
+          socket
+          |> clear_previous_temp_archive()
+          |> assign(:restore_archive_path, tmp_path)
+          |> assign(:restore_archive_temporary, true)
+          |> assign(:restore_source_name, log.s3_key)
+          |> assign(:restore_items, inspected.items)
+          |> assign(:restore_selected, MapSet.new())
+          |> assign(:restore_index_present, inspected.index_present?)
+          |> assign(:restore_sql_items, [])
+          |> assign(:restore_bulk_confirm, false)
+          |> assign(:restore_dry_run_report, [])
+          |> put_flash(:info, "Loaded S3 backup from history. Scroll to Restore section.")
+        else
+          {:error, reason} when is_binary(reason) ->
+            put_flash(socket, :error, reason)
+        end
+
+      true ->
+        put_flash(
+          socket,
+          :error,
+          "This history entry cannot be opened directly for restore (stream prefix or missing local archive)."
+        )
+    end
   end
 
   defp list_restore_sources(_setting) do
