@@ -26,6 +26,7 @@ defmodule Hostctl.Backup.Setting do
     field :backup_mysql, :boolean, default: false
     field :backup_mail, :boolean, default: false
     field :backup_files, :boolean, default: false
+    field :backup_incremental, :boolean, default: false
     field :s3_mode, :string, default: "archive"
 
     timestamps(type: :utc_datetime)
@@ -52,6 +53,7 @@ defmodule Hostctl.Backup.Setting do
     :backup_mysql,
     :backup_mail,
     :backup_files,
+    :backup_incremental,
     :s3_mode
   ]
 

@@ -683,6 +683,19 @@ defmodule HostctlWeb.PanelLive.Backup do
                     <span class="text-gray-400 dark:text-gray-500 text-xs">(may be large)</span>
                   </span>
                 </label>
+                <label class="flex items-center gap-3 cursor-pointer ml-7">
+                  <.input
+                    field={@form[:backup_incremental]}
+                    type="checkbox"
+                    class="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span class="text-sm text-gray-700 dark:text-gray-300">
+                    Incremental file backups
+                    <span class="text-gray-400 dark:text-gray-500 text-xs">
+                      (files only; each run stores changes since last run)
+                    </span>
+                  </span>
+                </label>
                 <label class="flex items-center gap-3 cursor-pointer">
                   <.input
                     field={@form[:backup_mail]}

@@ -42,6 +42,7 @@ defmodule Hostctl.Backup.Runner do
   @schedule_check_interval :timer.minutes(1)
   @pubsub_topic "backup:events"
   @mail_base "/var/mail/vhosts"
+  @incremental_state_dir "/var/lib/hostctl/backup_snapshots"
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -508,7 +509,7 @@ defmodule Hostctl.Backup.Runner do
       try do
         if settings.backup_files do
           broadcast_progress("Backing up domain files for #{domain.name}…")
-          backup_domain_scope_files(tmp_dir, domain)
+          backup_domain_scope_files(tmp_dir, domain, settings)
           broadcast_progress("Domain file backup complete.")
         end
 
@@ -688,6 +689,7 @@ defmodule Hostctl.Backup.Runner do
         database: settings.backup_database,
         mysql: settings.backup_mysql,
         files: settings.backup_files,
+        files_incremental: settings.backup_incremental,
         mail: settings.backup_mail
       },
       domain_names: domain_names,
@@ -714,6 +716,7 @@ defmodule Hostctl.Backup.Runner do
         database: false,
         mysql: false,
         files: settings.backup_files,
+        files_incremental: settings.backup_incremental,
         mail: settings.backup_mail and domain_mail_included?(domain.id)
       },
       domain_names: [domain.name],
@@ -724,7 +727,7 @@ defmodule Hostctl.Backup.Runner do
     }
   end
 
-  defp backup_domain_scope_files(tmp_dir, %Domain{} = domain) do
+  defp backup_domain_scope_files(tmp_dir, %Domain{} = domain, settings) do
     tar = System.find_executable("tar") || "tar"
     files_dir = Path.join(tmp_dir, "domains")
     File.mkdir_p!(files_dir)
@@ -740,10 +743,16 @@ defmodule Hostctl.Backup.Runner do
 
     if (include_domain_files and domain.document_root) && File.dir?(domain.document_root) do
       archive = Path.join(files_dir, "#{domain.name}.tar.gz")
+      snapshot_path = incremental_snapshot_path(settings, "domain", domain.name)
 
       System.cmd(
         tar,
-        tar_args_with_excludes(archive, domain.document_root, domain_excluded_dirs),
+        tar_args_with_excludes(
+          archive,
+          domain.document_root,
+          domain_excluded_dirs,
+          snapshot_path
+        ),
         stderr_to_stdout: true
       )
     end
@@ -761,9 +770,12 @@ defmodule Hostctl.Backup.Runner do
       if ((is_nil(include_files) or include_files) and doc_root) && File.dir?(doc_root) do
         archive = Path.join(files_dir, "#{sub_name}.#{domain.name}.tar.gz")
 
+        snapshot_path =
+          incremental_snapshot_path(settings, "subdomain", "#{sub_name}.#{domain.name}")
+
         System.cmd(
           tar,
-          tar_args_with_excludes(archive, doc_root, excluded_dirs || []),
+          tar_args_with_excludes(archive, doc_root, excluded_dirs || [], snapshot_path),
           stderr_to_stdout: true
         )
       end
@@ -967,6 +979,7 @@ defmodule Hostctl.Backup.Runner do
     Enum.each(domains, fn {_id, name, doc_root, per_mode, excluded_dirs} ->
       effective_mode = per_mode || settings.s3_mode || "archive"
       excluded_dirs = excluded_dirs || []
+      snapshot_path = incremental_snapshot_path(settings, "domain", name)
 
       cond do
         is_nil(doc_root) or not File.dir?(doc_root) ->
@@ -976,7 +989,12 @@ defmodule Hostctl.Backup.Runner do
           prefix = "#{settings.s3_path_prefix || "hostctl-backups"}/domains"
           s3_key = "#{prefix}/#{name}.tar.gz"
           broadcast_progress("  → Streaming #{name} to S3…")
-          stream = command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs))
+
+          stream =
+            command_to_stream(
+              tar,
+              tar_args_with_excludes("-", doc_root, excluded_dirs, snapshot_path)
+            )
 
           case S3.upload_stream(settings, s3_key, stream) do
             {:ok, _} -> :ok
@@ -988,7 +1006,7 @@ defmodule Hostctl.Backup.Runner do
 
           System.cmd(
             tar,
-            tar_args_with_excludes(archive, doc_root, excluded_dirs),
+            tar_args_with_excludes(archive, doc_root, excluded_dirs, snapshot_path),
             stderr_to_stdout: true
           )
       end
@@ -1022,6 +1040,9 @@ defmodule Hostctl.Backup.Runner do
       filename = "#{sub.name}.#{sub.domain_name}.tar.gz"
       excluded_dirs = sub.excluded_dirs || []
 
+      snapshot_path =
+        incremental_snapshot_path(settings, "subdomain", "#{sub.name}.#{sub.domain_name}")
+
       cond do
         is_nil(sub.document_root) or not File.dir?(sub.document_root) ->
           :skip
@@ -1032,7 +1053,10 @@ defmodule Hostctl.Backup.Runner do
           broadcast_progress("  → Streaming #{filename} to S3…")
 
           stream =
-            command_to_stream(tar, tar_args_with_excludes("-", sub.document_root, excluded_dirs))
+            command_to_stream(
+              tar,
+              tar_args_with_excludes("-", sub.document_root, excluded_dirs, snapshot_path)
+            )
 
           case S3.upload_stream(settings, s3_key, stream) do
             {:ok, _} -> :ok
@@ -1044,7 +1068,7 @@ defmodule Hostctl.Backup.Runner do
 
           System.cmd(
             tar,
-            tar_args_with_excludes(archive, sub.document_root, excluded_dirs),
+            tar_args_with_excludes(archive, sub.document_root, excluded_dirs, snapshot_path),
             stderr_to_stdout: true
           )
       end
@@ -1071,6 +1095,7 @@ defmodule Hostctl.Backup.Runner do
 
     if (include_domain_files and domain.document_root) && File.dir?(domain.document_root) do
       effective_mode = domain_s3_mode || "stream"
+      snapshot_path = incremental_snapshot_path(settings, "domain", domain.name)
 
       if effective_mode == "raw" do
         upload_directory_raw_to_s3(
@@ -1085,7 +1110,7 @@ defmodule Hostctl.Backup.Runner do
         stream =
           command_to_stream(
             tar,
-            tar_args_with_excludes("-", domain.document_root, domain_excluded_dirs)
+            tar_args_with_excludes("-", domain.document_root, domain_excluded_dirs, snapshot_path)
           )
 
         case S3.upload_stream(settings, s3_key, stream) do
@@ -1108,6 +1133,7 @@ defmodule Hostctl.Backup.Runner do
       if ((is_nil(include_files) or include_files) and doc_root) && File.dir?(doc_root) do
         base_name = "#{sub_name}.#{domain.name}"
         effective_mode = s3_mode || "stream"
+        snapshot_path = incremental_snapshot_path(settings, "subdomain", base_name)
 
         if effective_mode == "raw" do
           upload_directory_raw_to_s3(
@@ -1121,7 +1147,10 @@ defmodule Hostctl.Backup.Runner do
           s3_key = "#{prefix}/domains/#{filename}"
 
           stream =
-            command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs || []))
+            command_to_stream(
+              tar,
+              tar_args_with_excludes("-", doc_root, excluded_dirs || [], snapshot_path)
+            )
 
           case S3.upload_stream(settings, s3_key, stream) do
             {:ok, _} -> :ok
@@ -1327,13 +1356,14 @@ defmodule Hostctl.Backup.Runner do
       effective_mode = per_mode || "stream"
       archive_name = "#{name}.tar.gz"
       s3_key = "#{prefix}/domains/#{archive_name}"
+      snapshot_path = incremental_snapshot_path(settings, "entry", name)
 
       if effective_mode == "archive" do
         # Per-domain override: tar to a tmp file then upload
         tmp = Path.join(System.tmp_dir!(), "hostctl-override-#{archive_name}")
 
         try do
-          System.cmd(tar, tar_args_with_excludes(tmp, doc_root, excluded_dirs),
+          System.cmd(tar, tar_args_with_excludes(tmp, doc_root, excluded_dirs, snapshot_path),
             stderr_to_stdout: true
           )
 
@@ -1358,7 +1388,12 @@ defmodule Hostctl.Backup.Runner do
           )
         else
           broadcast_progress("  → Streaming #{archive_name}…")
-          stream = command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs))
+
+          stream =
+            command_to_stream(
+              tar,
+              tar_args_with_excludes("-", doc_root, excluded_dirs, snapshot_path)
+            )
 
           case S3.upload_stream(settings, s3_key, stream) do
             {:ok, _} -> :ok
@@ -1369,11 +1404,27 @@ defmodule Hostctl.Backup.Runner do
     end)
   end
 
-  defp tar_args_with_excludes(output_path, root_dir, excluded_dirs) do
+  defp tar_args_with_excludes(output_path, root_dir, excluded_dirs, snapshot_path) do
     ["-czf", output_path]
+    |> maybe_add_incremental_arg(snapshot_path)
     |> Kernel.++(tar_exclude_args(excluded_dirs || []))
     |> Kernel.++(["-C", root_dir, "."])
   end
+
+  defp maybe_add_incremental_arg(args, nil), do: args
+
+  defp maybe_add_incremental_arg(args, snapshot_path) do
+    args ++ ["--listed-incremental=#{snapshot_path}"]
+  end
+
+  defp incremental_snapshot_path(%{backup_incremental: true, backup_files: true}, scope, name)
+       when is_binary(scope) and is_binary(name) do
+    File.mkdir_p!(@incremental_state_dir)
+    safe = String.replace(name, ~r/[^a-zA-Z0-9._-]/, "_")
+    Path.join(@incremental_state_dir, "#{scope}-#{safe}.snar")
+  end
+
+  defp incremental_snapshot_path(_, _, _), do: nil
 
   defp tar_exclude_args(excluded_dirs) do
     excluded_dirs
