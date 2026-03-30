@@ -100,7 +100,7 @@ defmodule HostctlWeb.UpdatesLive do
                 </div>
                 <div class="flex-1 min-w-0">
                   <p class="text-base font-semibold text-amber-900 dark:text-amber-200">
-                    Update available — v{@update_info.release.name}
+                    Update available — {@update_info.release.name}
                     <%= if @update_info.release.prerelease do %>
                       <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-700">
                         pre-release
@@ -112,11 +112,11 @@ defmodule HostctlWeb.UpdatesLive do
                   </p>
                   <div class="mt-3 flex flex-wrap items-center gap-2 text-xs font-mono">
                     <span class="px-2.5 py-1 rounded-full bg-white/60 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-700">
-                      current: {@update_info.current}
+                      current: v{@update_info.current}
                     </span>
                     <.icon name="hero-arrow-right" class="w-3.5 h-3.5 text-amber-500" />
                     <span class="px-2.5 py-1 rounded-full bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700 font-semibold">
-                      latest: {@update_info.latest}
+                      latest: v{@update_info.latest}
                     </span>
                   </div>
                   <%= if @update_info.release.published_at do %>
