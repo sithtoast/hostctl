@@ -116,6 +116,12 @@ defmodule HostctlWeb.Layouts do
               active={@active_tab == :panel_backup}
             />
             <.nav_item
+              icon="hero-arrow-down-on-square-stack"
+              label="Plesk Import"
+              href={~p"/panel/plesk-import"}
+              active={@active_tab == :panel_plesk_import}
+            />
+            <.nav_item
               icon="hero-archive-box"
               label="Completed Backups"
               href={~p"/panel/backups"}
