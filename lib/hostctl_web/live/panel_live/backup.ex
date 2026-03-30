@@ -391,7 +391,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                     class="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                   />
                   <span class="text-sm text-gray-700 dark:text-gray-300">
-                    PostgreSQL database dump
+                    Panel database (Hostctl PostgreSQL)
                   </span>
                 </label>
                 <label class="flex items-center gap-3 cursor-pointer">
@@ -401,7 +401,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                     class="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                   />
                   <span class="text-sm text-gray-700 dark:text-gray-300">
-                    MySQL / MariaDB database dumps
+                    User databases (MySQL / MariaDB / PostgreSQL)
                     <span class="text-gray-400 dark:text-gray-500 text-xs">
                       (all hosted databases)
                     </span>

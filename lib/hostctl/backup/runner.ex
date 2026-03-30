@@ -191,15 +191,15 @@ defmodule Hostctl.Backup.Runner do
     result =
       try do
         if settings.backup_database do
-          broadcast_progress("Streaming database to S3…")
+          broadcast_progress("Streaming panel database to S3…")
           stream_database_to_s3(settings, "#{prefix}/database.sql.gz")
-          broadcast_progress("Database backup complete.")
+          broadcast_progress("Panel database backup complete.")
         end
 
         if settings.backup_mysql do
           broadcast_progress("Streaming MySQL databases to S3…")
-          stream_mysql_databases_to_s3(settings, prefix)
-          broadcast_progress("MySQL backup complete.")
+          stream_user_databases_to_s3(settings, prefix)
+          broadcast_progress("User database backup complete.")
         end
 
         if settings.backup_files do
@@ -260,15 +260,15 @@ defmodule Hostctl.Backup.Runner do
     result =
       try do
         if settings.backup_database do
-          broadcast_progress("Backing up database…")
+          broadcast_progress("Backing up panel database…")
           dump_database(tmp_dir)
-          broadcast_progress("Database dump complete.")
+          broadcast_progress("Panel database dump complete.")
         end
 
         if settings.backup_mysql do
           broadcast_progress("Backing up MySQL databases…")
-          dump_mysql_databases(tmp_dir)
-          broadcast_progress("MySQL dump complete.")
+          dump_user_databases(tmp_dir)
+          broadcast_progress("User database dump complete.")
         end
 
         if settings.backup_files do
@@ -404,12 +404,29 @@ defmodule Hostctl.Backup.Runner do
     Repo.all(from d in Database, where: d.db_type == "mysql", select: d.name, order_by: d.name)
   end
 
-  # Dumps each hosted MySQL database to `tmp_dir/mysql/<name>.sql` using
-  # mysqldump. Skips if no MySQL databases exist.
-  defp dump_mysql_databases(tmp_dir) do
-    databases = mysql_databases()
-    if databases == [], do: :ok
+  defp user_postgresql_databases do
+    Repo.all(
+      from d in Database,
+        where: d.db_type == "postgresql",
+        select: d.name,
+        order_by: d.name
+    )
+  end
 
+  defp postgres_server_config do
+    config = Hostctl.Repo.config()
+    host = to_string(Keyword.get(config, :hostname, "localhost"))
+    port = to_string(Keyword.get(config, :port, 5432))
+    username = to_string(Keyword.get(config, :username))
+    password = to_string(Keyword.get(config, :password) || "")
+    {host, port, username, password}
+  end
+
+  # Dumps each hosted user database to tmp files:
+  #   - MySQL/MariaDB: `tmp_dir/mysql/<name>.sql`
+  #   - PostgreSQL: `tmp_dir/postgresql/<name>.sql`
+  defp dump_user_databases(tmp_dir) do
+    databases = mysql_databases()
     {host, port, username, password} = mysql_server_config()
     mysql_dump = System.find_executable("mysqldump") || "mysqldump"
     mysql_dir = Path.join(tmp_dir, "mysql")
@@ -443,6 +460,43 @@ defmodule Hostctl.Backup.Runner do
 
         {output, code} ->
           raise "mysqldump failed for #{db_name} (exit #{code}): #{output}"
+      end
+    end)
+
+    pg_databases = user_postgresql_databases()
+    {pg_host, pg_port, pg_user, pg_password} = postgres_server_config()
+    pg_dump = System.find_executable("pg_dump") || "pg_dump"
+    pg_dir = Path.join(tmp_dir, "postgresql")
+    File.mkdir_p!(pg_dir)
+
+    Enum.each(pg_databases, fn db_name ->
+      dump_file = Path.join(pg_dir, "#{db_name}.sql")
+      broadcast_progress("  → Dumping PostgreSQL database #{db_name}…")
+
+      args = [
+        "--host",
+        pg_host,
+        "--port",
+        pg_port,
+        "--username",
+        pg_user,
+        "--no-password",
+        "--format",
+        "plain",
+        "--file",
+        dump_file,
+        db_name
+      ]
+
+      case System.cmd(pg_dump, args,
+             env: [{"PGPASSWORD", pg_password}],
+             stderr_to_stdout: true
+           ) do
+        {_, 0} ->
+          :ok
+
+        {output, code} ->
+          raise "pg_dump failed for #{db_name} (exit #{code}): #{output}"
       end
     end)
   end
@@ -559,12 +613,11 @@ defmodule Hostctl.Backup.Runner do
   # S3 streaming helpers (zero extra disk usage)
   # ---------------------------------------------------------------------------
 
-  # Runs mysqldump for each hosted MySQL database, gzip-compresses the output
-  # in memory, and uploads each to S3 as `<prefix>/mysql/<name>.sql.gz`.
-  defp stream_mysql_databases_to_s3(settings, prefix) do
+  # Streams each hosted user database directly to S3:
+  #   - MySQL/MariaDB: `<prefix>/mysql/<name>.sql.gz`
+  #   - PostgreSQL: `<prefix>/postgresql/<name>.sql.gz`
+  defp stream_user_databases_to_s3(settings, prefix) do
     databases = mysql_databases()
-    if databases == [], do: :ok
-
     {host, port, username, password} = mysql_server_config()
     mysql_dump = System.find_executable("mysqldump") || "mysqldump"
 
@@ -599,6 +652,44 @@ defmodule Hostctl.Backup.Runner do
 
         {output, code} ->
           raise "mysqldump failed for #{db_name} (exit #{code}): #{output}"
+      end
+    end)
+
+    pg_databases = user_postgresql_databases()
+    {pg_host, pg_port, pg_user, pg_password} = postgres_server_config()
+    pg_dump = System.find_executable("pg_dump") || "pg_dump"
+
+    Enum.each(pg_databases, fn db_name ->
+      broadcast_progress("  → Streaming PostgreSQL database #{db_name} to S3…")
+      s3_key = "#{prefix}/postgresql/#{db_name}.sql.gz"
+
+      args = [
+        "--host",
+        pg_host,
+        "--port",
+        pg_port,
+        "--username",
+        pg_user,
+        "--no-password",
+        "--format",
+        "plain",
+        db_name
+      ]
+
+      case System.cmd(pg_dump, args,
+             env: [{"PGPASSWORD", pg_password}],
+             stderr_to_stdout: true
+           ) do
+        {dump_data, 0} ->
+          compressed = :zlib.gzip(dump_data)
+
+          case S3.upload_binary(settings, s3_key, compressed) do
+            {:ok, _} -> :ok
+            {:error, reason} -> raise "PostgreSQL S3 upload failed for #{db_name}: #{reason}"
+          end
+
+        {output, code} ->
+          raise "pg_dump failed for #{db_name} (exit #{code}): #{output}"
       end
     end)
   end
