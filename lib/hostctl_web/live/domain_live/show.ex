@@ -3,12 +3,28 @@ defmodule HostctlWeb.DomainLive.Show do
 
   alias Hostctl.Hosting
   alias Hostctl.Hosting.{SslCertificate, Subdomain}
+  alias Hostctl.Accounts.Scope
   alias Hostctl.Settings
   alias Hostctl.WebServer
   alias Hostctl.MailServer
 
   def mount(%{"id" => id}, _session, socket) do
-    domain = Hosting.get_domain!(socket.assigns.current_scope, id)
+    scope = socket.assigns.current_scope
+    is_admin = scope.user.role == "admin"
+
+    domain =
+      if is_admin do
+        Hosting.get_domain_for_admin!(id)
+      else
+        Hosting.get_domain!(scope, id)
+      end
+
+    domain_scope =
+      if is_admin && domain.user_id != scope.user.id do
+        Scope.for_user(domain.user)
+      else
+        scope
+      end
     subdomains = Hosting.list_subdomains(domain)
     ssl_cert = Hosting.get_ssl_certificate(domain)
     cron_jobs = Hosting.list_cron_jobs(domain)
@@ -18,7 +34,7 @@ defmodule HostctlWeb.DomainLive.Show do
     # provisioned before the auto-enable logic was added), fix it now.
     domain =
       if ssl_cert && ssl_cert.status == "active" && !domain.ssl_enabled do
-        case Hosting.update_domain(socket.assigns.current_scope, domain, %{ssl_enabled: true}) do
+        case Hosting.update_domain(domain_scope, domain, %{ssl_enabled: true}) do
           {:ok, updated} -> updated
           _ -> domain
         end
@@ -55,6 +71,7 @@ defmodule HostctlWeb.DomainLive.Show do
      |> stream(:ssl_log_lines, existing_log_lines)
      |> assign(:page_title, domain.name)
      |> assign(:active_tab, :domains)
+     |> assign(:domain_scope, domain_scope)
      |> assign(:domain, domain)
      |> assign(:ssl_cert, ssl_cert)
      |> assign(:active_section, :overview)
@@ -80,7 +97,7 @@ defmodule HostctlWeb.DomainLive.Show do
 
   def handle_info({:ssl_cert_updated, cert}, socket) do
     # Reload domain too so ssl_enabled toggle reflects any auto-update
-    domain = Hosting.get_domain!(socket.assigns.current_scope, cert.domain_id)
+    domain = Hosting.get_domain!(socket.assigns.domain_scope, cert.domain_id)
     {:noreply, socket |> assign(:ssl_cert, cert) |> assign(:domain, domain)}
   end
 
@@ -135,7 +152,7 @@ defmodule HostctlWeb.DomainLive.Show do
   def handle_event("toggle_ssl", _params, socket) do
     domain = socket.assigns.domain
 
-    case Hosting.update_domain(socket.assigns.current_scope, domain, %{
+    case Hosting.update_domain(socket.assigns.domain_scope, domain, %{
            ssl_enabled: !domain.ssl_enabled
          }) do
       {:ok, updated} ->
@@ -443,7 +460,7 @@ defmodule HostctlWeb.DomainLive.Show do
   end
 
   defp assign_ssl_form(socket) do
-    user_email = socket.assigns.current_scope.user.email
+    user_email = socket.assigns.domain_scope.user.email
     changeset = Hosting.change_ssl_certificate(%SslCertificate{}, %{email: user_email})
     assign(socket, :ssl_form, to_form(changeset, as: :ssl_certificate))
   end

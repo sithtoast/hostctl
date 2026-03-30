@@ -3,14 +3,24 @@ defmodule HostctlWeb.DomainLive.Index do
 
   alias Hostctl.Hosting
   alias Hostctl.Hosting.Domain
+  alias Hostctl.Accounts.Scope
 
   def mount(_params, _session, socket) do
-    domains = Hosting.list_domains(socket.assigns.current_scope)
+    scope = socket.assigns.current_scope
+    is_admin = scope.user.role == "admin"
+
+    domains =
+      if is_admin do
+        Hosting.list_all_domains_with_users()
+      else
+        Hosting.list_domains(scope)
+      end
 
     {:ok,
      socket
      |> assign(:page_title, "Domains")
      |> assign(:active_tab, :domains)
+     |> assign(:is_admin?, is_admin)
      |> assign(:domains_empty?, domains == [])
      |> stream(:domains, domains)}
   end
@@ -34,10 +44,30 @@ defmodule HostctlWeb.DomainLive.Index do
   end
 
   def handle_event("delete", %{"id" => id}, socket) do
-    domain = Hosting.get_domain!(socket.assigns.current_scope, id)
-    {:ok, _} = Hosting.delete_domain(socket.assigns.current_scope, domain)
+    scope = socket.assigns.current_scope
 
-    domains = Hosting.list_domains(socket.assigns.current_scope)
+    domain =
+      if socket.assigns.is_admin? do
+        Hosting.get_domain_for_admin!(id)
+      else
+        Hosting.get_domain!(scope, id)
+      end
+
+    domain_scope =
+      if socket.assigns.is_admin? && domain.user_id != scope.user.id do
+        Scope.for_user(domain.user)
+      else
+        scope
+      end
+
+    {:ok, _} = Hosting.delete_domain(domain_scope, domain)
+
+    domains =
+      if socket.assigns.is_admin? do
+        Hosting.list_all_domains_with_users()
+      else
+        Hosting.list_domains(scope)
+      end
 
     {:noreply,
      socket
@@ -80,7 +110,13 @@ defmodule HostctlWeb.DomainLive.Index do
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Domains</h1>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Manage your hosted domains</p>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              <%= if @is_admin? do %>
+                All hosted domains across all users
+              <% else %>
+                Manage your hosted domains
+              <% end %>
+            </p>
           </div>
           <.link
             patch={~p"/domains/new"}
@@ -174,6 +210,11 @@ defmodule HostctlWeb.DomainLive.Index do
                   <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Domain
                   </th>
+                  <%= if @is_admin? do %>
+                    <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Owner
+                    </th>
+                  <% end %>
                   <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     PHP
                   </th>
@@ -208,6 +249,23 @@ defmodule HostctlWeb.DomainLive.Index do
                       </div>
                     </div>
                   </td>
+                  <%= if @is_admin? do %>
+                    <td class="px-6 py-4">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <div class="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 text-xs font-semibold shrink-0">
+                          {String.upcase(String.slice(domain.user.email, 0, 1))}
+                        </div>
+                        <div class="min-w-0">
+                          <%= if domain.user.name do %>
+                            <p class="text-xs font-medium text-gray-900 dark:text-white truncate">{domain.user.name}</p>
+                            <p class="text-xs text-gray-400 truncate">{domain.user.email}</p>
+                          <% else %>
+                            <p class="text-xs text-gray-700 dark:text-gray-300 truncate">{domain.user.email}</p>
+                          <% end %>
+                        </div>
+                      </div>
+                    </td>
+                  <% end %>
                   <td class="px-6 py-4">
                     <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
                       PHP {domain.php_version}

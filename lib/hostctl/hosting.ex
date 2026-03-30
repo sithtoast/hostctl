@@ -49,6 +49,10 @@ defmodule Hostctl.Hosting do
     Repo.get_by!(Domain, id: id, user_id: scope.user.id)
   end
 
+  def get_domain_for_admin!(id) do
+    Repo.get!(Domain, id) |> Repo.preload(:user)
+  end
+
   def get_domain_with_stats!(%Scope{} = scope, id) do
     domain = get_domain!(scope, id)
 
