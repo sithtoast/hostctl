@@ -112,11 +112,11 @@ defmodule HostctlWeb.UpdatesLive do
                   </p>
                   <div class="mt-3 flex flex-wrap items-center gap-2 text-xs font-mono">
                     <span class="px-2.5 py-1 rounded-full bg-white/60 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-700">
-                      current: v{@update_info.current}
+                      current: {@update_info.current}
                     </span>
                     <.icon name="hero-arrow-right" class="w-3.5 h-3.5 text-amber-500" />
                     <span class="px-2.5 py-1 rounded-full bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700 font-semibold">
-                      latest: v{@update_info.latest}
+                      latest: {@update_info.latest}
                     </span>
                   </div>
                   <%= if @update_info.release.published_at do %>
@@ -303,10 +303,9 @@ defmodule HostctlWeb.UpdatesLive do
               <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Release notes</h2>
             </div>
             <div class="px-6 py-5">
-              <pre
-                id="release-notes"
-                class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-sans leading-relaxed"
-              >{@update_info.release.body}</pre>
+              <div id="release-notes" class="release-notes">
+                {render_markdown(@update_info.release.body)}
+              </div>
             </div>
           </div>
         <% end %>
@@ -409,6 +408,12 @@ defmodule HostctlWeb.UpdatesLive do
 
   defp config_snippet_html do
     ~s(# config/config.exs\nconfig :hostctl, :github_repo, "your-org/hostctl")
+    |> Phoenix.HTML.raw()
+  end
+
+  defp render_markdown(text) when is_binary(text) do
+    text
+    |> Earmark.as_html!()
     |> Phoenix.HTML.raw()
   end
 

@@ -4,7 +4,7 @@ defmodule Hostctl.MixProject do
   def project do
     [
       app: :hostctl,
-      version: "0.7.2",
+      version: "0.7.3",
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -67,7 +67,8 @@ defmodule Hostctl.MixProject do
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"}
+      {:bandit, "~> 1.5"},
+      {:earmark, "~> 1.4"}
     ]
   end
 
