@@ -408,9 +408,12 @@ defmodule Hostctl.Hosting do
   # ---------------------------------------------------------------------------
 
   def list_email_accounts(%Domain{} = domain) do
-    Repo.all(
-      from e in EmailAccount, where: e.domain_id == ^domain.id, order_by: [asc: e.username]
-    )
+    accounts =
+      Repo.all(
+        from e in EmailAccount, where: e.domain_id == ^domain.id, order_by: [asc: e.username]
+      )
+
+    Enum.map(accounts, fn a -> %{a | domain: domain} end)
   end
 
   def list_all_email_accounts_with_domains do

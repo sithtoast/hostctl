@@ -313,7 +313,7 @@ defmodule HostctlWeb.EmailLive.Index do
                         {String.upcase(String.slice(account.username, 0, 1))}
                       </div>
                       <p class="text-sm font-medium text-gray-900 dark:text-white">
-                        {account.username}
+                        {account.username}<span class="text-gray-400 dark:text-gray-500 font-normal">@{account.domain.name}</span>
                       </p>
                     </div>
                   </td>
