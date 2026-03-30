@@ -36,6 +36,15 @@ defmodule Hostctl.Hosting do
     Repo.all(from d in Domain, where: d.user_id == ^scope.user.id, order_by: [asc: d.name])
   end
 
+  def list_all_domains_with_users do
+    Repo.all(
+      from d in Domain,
+        join: u in assoc(d, :user),
+        order_by: [asc: d.name],
+        preload: [user: u]
+    )
+  end
+
   def get_domain!(%Scope{} = scope, id) do
     Repo.get_by!(Domain, id: id, user_id: scope.user.id)
   end

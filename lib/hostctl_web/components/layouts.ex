@@ -104,6 +104,12 @@ defmodule HostctlWeb.Layouts do
               active={@active_tab == :panel_settings}
             />
             <.nav_item
+              icon="hero-globe-alt"
+              label="All Domains"
+              href={~p"/panel/domains"}
+              active={@active_tab == :panel_domains}
+            />
+            <.nav_item
               icon="hero-users"
               label="Panel Users"
               href={~p"/panel/users"}
