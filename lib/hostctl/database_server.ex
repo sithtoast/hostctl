@@ -177,21 +177,24 @@ defmodule Hostctl.DatabaseServer do
   end
 
   defp do_create_user(username, password, db_name) do
+    # Username is validated to be alphanumeric + underscores only (see DbUser.changeset),
+    # so interpolation is safe. MariaDB does not accept ? placeholders in user@host position.
     with_connection(fn conn ->
       with :ok <-
-             query(conn, "CREATE USER IF NOT EXISTS ?@'localhost' IDENTIFIED BY ?", [
-               username,
+             query(conn, "CREATE USER IF NOT EXISTS '#{username}'@'localhost' IDENTIFIED BY ?", [
                password
              ]),
            :ok <-
-             query(conn, "CREATE USER IF NOT EXISTS ?@'%' IDENTIFIED BY ?", [username, password]),
+             query(conn, "CREATE USER IF NOT EXISTS '#{username}'@'%' IDENTIFIED BY ?", [
+               password
+             ]),
            :ok <-
              query(
                conn,
-               "GRANT ALL PRIVILEGES ON `#{db_name}`.* TO ?@'localhost'",
-               [username]
+               "GRANT ALL PRIVILEGES ON `#{db_name}`.* TO '#{username}'@'localhost'"
              ),
-           :ok <- query(conn, "GRANT ALL PRIVILEGES ON `#{db_name}`.* TO ?@'%'", [username]),
+           :ok <-
+             query(conn, "GRANT ALL PRIVILEGES ON `#{db_name}`.* TO '#{username}'@'%'"),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
       end
@@ -200,8 +203,8 @@ defmodule Hostctl.DatabaseServer do
 
   defp do_drop_user(username) do
     with_connection(fn conn ->
-      with :ok <- query(conn, "DROP USER IF EXISTS ?@'localhost'", [username]),
-           :ok <- query(conn, "DROP USER IF EXISTS ?@'%'", [username]),
+      with :ok <- query(conn, "DROP USER IF EXISTS '#{username}'@'localhost'"),
+           :ok <- query(conn, "DROP USER IF EXISTS '#{username}'@'%'"),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
       end
@@ -210,8 +213,9 @@ defmodule Hostctl.DatabaseServer do
 
   defp do_update_password(username, password) do
     with_connection(fn conn ->
-      with :ok <- query(conn, "ALTER USER ?@'localhost' IDENTIFIED BY ?", [username, password]),
-           :ok <- query(conn, "ALTER USER ?@'%' IDENTIFIED BY ?", [username, password]),
+      with :ok <-
+             query(conn, "ALTER USER '#{username}'@'localhost' IDENTIFIED BY ?", [password]),
+           :ok <- query(conn, "ALTER USER '#{username}'@'%' IDENTIFIED BY ?", [password]),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
       end
