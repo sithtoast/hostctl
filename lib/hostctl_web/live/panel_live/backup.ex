@@ -158,6 +158,30 @@ defmodule HostctlWeb.PanelLive.Backup do
   end
 
   @impl true
+  def handle_event("run_domain_now", _, %{assigns: %{running: true}} = socket) do
+    {:noreply, put_flash(socket, :error, "A backup is already running.")}
+  end
+
+  def handle_event("run_domain_now", %{"domain-id" => id_str}, socket) do
+    domain_id = String.to_integer(id_str)
+
+    case Runner.run_domain_now(domain_id) do
+      :ok ->
+        {:noreply,
+         socket
+         |> assign(:running, true)
+         |> assign(:progress_messages, [])
+         |> put_flash(:info, "Domain backup started.")}
+
+      {:error, :already_running} ->
+        {:noreply, put_flash(socket, :error, "A backup is already running.")}
+
+      {:error, :not_found} ->
+        {:noreply, put_flash(socket, :error, "Domain not found.")}
+    end
+  end
+
+  @impl true
   def handle_event("run_now", _, %{assigns: %{running: true}} = socket) do
     {:noreply, put_flash(socket, :error, "A backup is already running.")}
   end
@@ -235,6 +259,10 @@ defmodule HostctlWeb.PanelLive.Backup do
   defp day_name(6), do: "Saturday"
   defp day_name(7), do: "Sunday"
   defp day_name(_), do: "Monday"
+
+  defp trigger_label("manual_domain"), do: "Manual Domain"
+  defp trigger_label(nil), do: "Manual"
+  defp trigger_label(other), do: String.capitalize(other)
 
   @impl true
   def render(assigns) do
@@ -731,9 +759,28 @@ defmodule HostctlWeb.PanelLive.Backup do
                   class="flex items-center gap-4 px-6 py-4 hover:bg-gray-50 dark:hover:bg-gray-800/40 transition-colors"
                 >
                   <div class="flex-1 min-w-0">
-                    <p class="text-sm font-medium text-gray-900 dark:text-white truncate">
-                      {group.name}
-                    </p>
+                    <div class="flex items-center gap-2">
+                      <p class="text-sm font-medium text-gray-900 dark:text-white truncate">
+                        {group.name}
+                      </p>
+                      <button
+                        id={"run-domain-backup-#{group.id}"}
+                        phx-click="run_domain_now"
+                        phx-value-domain-id={group.id}
+                        disabled={@running}
+                        class={[
+                          "inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium transition-colors",
+                          if(@running,
+                            do:
+                              "bg-gray-100 text-gray-400 cursor-not-allowed dark:bg-gray-800 dark:text-gray-600",
+                            else:
+                              "bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+                          )
+                        ]}
+                      >
+                        <.icon name="hero-play" class="w-3 h-3" /> One-off
+                      </button>
+                    </div>
                     <p class="text-xs text-gray-400 dark:text-gray-500 truncate mt-0.5">
                       {group.document_root}
                     </p>
@@ -982,10 +1029,12 @@ defmodule HostctlWeb.PanelLive.Backup do
                       "text-xs px-2 py-0.5 rounded-full font-medium",
                       log.trigger == "scheduled" &&
                         "bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400",
+                      log.trigger == "manual_domain" &&
+                        "bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400",
                       log.trigger == "manual" &&
                         "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"
                     ]}>
-                      {String.capitalize(log.trigger || "manual")}
+                      {trigger_label(log.trigger)}
                     </span>
                     <%= if log.destination do %>
                       <span class="text-xs text-gray-400 dark:text-gray-500">

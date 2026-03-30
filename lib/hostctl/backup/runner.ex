@@ -29,12 +29,14 @@ defmodule Hostctl.Backup.Runner do
   alias Hostctl.Backup
   alias Hostctl.Backup.S3
   alias Hostctl.Repo
+  alias Hostctl.Backup.{DomainSetting, SubdomainSetting}
   alias Hostctl.Hosting.{Domain, Subdomain, Database}
 
   import Ecto.Query
 
   @schedule_check_interval :timer.minutes(1)
   @pubsub_topic "backup:events"
+  @mail_base "/var/mail/vhosts"
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -47,6 +49,11 @@ defmodule Hostctl.Backup.Runner do
   @doc "Triggers a manual backup. Returns :ok or {:error, :already_running}."
   def run_now do
     GenServer.call(__MODULE__, :run_now)
+  end
+
+  @doc "Triggers a one-off backup for a specific domain id."
+  def run_domain_now(domain_id) when is_integer(domain_id) do
+    GenServer.call(__MODULE__, {:run_domain_now, domain_id})
   end
 
   @doc "Returns the current runner status map."
@@ -72,6 +79,23 @@ defmodule Hostctl.Backup.Runner do
   def handle_call(:run_now, _from, state) do
     new_state = start_backup("manual", state)
     {:reply, :ok, new_state}
+  end
+
+  def handle_call({:run_domain_now, _domain_id}, _from, %{running: true} = state) do
+    {:reply, {:error, :already_running}, state}
+  end
+
+  def handle_call({:run_domain_now, domain_id}, _from, state) do
+    if Repo.exists?(from d in Domain, where: d.id == ^domain_id) do
+      task =
+        Task.Supervisor.async_nolink(Hostctl.TaskSupervisor, fn ->
+          execute_domain_backup(domain_id)
+        end)
+
+      {:reply, :ok, %{state | running: true, task_ref: task.ref}}
+    else
+      {:reply, {:error, :not_found}, state}
+    end
   end
 
   def handle_call(:status, _from, state) do
@@ -178,6 +202,26 @@ defmodule Hostctl.Backup.Runner do
       execute_stream_backup(log, settings)
     else
       execute_archive_backup(log, settings)
+    end
+  end
+
+  def execute_domain_backup(domain_id) do
+    settings = Backup.get_or_create_settings()
+    domain = Repo.get!(Domain, domain_id)
+
+    {:ok, log} =
+      Backup.create_log(%{
+        trigger: "manual_domain",
+        status: "running",
+        started_at: DateTime.utc_now()
+      })
+
+    broadcast({:backup_started, log.id})
+
+    if settings.s3_enabled and settings.s3_mode == "stream" do
+      execute_stream_domain_backup(log, settings, domain)
+    else
+      execute_archive_domain_backup(log, settings, domain)
     end
   end
 
@@ -349,9 +393,205 @@ defmodule Hostctl.Backup.Runner do
     result
   end
 
+  defp execute_archive_domain_backup(log, settings, domain) do
+    uid = :erlang.unique_integer([:positive])
+    tmp_dir = Path.join(System.tmp_dir!(), "hostctl-domain-backup-#{uid}")
+    timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
+    safe_domain = String.replace(domain.name, ~r/[^a-zA-Z0-9._-]/, "_")
+    archive_name = "hostctl-domain-#{safe_domain}-backup-#{timestamp}.tar.gz"
+    archive_path = Path.join(System.tmp_dir!(), archive_name)
+
+    File.mkdir_p!(tmp_dir)
+
+    result =
+      try do
+        if settings.backup_files do
+          broadcast_progress("Backing up domain files for #{domain.name}…")
+          backup_domain_scope_files(tmp_dir, domain)
+          broadcast_progress("Domain file backup complete.")
+        end
+
+        if settings.backup_mail and domain_mail_included?(domain.id) do
+          broadcast_progress("Backing up mailboxes for #{domain.name}…")
+          backup_domain_mail(tmp_dir, domain.name)
+          broadcast_progress("Mailbox backup complete.")
+        end
+
+        broadcast_progress("Creating archive…")
+        create_archive(archive_path, tmp_dir)
+        {:ok, %File.Stat{size: file_size}} = File.stat(archive_path)
+        broadcast_progress("Archive created (#{format_bytes(file_size)}).")
+
+        local_backup_path =
+          if settings.local_enabled do
+            broadcast_progress("Storing locally…")
+            path = store_local(settings, archive_path, archive_name)
+            broadcast_progress("Stored at #{path}.")
+            path
+          end
+
+        s3_key =
+          if settings.s3_enabled do
+            broadcast_progress("Uploading to S3…")
+            key = upload_to_s3(settings, archive_path, archive_name)
+            broadcast_progress("S3 upload complete.")
+            key
+          end
+
+        destination =
+          cond do
+            settings.local_enabled and settings.s3_enabled -> "both"
+            settings.local_enabled -> "local"
+            settings.s3_enabled -> "s3"
+            true -> "none"
+          end
+
+        if settings.local_enabled, do: apply_local_retention(settings)
+        if settings.s3_enabled, do: apply_s3_retention(settings)
+
+        updates = %{
+          status: "success",
+          completed_at: DateTime.utc_now(),
+          file_size_bytes: file_size,
+          destination: destination,
+          local_path: local_backup_path,
+          s3_key: s3_key
+        }
+
+        {:ok, updated_log} = Backup.update_log(log, updates)
+        broadcast({:backup_completed, updated_log})
+        {:ok, updated_log}
+      rescue
+        e ->
+          message = Exception.message(e)
+          Logger.error("[Backup.Runner] Domain backup failed: #{message}")
+
+          {:ok, failed_log} =
+            Backup.update_log(log, %{
+              status: "failed",
+              completed_at: DateTime.utc_now(),
+              error_message: message
+            })
+
+          broadcast({:backup_failed, failed_log})
+          {:error, message}
+      end
+
+    File.rm_rf(tmp_dir)
+    if File.exists?(archive_path), do: File.rm(archive_path)
+
+    result
+  end
+
+  defp execute_stream_domain_backup(log, settings, domain) do
+    timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
+    safe_domain = String.replace(domain.name, ~r/[^a-zA-Z0-9._-]/, "_")
+
+    prefix =
+      "#{settings.s3_path_prefix || "hostctl-backups"}/hostctl-domain-backup-#{safe_domain}-#{timestamp}"
+
+    tar = System.find_executable("tar") || "tar"
+
+    result =
+      try do
+        if settings.backup_files do
+          broadcast_progress("Streaming domain files for #{domain.name} to S3…")
+          stream_domain_scope_files_to_s3(settings, prefix, tar, domain)
+          broadcast_progress("Domain file streaming complete.")
+        end
+
+        if settings.backup_mail and domain_mail_included?(domain.id) do
+          broadcast_progress("Streaming mailboxes for #{domain.name} to S3…")
+          stream_domain_mail_to_s3(settings, prefix, tar, domain.name)
+          broadcast_progress("Mailbox streaming complete.")
+        end
+
+        apply_s3_retention(settings)
+
+        updates = %{
+          status: "success",
+          completed_at: DateTime.utc_now(),
+          destination: "s3",
+          s3_key: prefix
+        }
+
+        {:ok, updated_log} = Backup.update_log(log, updates)
+        broadcast({:backup_completed, updated_log})
+        {:ok, updated_log}
+      rescue
+        e ->
+          message = Exception.message(e)
+          Logger.error("[Backup.Runner] Domain stream backup failed: #{message}")
+
+          {:ok, failed_log} =
+            Backup.update_log(log, %{
+              status: "failed",
+              completed_at: DateTime.utc_now(),
+              error_message: message
+            })
+
+          broadcast({:backup_failed, failed_log})
+          {:error, message}
+      end
+
+    result
+  end
+
   # ---------------------------------------------------------------------------
   # Backup steps
   # ---------------------------------------------------------------------------
+
+  defp domain_mail_included?(domain_id) do
+    case Repo.get_by(DomainSetting, domain_id: domain_id) do
+      nil -> true
+      %DomainSetting{include_mail: include_mail} -> include_mail
+    end
+  end
+
+  defp backup_domain_scope_files(tmp_dir, %Domain{} = domain) do
+    tar = System.find_executable("tar") || "tar"
+    files_dir = Path.join(tmp_dir, "domains")
+    File.mkdir_p!(files_dir)
+
+    include_domain_files =
+      case Repo.get_by(DomainSetting, domain_id: domain.id) do
+        nil -> true
+        %DomainSetting{include_files: include_files} -> include_files
+      end
+
+    if (include_domain_files and domain.document_root) && File.dir?(domain.document_root) do
+      archive = Path.join(files_dir, "#{domain.name}.tar.gz")
+      System.cmd(tar, ["-czf", archive, "-C", domain.document_root, "."], stderr_to_stdout: true)
+    end
+
+    subdomains =
+      Repo.all(
+        from s in Subdomain,
+          left_join: ss in SubdomainSetting,
+          on: ss.subdomain_id == s.id,
+          where: s.domain_id == ^domain.id,
+          select: {s.name, s.document_root, ss.include_files}
+      )
+
+    Enum.each(subdomains, fn {sub_name, doc_root, include_files} ->
+      if ((is_nil(include_files) or include_files) and doc_root) && File.dir?(doc_root) do
+        archive = Path.join(files_dir, "#{sub_name}.#{domain.name}.tar.gz")
+        System.cmd(tar, ["-czf", archive, "-C", doc_root, "."], stderr_to_stdout: true)
+      end
+    end)
+  end
+
+  defp backup_domain_mail(tmp_dir, domain_name) do
+    domain_mail = Path.join(@mail_base, domain_name)
+
+    if File.dir?(domain_mail) do
+      tar = System.find_executable("tar") || "tar"
+      mail_dir = Path.join(tmp_dir, "mail")
+      File.mkdir_p!(mail_dir)
+      archive = Path.join(mail_dir, "#{domain_name}.tar.gz")
+      System.cmd(tar, ["-czf", archive, "-C", domain_mail, "."], stderr_to_stdout: true)
+    end
+  end
 
   defp dump_database(tmp_dir) do
     config = Hostctl.Repo.config()
@@ -501,8 +741,6 @@ defmodule Hostctl.Backup.Runner do
     end)
   end
 
-  @mail_base "/var/mail/vhosts"
-
   # Archives each included domain's mailboxes to `tmp_dir/mail/<domain>.tar.gz`.
   defp backup_mail(tmp_dir) do
     domain_names = Backup.mail_backup_domain_names()
@@ -612,6 +850,60 @@ defmodule Hostctl.Backup.Runner do
   # ---------------------------------------------------------------------------
   # S3 streaming helpers (zero extra disk usage)
   # ---------------------------------------------------------------------------
+
+  defp stream_domain_scope_files_to_s3(settings, prefix, tar, %Domain{} = domain) do
+    include_domain_files =
+      case Repo.get_by(DomainSetting, domain_id: domain.id) do
+        nil -> true
+        %DomainSetting{include_files: include_files} -> include_files
+      end
+
+    if (include_domain_files and domain.document_root) && File.dir?(domain.document_root) do
+      s3_key = "#{prefix}/domains/#{domain.name}.tar.gz"
+      stream = command_to_stream(tar, ["-czf", "-", "-C", domain.document_root, "."])
+
+      case S3.upload_stream(settings, s3_key, stream) do
+        {:ok, _} -> :ok
+        {:error, reason} -> raise "S3 stream upload failed for #{domain.name}: #{reason}"
+      end
+    end
+
+    subdomains =
+      Repo.all(
+        from s in Subdomain,
+          left_join: ss in SubdomainSetting,
+          on: ss.subdomain_id == s.id,
+          where: s.domain_id == ^domain.id,
+          select: {s.name, s.document_root, ss.include_files}
+      )
+
+    Enum.each(subdomains, fn {sub_name, doc_root, include_files} ->
+      if ((is_nil(include_files) or include_files) and doc_root) && File.dir?(doc_root) do
+        filename = "#{sub_name}.#{domain.name}.tar.gz"
+        s3_key = "#{prefix}/domains/#{filename}"
+        stream = command_to_stream(tar, ["-czf", "-", "-C", doc_root, "."])
+
+        case S3.upload_stream(settings, s3_key, stream) do
+          {:ok, _} -> :ok
+          {:error, reason} -> raise "S3 stream upload failed for #{filename}: #{reason}"
+        end
+      end
+    end)
+  end
+
+  defp stream_domain_mail_to_s3(settings, prefix, tar, domain_name) do
+    domain_mail = Path.join(@mail_base, domain_name)
+
+    if File.dir?(domain_mail) do
+      s3_key = "#{prefix}/mail/#{domain_name}.tar.gz"
+      stream = command_to_stream(tar, ["-czf", "-", "-C", domain_mail, "."])
+
+      case S3.upload_stream(settings, s3_key, stream) do
+        {:ok, _} -> :ok
+        {:error, reason} -> raise "S3 mail upload failed for #{domain_name}: #{reason}"
+      end
+    end
+  end
 
   # Streams each hosted user database directly to S3:
   #   - MySQL/MariaDB: `<prefix>/mysql/<name>.sql.gz`

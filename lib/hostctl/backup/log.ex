@@ -17,7 +17,7 @@ defmodule Hostctl.Backup.Log do
   end
 
   @valid_statuses ~w(pending running success failed)
-  @valid_triggers ~w(manual scheduled)
+  @valid_triggers ~w(manual scheduled manual_domain)
 
   def changeset(log, attrs) do
     log
