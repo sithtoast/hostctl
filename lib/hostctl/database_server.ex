@@ -269,7 +269,7 @@ defmodule Hostctl.DatabaseServer do
   defp escape_string(str) do
     str
     |> String.replace("\\\\", "\\\\\\\\")
-    |> String.replace("'", "''") 
+    |> String.replace("'", "''")
   end
 
   defp enabled?, do: Keyword.get(config(), :enabled, false)
