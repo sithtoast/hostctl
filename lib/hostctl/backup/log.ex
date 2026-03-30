@@ -17,7 +17,7 @@ defmodule Hostctl.Backup.Log do
     timestamps(type: :utc_datetime)
   end
 
-  @valid_statuses ~w(pending running success failed)
+  @valid_statuses ~w(pending running success failed cancelled)
   @valid_triggers ~w(manual scheduled manual_domain)
 
   def changeset(log, attrs) do

@@ -412,6 +412,21 @@ defmodule HostctlWeb.PanelLive.Backup do
   end
 
   @impl true
+  def handle_event("cancel_backup", _, %{assigns: %{running: false}} = socket) do
+    {:noreply, put_flash(socket, :error, "No backup is currently running.")}
+  end
+
+  def handle_event("cancel_backup", _, socket) do
+    case Runner.cancel() do
+      :ok ->
+        {:noreply, put_flash(socket, :info, "Backup cancellation requested.")}
+
+      {:error, :not_running} ->
+        {:noreply, put_flash(socket, :error, "No backup is currently running.")}
+    end
+  end
+
+  @impl true
   def handle_event("set_restore_target", %{"restore_target_dir" => path}, socket) do
     {:noreply, assign(socket, :restore_target_dir, String.trim(path || ""))}
   end
@@ -829,6 +844,18 @@ defmodule HostctlWeb.PanelLive.Backup do
      )}
   end
 
+  def handle_info({:backup_cancelled, log}, socket) do
+    logs = Backup.list_logs()
+
+    {:noreply,
+     socket
+     |> assign(:running, false)
+     |> assign(:progress_messages, [])
+     |> assign(:completed_logs, Enum.filter(logs, &(&1.status == "success")))
+     |> stream(:logs, logs, reset: true)
+     |> put_flash(:info, "Backup cancelled: #{log.error_message || "Backup cancelled by user."}")}
+  end
+
   def handle_info({:backup_failed, log}, socket) do
     logs = Backup.list_logs()
     error = (log && log.error_message) || "Backup failed with an unexpected error."
@@ -1083,40 +1110,51 @@ defmodule HostctlWeb.PanelLive.Backup do
               Back up your database and site files locally and to S3-compatible storage.
             </p>
           </div>
-          <button
-            id="run-backup-btn"
-            phx-click="run_now"
-            disabled={@running}
-            class={[
-              "inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all",
-              if(@running,
-                do:
-                  "bg-gray-200 text-gray-400 cursor-not-allowed dark:bg-gray-700 dark:text-gray-500",
-                else: "bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-sm"
-              )
-            ]}
-          >
-            <%= if @running do %>
-              <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle
-                  class="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  stroke-width="4"
-                />
-                <path
-                  class="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                />
-              </svg>
-              Running…
-            <% else %>
-              <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Run Backup Now
-            <% end %>
-          </button>
+          <div class="flex items-center gap-2">
+            <button
+              :if={@running}
+              id="cancel-backup-btn"
+              phx-click="cancel_backup"
+              class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all bg-red-600 text-white hover:bg-red-700 active:scale-95 shadow-sm"
+            >
+              <.icon name="hero-stop" class="w-4 h-4" /> Cancel Backup
+            </button>
+
+            <button
+              id="run-backup-btn"
+              phx-click="run_now"
+              disabled={@running}
+              class={[
+                "inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all",
+                if(@running,
+                  do:
+                    "bg-gray-200 text-gray-400 cursor-not-allowed dark:bg-gray-700 dark:text-gray-500",
+                  else: "bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-sm"
+                )
+              ]}
+            >
+              <%= if @running do %>
+                <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle
+                    class="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    stroke-width="4"
+                  />
+                  <path
+                    class="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                  />
+                </svg>
+                Running…
+              <% else %>
+                <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Run Backup Now
+              <% end %>
+            </button>
+          </div>
         </div>
 
         <%!-- Progress log (visible while running) --%>
@@ -2350,6 +2388,8 @@ defmodule HostctlWeb.PanelLive.Backup do
                   "shrink-0 inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold",
                   log.status == "success" &&
                     "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
+                  log.status == "cancelled" &&
+                    "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
                   log.status == "failed" &&
                     "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400",
                   log.status == "running" &&
@@ -2360,6 +2400,8 @@ defmodule HostctlWeb.PanelLive.Backup do
                   <%= cond do %>
                     <% log.status == "success" -> %>
                       <.icon name="hero-check-circle" class="w-3.5 h-3.5" /> Success
+                    <% log.status == "cancelled" -> %>
+                      <.icon name="hero-stop-circle" class="w-3.5 h-3.5" /> Cancelled
                     <% log.status == "failed" -> %>
                       <.icon name="hero-x-circle" class="w-3.5 h-3.5" /> Failed
                     <% log.status == "running" -> %>

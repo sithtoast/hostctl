@@ -14,12 +14,16 @@ defmodule Hostctl.Backup.Runner do
   Call `Hostctl.Backup.Runner.run_now/0` to trigger a backup immediately.
   Returns `:ok` or `{:error, :already_running}`.
 
+  Call `Hostctl.Backup.Runner.cancel/0` to cancel the currently running backup.
+  Returns `:ok` or `{:error, :not_running}`.
+
   ## PubSub events
 
   Events are broadcast on the `"backup:events"` topic:
   - `{:backup_started, log_id}`
   - `{:backup_progress, message}`
   - `{:backup_completed, log}`
+  - `{:backup_cancelled, log}`
   - `{:backup_failed, log}`
   """
 
@@ -57,6 +61,11 @@ defmodule Hostctl.Backup.Runner do
     GenServer.call(__MODULE__, {:run_domain_now, domain_id})
   end
 
+  @doc "Cancels the currently running backup task."
+  def cancel do
+    GenServer.call(__MODULE__, :cancel)
+  end
+
   @doc "Returns the current runner status map."
   def status do
     GenServer.call(__MODULE__, :status)
@@ -69,7 +78,9 @@ defmodule Hostctl.Backup.Runner do
   @impl true
   def init(_opts) do
     Process.send_after(self(), :check_schedule, @schedule_check_interval)
-    {:ok, %{running: false, task_ref: nil}}
+
+    {:ok,
+     %{running: false, task_ref: nil, task_pid: nil, current_log_id: nil, cancel_requested: false}}
   end
 
   @impl true
@@ -78,8 +89,10 @@ defmodule Hostctl.Backup.Runner do
   end
 
   def handle_call(:run_now, _from, state) do
-    new_state = start_backup("manual", state)
-    {:reply, :ok, new_state}
+    case start_backup("manual", state) do
+      {:ok, new_state} -> {:reply, :ok, new_state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:run_domain_now, _domain_id}, _from, %{running: true} = state) do
@@ -87,20 +100,32 @@ defmodule Hostctl.Backup.Runner do
   end
 
   def handle_call({:run_domain_now, domain_id}, _from, state) do
-    if Repo.exists?(from d in Domain, where: d.id == ^domain_id) do
-      task =
-        Task.Supervisor.async_nolink(Hostctl.TaskSupervisor, fn ->
-          execute_domain_backup(domain_id)
-        end)
+    case Repo.get(Domain, domain_id) do
+      %Domain{} = domain ->
+        case start_domain_backup(domain, state) do
+          {:ok, new_state} -> {:reply, :ok, new_state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
 
-      {:reply, :ok, %{state | running: true, task_ref: task.ref}}
-    else
-      {:reply, {:error, :not_found}, state}
+      nil ->
+        {:reply, {:error, :not_found}, state}
     end
   end
 
+  def handle_call(:cancel, _from, %{running: false} = state) do
+    {:reply, {:error, :not_running}, state}
+  end
+
+  def handle_call(:cancel, _from, %{task_pid: task_pid} = state) do
+    if is_pid(task_pid) do
+      Process.exit(task_pid, :kill)
+    end
+
+    {:reply, :ok, %{state | cancel_requested: true}}
+  end
+
   def handle_call(:status, _from, state) do
-    {:reply, %{running: state.running}, state}
+    {:reply, %{running: state.running, cancel_requested: state.cancel_requested}, state}
   end
 
   @impl true
@@ -112,7 +137,10 @@ defmodule Hostctl.Backup.Runner do
         settings = Backup.get_or_create_settings()
 
         if settings.schedule_enabled and should_run_now?(settings) do
-          start_backup("scheduled", state)
+          case start_backup("scheduled", state) do
+            {:ok, new_state} -> new_state
+            {:error, _reason} -> state
+          end
         else
           state
         end
@@ -126,14 +154,23 @@ defmodule Hostctl.Backup.Runner do
   # Task completed successfully
   def handle_info({ref, _result}, %{task_ref: ref} = state) do
     Process.demonitor(ref, [:flush])
-    {:noreply, %{state | running: false, task_ref: nil}}
+    {:noreply, clear_task_state(state)}
   end
 
   # Task crashed
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{task_ref: ref} = state) do
-    Logger.error("[Backup.Runner] Backup task crashed: #{inspect(reason)}")
-    broadcast({:backup_failed, nil})
-    {:noreply, %{state | running: false, task_ref: nil}}
+    next_state = clear_task_state(state)
+
+    cond do
+      state.cancel_requested or reason == :killed ->
+        maybe_mark_cancelled(state.current_log_id)
+        {:noreply, next_state}
+
+      true ->
+        Logger.error("[Backup.Runner] Backup task crashed: #{inspect(reason)}")
+        broadcast({:backup_failed, nil})
+        {:noreply, next_state}
+    end
   end
 
   def handle_info(_, state), do: {:noreply, state}
@@ -143,12 +180,70 @@ defmodule Hostctl.Backup.Runner do
   # ---------------------------------------------------------------------------
 
   defp start_backup(trigger, state) do
-    task =
-      Task.Supervisor.async_nolink(Hostctl.TaskSupervisor, fn ->
-        execute_backup(trigger)
-      end)
+    settings = Backup.get_or_create_settings()
 
-    %{state | running: true, task_ref: task.ref}
+    with {:ok, log} <-
+           Backup.create_log(%{
+             trigger: trigger,
+             status: "running",
+             started_at: DateTime.utc_now()
+           }) do
+      task =
+        Task.Supervisor.async_nolink(Hostctl.TaskSupervisor, fn ->
+          execute_backup(log, settings)
+        end)
+
+      broadcast({:backup_started, log.id})
+
+      {:ok,
+       %{
+         state
+         | running: true,
+           task_ref: task.ref,
+           task_pid: task.pid,
+           current_log_id: log.id,
+           cancel_requested: false
+       }}
+    end
+  end
+
+  defp start_domain_backup(%Domain{} = domain, state) do
+    settings = Backup.get_or_create_settings()
+
+    with {:ok, log} <-
+           Backup.create_log(%{
+             trigger: "manual_domain",
+             status: "running",
+             started_at: DateTime.utc_now()
+           }) do
+      task =
+        Task.Supervisor.async_nolink(Hostctl.TaskSupervisor, fn ->
+          execute_domain_backup(log, settings, domain)
+        end)
+
+      broadcast({:backup_started, log.id})
+
+      {:ok,
+       %{
+         state
+         | running: true,
+           task_ref: task.ref,
+           task_pid: task.pid,
+           current_log_id: log.id,
+           cancel_requested: false
+       }}
+    end
+  end
+
+  defp clear_task_state(state) do
+    %{
+      state
+      | running: false,
+        task_ref: nil,
+        task_pid: nil,
+        current_log_id: nil,
+        cancel_requested: false
+    }
   end
 
   defp should_run_now?(%{schedule_frequency: freq} = settings) do
@@ -185,18 +280,7 @@ defmodule Hostctl.Backup.Runner do
   # Backup execution (runs in a supervised Task)
   # ---------------------------------------------------------------------------
 
-  def execute_backup(trigger) do
-    settings = Backup.get_or_create_settings()
-
-    {:ok, log} =
-      Backup.create_log(%{
-        trigger: trigger,
-        status: "running",
-        started_at: DateTime.utc_now()
-      })
-
-    broadcast({:backup_started, log.id})
-
+  def execute_backup(log, settings) do
     # When S3-only streaming mode is selected, stream each piece directly to S3
     # without any local temp files, keeping peak disk usage near zero.
     if settings.s3_enabled and settings.s3_mode == "stream" do
@@ -206,23 +290,31 @@ defmodule Hostctl.Backup.Runner do
     end
   end
 
-  def execute_domain_backup(domain_id) do
-    settings = Backup.get_or_create_settings()
-    domain = Repo.get!(Domain, domain_id)
-
-    {:ok, log} =
-      Backup.create_log(%{
-        trigger: "manual_domain",
-        status: "running",
-        started_at: DateTime.utc_now()
-      })
-
-    broadcast({:backup_started, log.id})
-
+  def execute_domain_backup(log, settings, domain) do
     if settings.s3_enabled and settings.s3_mode == "stream" do
       execute_stream_domain_backup(log, settings, domain)
     else
       execute_archive_domain_backup(log, settings, domain)
+    end
+  end
+
+  defp maybe_mark_cancelled(nil), do: :ok
+
+  defp maybe_mark_cancelled(log_id) do
+    case Backup.get_log(log_id) do
+      %Hostctl.Backup.Log{status: "running"} = log ->
+        {:ok, cancelled_log} =
+          Backup.update_log(log, %{
+            status: "cancelled",
+            completed_at: DateTime.utc_now(),
+            error_message: "Backup cancelled by user."
+          })
+
+        broadcast({:backup_cancelled, cancelled_log})
+        :ok
+
+      _ ->
+        :ok
     end
   end
 
