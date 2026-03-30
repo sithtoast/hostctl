@@ -280,13 +280,6 @@ defmodule Hostctl.Settings do
       description: "DMARC policy"
     },
     %{
-      type: "TXT",
-      name: "_domainconnect.{{domain}}",
-      value: "domainconnect.plesk.com/host/{{hostname}}/port/8443",
-      ttl: 60,
-      description: "Domain connect"
-    },
-    %{
       type: "CNAME",
       name: "ftp.{{domain}}",
       value: "{{domain}}",
