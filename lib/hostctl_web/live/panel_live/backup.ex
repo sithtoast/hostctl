@@ -595,7 +595,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                       id={"toggle-domain-#{group.id}"}
                       phx-click="toggle_domain_files"
                       phx-value-domain-id={group.id}
-                      phx-value-current={group.include_files}
+                      phx-value-current={to_string(group.include_files)}
                       title={
                         if(group.include_files,
                           do: "Included – click to exclude",
@@ -650,7 +650,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                         id={"toggle-subdomain-#{sub.id}"}
                         phx-click="toggle_subdomain_files"
                         phx-value-subdomain-id={sub.id}
-                        phx-value-current={sub.include_files}
+                        phx-value-current={to_string(sub.include_files)}
                         title={
                           if(sub.include_files,
                             do: "Included – click to exclude",
