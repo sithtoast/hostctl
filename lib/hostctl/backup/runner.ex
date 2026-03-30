@@ -1056,27 +1056,42 @@ defmodule Hostctl.Backup.Runner do
   # ---------------------------------------------------------------------------
 
   defp stream_domain_scope_files_to_s3(settings, prefix, tar, %Domain{} = domain) do
-    {include_domain_files, domain_excluded_dirs} =
+    {include_domain_files, domain_excluded_dirs, domain_s3_mode} =
       case Repo.get_by(DomainSetting, domain_id: domain.id) do
         nil ->
-          {true, []}
+          {true, [], nil}
 
-        %DomainSetting{include_files: include_files, excluded_dirs: excluded_dirs} ->
-          {include_files, excluded_dirs || []}
+        %DomainSetting{
+          include_files: include_files,
+          excluded_dirs: excluded_dirs,
+          s3_mode: s3_mode
+        } ->
+          {include_files, excluded_dirs || [], s3_mode}
       end
 
     if (include_domain_files and domain.document_root) && File.dir?(domain.document_root) do
-      s3_key = "#{prefix}/domains/#{domain.name}.tar.gz"
+      effective_mode = domain_s3_mode || "stream"
 
-      stream =
-        command_to_stream(
-          tar,
-          tar_args_with_excludes("-", domain.document_root, domain_excluded_dirs)
+      if effective_mode == "raw" do
+        upload_directory_raw_to_s3(
+          settings,
+          "#{prefix}/domains/#{domain.name}",
+          domain.document_root,
+          domain_excluded_dirs
         )
+      else
+        s3_key = "#{prefix}/domains/#{domain.name}.tar.gz"
 
-      case S3.upload_stream(settings, s3_key, stream) do
-        {:ok, _} -> :ok
-        {:error, reason} -> raise "S3 stream upload failed for #{domain.name}: #{reason}"
+        stream =
+          command_to_stream(
+            tar,
+            tar_args_with_excludes("-", domain.document_root, domain_excluded_dirs)
+          )
+
+        case S3.upload_stream(settings, s3_key, stream) do
+          {:ok, _} -> :ok
+          {:error, reason} -> raise "S3 stream upload failed for #{domain.name}: #{reason}"
+        end
       end
     end
 
@@ -1086,20 +1101,32 @@ defmodule Hostctl.Backup.Runner do
           left_join: ss in SubdomainSetting,
           on: ss.subdomain_id == s.id,
           where: s.domain_id == ^domain.id,
-          select: {s.name, s.document_root, ss.include_files, ss.excluded_dirs}
+          select: {s.name, s.document_root, ss.include_files, ss.excluded_dirs, ss.s3_mode}
       )
 
-    Enum.each(subdomains, fn {sub_name, doc_root, include_files, excluded_dirs} ->
+    Enum.each(subdomains, fn {sub_name, doc_root, include_files, excluded_dirs, s3_mode} ->
       if ((is_nil(include_files) or include_files) and doc_root) && File.dir?(doc_root) do
-        filename = "#{sub_name}.#{domain.name}.tar.gz"
-        s3_key = "#{prefix}/domains/#{filename}"
+        base_name = "#{sub_name}.#{domain.name}"
+        effective_mode = s3_mode || "stream"
 
-        stream =
-          command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs || []))
+        if effective_mode == "raw" do
+          upload_directory_raw_to_s3(
+            settings,
+            "#{prefix}/domains/#{base_name}",
+            doc_root,
+            excluded_dirs || []
+          )
+        else
+          filename = "#{base_name}.tar.gz"
+          s3_key = "#{prefix}/domains/#{filename}"
 
-        case S3.upload_stream(settings, s3_key, stream) do
-          {:ok, _} -> :ok
-          {:error, reason} -> raise "S3 stream upload failed for #{filename}: #{reason}"
+          stream =
+            command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs || []))
+
+          case S3.upload_stream(settings, s3_key, stream) do
+            {:ok, _} -> :ok
+            {:error, reason} -> raise "S3 stream upload failed for #{filename}: #{reason}"
+          end
         end
       end
     end)
@@ -1288,43 +1315,49 @@ defmodule Hostctl.Backup.Runner do
 
     entries =
       Enum.map(domains, fn {name, doc_root, mode, excluded_dirs} ->
-        {"#{name}.tar.gz", doc_root, mode, excluded_dirs || []}
+        {name, doc_root, mode, excluded_dirs || []}
       end) ++
         Enum.map(subdomains, fn {sname, dname, doc_root, mode, excluded_dirs} ->
-          {"#{sname}.#{dname}.tar.gz", doc_root, mode, excluded_dirs || []}
+          {"#{sname}.#{dname}", doc_root, mode, excluded_dirs || []}
         end)
 
     entries
     |> Enum.filter(fn {_, doc_root, _, _} -> doc_root && File.dir?(doc_root) end)
-    |> Enum.each(fn {filename, doc_root, per_mode, excluded_dirs} ->
+    |> Enum.each(fn {name, doc_root, per_mode, excluded_dirs} ->
       effective_mode = per_mode || "stream"
-      s3_key = "#{prefix}/domains/#{filename}"
+      archive_name = "#{name}.tar.gz"
+      s3_key = "#{prefix}/domains/#{archive_name}"
 
       if effective_mode == "archive" do
         # Per-domain override: tar to a tmp file then upload
-        tmp = Path.join(System.tmp_dir!(), "hostctl-override-#{filename}")
+        tmp = Path.join(System.tmp_dir!(), "hostctl-override-#{archive_name}")
 
         try do
           System.cmd(tar, tar_args_with_excludes(tmp, doc_root, excluded_dirs),
             stderr_to_stdout: true
           )
 
-          broadcast_progress("  → Uploading #{filename} (archive override)…")
+          broadcast_progress("  → Uploading #{archive_name} (archive override)…")
 
           case S3.upload(settings, tmp, s3_key) do
             {:ok, _} -> :ok
-            {:error, reason} -> raise "S3 upload failed for #{filename}: #{reason}"
+            {:error, reason} -> raise "S3 upload failed for #{archive_name}: #{reason}"
           end
         after
           File.rm(tmp)
         end
       else
-        broadcast_progress("  → Streaming #{filename}…")
-        stream = command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs))
+        if effective_mode == "raw" do
+          broadcast_progress("  → Uploading raw files for #{name}…")
+          upload_directory_raw_to_s3(settings, "#{prefix}/domains/#{name}", doc_root, excluded_dirs)
+        else
+          broadcast_progress("  → Streaming #{archive_name}…")
+          stream = command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs))
 
-        case S3.upload_stream(settings, s3_key, stream) do
-          {:ok, _} -> :ok
-          {:error, reason} -> raise "S3 stream upload failed for #{filename}: #{reason}"
+          case S3.upload_stream(settings, s3_key, stream) do
+            {:ok, _} -> :ok
+            {:error, reason} -> raise "S3 stream upload failed for #{archive_name}: #{reason}"
+          end
         end
       end
     end)
@@ -1344,6 +1377,60 @@ defmodule Hostctl.Backup.Runner do
     |> Enum.map(&String.trim_leading(&1, "/"))
     |> Enum.reject(&String.contains?(&1, ".."))
     |> Enum.flat_map(fn dir -> ["--exclude", "./#{dir}"] end)
+  end
+
+  defp upload_directory_raw_to_s3(settings, key_prefix, root_dir, excluded_dirs) do
+    normalized_excludes = normalize_excluded_prefixes(excluded_dirs || [])
+    root_path = Path.expand(root_dir)
+
+    list_regular_files(root_path)
+    |> Enum.each(fn path ->
+      rel_path = Path.relative_to(path, root_path)
+      rel_path = String.replace(rel_path, "\\", "/")
+
+      unless excluded_rel_path?(rel_path, normalized_excludes) do
+        s3_key = "#{key_prefix}/#{rel_path}"
+
+        case S3.upload(settings, path, s3_key) do
+          {:ok, _} -> :ok
+          {:error, reason} -> raise "S3 raw upload failed for #{s3_key}: #{reason}"
+        end
+      end
+    end)
+  end
+
+  defp list_regular_files(root_path) do
+    case File.ls(root_path) do
+      {:ok, entries} ->
+        entries
+        |> Enum.flat_map(fn entry ->
+          path = Path.join(root_path, entry)
+
+          cond do
+            File.regular?(path) -> [path]
+            File.dir?(path) -> list_regular_files(path)
+            true -> []
+          end
+        end)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp normalize_excluded_prefixes(excluded_dirs) do
+    excluded_dirs
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&String.trim_leading(&1, "/"))
+    |> Enum.map(&String.replace(&1, "\\", "/"))
+  end
+
+  defp excluded_rel_path?(rel_path, prefixes) do
+    Enum.any?(prefixes, fn prefix ->
+      rel_path == prefix or String.starts_with?(rel_path, prefix <> "/")
+    end)
   end
 
   # Returns a lazy Stream that opens a Port running `executable args` and

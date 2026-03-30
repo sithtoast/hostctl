@@ -362,7 +362,8 @@ defmodule Hostctl.Backup do
   end
 
   @doc "Upserts the `s3_mode` override for a single domain (nil clears override)."
-  def set_domain_s3_mode(domain_id, s3_mode) when s3_mode in ["archive", "stream", nil] do
+  def set_domain_s3_mode(domain_id, s3_mode)
+      when s3_mode in ["archive", "stream", "raw", nil] do
     case Repo.get_by(DomainSetting, domain_id: domain_id) do
       nil ->
         %DomainSetting{domain_id: domain_id}
@@ -377,7 +378,8 @@ defmodule Hostctl.Backup do
   end
 
   @doc "Upserts the `s3_mode` override for a single subdomain (nil clears override)."
-  def set_subdomain_s3_mode(subdomain_id, s3_mode) when s3_mode in ["archive", "stream", nil] do
+  def set_subdomain_s3_mode(subdomain_id, s3_mode)
+      when s3_mode in ["archive", "stream", "raw", nil] do
     case Repo.get_by(SubdomainSetting, subdomain_id: subdomain_id) do
       nil ->
         %SubdomainSetting{subdomain_id: subdomain_id}

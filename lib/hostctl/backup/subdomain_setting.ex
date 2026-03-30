@@ -18,8 +18,8 @@ defmodule Hostctl.Backup.SubdomainSetting do
     setting
     |> cast(attrs, [:include_files, :excluded_dirs, :s3_mode])
     |> validate_required([:include_files])
-    |> validate_inclusion(:s3_mode, ["archive", "stream", nil],
-      message: "must be archive, stream, or unset"
+    |> validate_inclusion(:s3_mode, ["archive", "stream", "raw", nil],
+      message: "must be archive, stream, raw, or unset"
     )
     |> update_change(:excluded_dirs, &normalize_excluded_dirs/1)
   end

@@ -5,11 +5,23 @@
 # Usage:
 #   curl -fsSL https://your-domain.com/install.sh | sudo bash
 #   # or with options:
-#   sudo bash install.sh [OPTIONS]
-#   sudo bash install.sh --interactive
 #   sudo bash install.sh --domain=panel.example.com --skip-nginx --skip-certbot
 #
-# Run with --help for full usage information.
+# Options:
+#   --domain=DOMAIN       Hostname for the panel (required for nginx/certbot)
+#   --db-password=PASS    PostgreSQL password for the hostctl user (auto-generated if omitted)
+#   --app-dir=PATH        Install path (default: /opt/hostctl)
+#   --repo=URL            Git repository URL
+#   --branch=BRANCH       Git branch (default: main)
+#   --skip-nginx          Skip nginx installation and configuration
+#   --skip-certbot        Skip SSL certificate provisioning
+#   --skip-postgres       Skip PostgreSQL installation (use existing)
+#   --skip-mysql          Skip MySQL/MariaDB installation
+#   --db-flavor=FLAVOR    Database flavor: mysql (default) or mariadb
+#   --skip-php            Skip PHP-FPM installation
+#   --reconfigure         Re-run only the configuration/service steps (no build)
+#   --cloudflare          Configure nginx for Cloudflare proxy (HTTP-only origin,
+#                         forces X-Forwarded-Proto: https, skips certbot)
 
 set -euo pipefail
 
@@ -63,111 +75,7 @@ step()    { echo -e "\n${BOLD}==> $*${NC}"; }
 cleanup() { rm -rf "$DOWNLOAD_DIR"; }
 trap cleanup EXIT
 
-# --- Help ---------------------------------------------------------------------
-usage() {
-  echo -e ""
-  echo -e "${BOLD}Hostctl Installer${NC}"
-  echo -e "Supported OS: Ubuntu 22.04/24.04, Debian 12"
-  echo -e ""
-  echo -e "${BOLD}USAGE${NC}"
-  echo -e "  sudo bash install.sh [OPTIONS]"
-  echo -e "  curl -fsSL https://your-domain.com/install.sh | sudo bash"
-  echo -e ""
-  echo -e "${BOLD}OPTIONS${NC}"
-  echo -e "  ${CYAN}-i, --interactive${NC}          Prompt for all settings before installing"
-  echo -e "  ${CYAN}    --domain=DOMAIN${NC}        Hostname for the panel  ${YELLOW}(required for nginx/certbot)${NC}"
-  echo -e "  ${CYAN}    --db-password=PASS${NC}     PostgreSQL password      ${YELLOW}(auto-generated if omitted)${NC}"
-  echo -e "  ${CYAN}    --app-dir=PATH${NC}         Install path             ${YELLOW}(default: /opt/hostctl)${NC}"
-  echo -e "  ${CYAN}    --repo=URL${NC}             Git repository URL"
-  echo -e "  ${CYAN}    --branch=BRANCH${NC}        Git branch               ${YELLOW}(default: main)${NC}"
-  echo -e "  ${CYAN}    --db-flavor=FLAVOR${NC}     mysql or mariadb         ${YELLOW}(default: mysql)${NC}"
-  echo -e ""
-  echo -e "${BOLD}SKIP FLAGS${NC}"
-  echo -e "  ${CYAN}    --skip-nginx${NC}           Skip nginx installation and configuration"
-  echo -e "  ${CYAN}    --skip-certbot${NC}         Skip SSL certificate provisioning"
-  echo -e "  ${CYAN}    --skip-postgres${NC}        Skip PostgreSQL installation (use existing)"
-  echo -e "  ${CYAN}    --skip-mysql${NC}           Skip MySQL/MariaDB installation"
-  echo -e "  ${CYAN}    --skip-php${NC}             Skip PHP-FPM installation"
-  echo -e ""
-  echo -e "${BOLD}OTHER FLAGS${NC}"
-  echo -e "  ${CYAN}    --cloudflare${NC}           Nginx HTTP-only origin behind Cloudflare proxy"
-  echo -e "                             (forces X-Forwarded-Proto: https, skips certbot)"
-  echo -e "  ${CYAN}    --reconfigure${NC}          Re-run only config/service steps (no build)"
-  echo -e "  ${CYAN}-h, --help${NC}                 Show this help message"
-  echo -e ""
-  echo -e "${BOLD}EXAMPLES${NC}"
-  echo -e "  sudo bash install.sh --interactive"
-  echo -e "  sudo bash install.sh --domain=panel.example.com"
-  echo -e "  sudo bash install.sh --domain=panel.example.com --skip-nginx --skip-certbot"
-  echo -e "  sudo bash install.sh --domain=panel.example.com --cloudflare"
-  echo -e "  sudo bash install.sh --reconfigure --domain=panel.example.com"
-  echo -e ""
-}
-
-# --- Interactive wizard -------------------------------------------------------
-interactive_setup() {
-  echo -e ""
-  echo -e "${BOLD}${CYAN}Hostctl Interactive Installer${NC}"
-  echo -e "Press ${BOLD}Enter${NC} to accept the value shown in ${BOLD}[brackets]${NC}."
-  echo -e ""
-
-  # Domain
-  local _default_domain="${DOMAIN:-}"
-  read -rp "$(echo -e "  ${BOLD}Panel domain / hostname${NC} (e.g. panel.example.com)${_default_domain:+ [${_default_domain}]}: ")" _in
-  [[ -n "$_in" ]] && DOMAIN="$_in"
-
-  # App directory
-  read -rp "$(echo -e "  ${BOLD}Install path${NC} [${APP_DIR}]: ")" _in
-  [[ -n "$_in" ]] && APP_DIR="$_in"
-
-  # DB password
-  local _pw_hint
-  if [[ -n "$DB_PASSWORD" ]]; then
-    _pw_hint="$DB_PASSWORD"
-  else
-    _pw_hint="<auto-generate>"
-  fi
-  read -rp "$(echo -e "  ${BOLD}PostgreSQL password for hostctl user${NC} [${_pw_hint}]: ")" _in
-  [[ -n "$_in" ]] && DB_PASSWORD="$_in"
-
-  # DB flavor
-  read -rp "$(echo -e "  ${BOLD}MySQL flavor${NC} (mysql/mariadb) [${MYSQL_FLAVOR}]: ")" _in
-  [[ -n "$_in" ]] && MYSQL_FLAVOR="$_in"
-
-  # Skip MySQL
-  read -rp "$(echo -e "  ${BOLD}Skip MySQL/MariaDB installation?${NC} (already installed) [$([ "$SKIP_MYSQL" == true ] && echo 'yes' || echo 'no')]: ")" _in
-  case "${_in,,}" in y|yes) SKIP_MYSQL=true ;; n|no) SKIP_MYSQL=false ;; esac
-
-  # Skip Nginx
-  read -rp "$(echo -e "  ${BOLD}Skip Nginx installation?${NC} [$([ "$SKIP_NGINX" == true ] && echo 'yes' || echo 'no')]: ")" _in
-  case "${_in,,}" in y|yes) SKIP_NGINX=true ;; n|no) SKIP_NGINX=false ;; esac
-
-  if [[ "$SKIP_NGINX" == false ]]; then
-    # Cloudflare proxy
-    read -rp "$(echo -e "  ${BOLD}Behind Cloudflare proxy?${NC} (skips certbot) [$([ "$CLOUDFLARE_PROXY" == true ] && echo 'yes' || echo 'no')]: ")" _in
-    case "${_in,,}" in y|yes) CLOUDFLARE_PROXY=true ;; n|no) CLOUDFLARE_PROXY=false ;; esac
-
-    if [[ "$CLOUDFLARE_PROXY" == false ]]; then
-      # Skip certbot
-      read -rp "$(echo -e "  ${BOLD}Skip Certbot / SSL?${NC} [$([ "$SKIP_CERTBOT" == true ] && echo 'yes' || echo 'no')]: ")" _in
-      case "${_in,,}" in y|yes) SKIP_CERTBOT=true ;; n|no) SKIP_CERTBOT=false ;; esac
-    fi
-  fi
-
-  # Skip Postgres
-  read -rp "$(echo -e "  ${BOLD}Skip PostgreSQL installation?${NC} (already installed) [$([ "$SKIP_POSTGRES" == true ] && echo 'yes' || echo 'no')]: ")" _in
-  case "${_in,,}" in y|yes) SKIP_POSTGRES=true ;; n|no) SKIP_POSTGRES=false ;; esac
-
-  # Skip PHP
-  read -rp "$(echo -e "  ${BOLD}Skip PHP-FPM installation?${NC} [$([ "$SKIP_PHP" == true ] && echo 'yes' || echo 'no')]: ")" _in
-  case "${_in,,}" in y|yes) SKIP_PHP=true ;; n|no) SKIP_PHP=false ;; esac
-
-  echo -e ""
-}
-
 # --- Argument parsing ---------------------------------------------------------
-INTERACTIVE=false
-
 for arg in "$@"; do
   case "$arg" in
     --domain=*)       DOMAIN="${arg#*=}" ;;
@@ -183,13 +91,13 @@ for arg in "$@"; do
     --skip-php)       SKIP_PHP=true ;;
     --reconfigure)    RECONFIGURE=true ;;
     --cloudflare)     CLOUDFLARE_PROXY=true ;;
-    --interactive|-i) INTERACTIVE=true ;;
-    --help|-h)        usage; exit 0 ;;
+    --help|-h)
+      grep '^#' "$0" | grep -v '#!/' | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
     *) error "Unknown option: $arg" ;;
   esac
 done
-
-[[ "$INTERACTIVE" == true ]] && interactive_setup
 
 # Cloudflare proxy mode skips certbot for the panel itself (Cloudflare terminates TLS
 # for the control panel), but certbot + the dns-cloudflare plugin are still installed
@@ -306,7 +214,6 @@ echo -e "  Erlang/OTP    : $OTP_MAJOR  (rabbitmq/rabbitmq-erlang PPA)"
 echo -e "  Elixir        : $ELIXIR_VERSION  (github.com/elixir-lang/elixir)"
 echo -e "  PostgreSQL    : $POSTGRES_MAJOR  (postgresql.org apt repo)"
 echo -e "  Database      : $DB_FLAVOR_LABEL  ($DB_PACKAGES)"
-echo -e "  FTP service   : vsftpd"
 echo -e "  App directory : $APP_DIR"
 echo -e "  System user   : $SERVICE_USER"
 echo -e "  Database      : $DB_NAME"
@@ -381,10 +288,6 @@ apt-get install -y --no-install-recommends \
   --download-only \
   build-essential git libssl-dev unzip locales >/dev/null
 
-info "Pre-downloading FTP packages..."
-apt-get install -y --no-install-recommends --download-only \
-  vsftpd db-util >/dev/null
-
 if [[ "$SKIP_NGINX" == false ]] && ! command -v nginx &>/dev/null; then
   apt-get install -y --no-install-recommends --download-only nginx >/dev/null
 fi
@@ -423,14 +326,13 @@ success "All prerequisites downloaded. No system changes made yet -- starting in
 step "Installing system packages"
 
 apt-get install -y --no-install-recommends \
-  build-essential git libssl-dev unzip locales vsftpd db-util
+  build-essential git libssl-dev unzip locales
 
 if ! locale -a 2>/dev/null | grep -q "en_US.utf8"; then
   locale-gen en_US.UTF-8
 fi
 update-locale LANG=en_US.UTF-8
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-systemctl enable --now vsftpd >/dev/null 2>&1 || true
 success "System packages installed"
 
 # 2b. Erlang (from PPA cache) + Elixir (from downloaded zip) ------------------
@@ -790,7 +692,6 @@ Requires=postgresql.service
 Type=exec
 User=$SERVICE_USER
 Group=$SERVICE_USER
-SupplementaryGroups=adm
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
 ExecStart=$APP_DIR/bin/server

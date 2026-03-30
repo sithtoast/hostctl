@@ -2,10 +2,7 @@ defmodule HostctlWeb.PanelLive.Backup do
   use HostctlWeb, :live_view
 
   alias Hostctl.Backup
-  alias Hostctl.Backup.Archive
-  alias Hostctl.Backup.Restore
   alias Hostctl.Backup.Runner
-  alias Hostctl.Backup.S3
 
   @pubsub_topic "backup:events"
 
@@ -20,61 +17,20 @@ defmodule HostctlWeb.PanelLive.Backup do
     logs = Backup.list_logs()
     running = Backup.backup_running?()
     domain_groups = Backup.list_domain_groups()
-    db_targets = Backup.restore_database_targets()
 
-    {restore_local_archives, restore_s3_archives, restore_sources_error} =
-      list_restore_sources(setting)
-
-    socket =
-      socket
-      |> allow_upload(:restore_archive,
-        accept: :any,
-        max_entries: 1,
-        max_file_size: 5_368_709_120,
-        auto_upload: false
-      )
-      |> assign(:page_title, "Backup")
-      |> assign(:active_tab, :panel_backup)
-      |> assign(:setting, setting)
-      |> assign(:form, form)
-      |> assign(:settings_tab, :local)
-      |> assign(:running, running)
-      |> assign(:progress_messages, [])
-      |> assign(:exclude_picker, nil)
-      |> assign(:domain_groups, domain_groups)
-      |> assign(:restore_archive_path, nil)
-      |> assign(:restore_archive_temporary, false)
-      |> assign(:restore_source_name, nil)
-      |> assign(:restore_items, [])
-      |> assign(:restore_selected, MapSet.new())
-      |> assign(:restore_target_dir, "/var/backups/hostctl/restore-staging")
-      |> assign(:restore_index_present, false)
-      |> assign(:restore_local_archives, restore_local_archives)
-      |> assign(:restore_s3_archives, restore_s3_archives)
-      |> assign(:restore_sources_error, restore_sources_error)
-      |> assign(:restore_sql_items, [])
-      |> assign(:restore_mysql_target, List.first(db_targets.mysql) || "")
-      |> assign(:restore_postgresql_target, List.first(db_targets.postgresql) || "")
-      |> assign(:restore_db_targets, db_targets)
-      |> assign(:restore_bulk_confirm, false)
-      |> assign(:restore_dry_run_report, [])
-      |> assign(:completed_logs, Enum.filter(logs, &(&1.status == "success")))
-
-    {:ok, stream(socket, :logs, logs)}
+    {:ok,
+     socket
+     |> assign(:page_title, "Backup")
+     |> assign(:active_tab, :panel_backup)
+     |> assign(:setting, setting)
+     |> assign(:form, form)
+     |> assign(:settings_tab, :local)
+     |> assign(:running, running)
+     |> assign(:progress_messages, [])
+     |> assign(:exclude_picker, nil)
+     |> assign(:domain_groups, domain_groups)
+     |> stream(:logs, logs)}
   end
-
-  @impl true
-  def handle_params(%{"restore_log_id" => log_id_str}, _uri, socket) do
-    case Integer.parse(log_id_str) do
-      {log_id, ""} ->
-        {:noreply, load_restore_log_by_id(socket, log_id)}
-
-      _ ->
-        {:noreply, put_flash(socket, :error, "Invalid backup log id.")}
-    end
-  end
-
-  def handle_params(_params, _uri, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("switch_tab", %{"tab" => "domains"}, socket) do
@@ -116,11 +72,7 @@ defmodule HostctlWeb.PanelLive.Backup do
 
             case File.mkdir_p(local_path) do
               :ok ->
-                put_flash(
-                  socket,
-                  :info,
-                  "Backup settings saved. Local directory #{local_path} is ready."
-                )
+                put_flash(socket, :info, "Backup settings saved. Local directory #{local_path} is ready.")
 
               {:error, reason} ->
                 put_flash(
@@ -425,349 +377,6 @@ defmodule HostctlWeb.PanelLive.Backup do
   end
 
   @impl true
-  def handle_event("cancel_backup", _, %{assigns: %{running: false}} = socket) do
-    {:noreply, put_flash(socket, :error, "No backup is currently running.")}
-  end
-
-  def handle_event("cancel_backup", _, socket) do
-    case Runner.cancel() do
-      :ok ->
-        {:noreply, put_flash(socket, :info, "Backup cancellation requested.")}
-
-      {:error, :not_running} ->
-        {:noreply, put_flash(socket, :error, "No backup is currently running.")}
-    end
-  end
-
-  @impl true
-  def handle_event("set_restore_target", %{"restore_target_dir" => path}, socket) do
-    {:noreply, assign(socket, :restore_target_dir, String.trim(path || ""))}
-  end
-
-  @impl true
-  def handle_event("set_restore_db_target", %{"kind" => kind, "value" => value}, socket) do
-    value = String.trim(value || "")
-
-    case kind do
-      "mysql" -> {:noreply, assign(socket, :restore_mysql_target, value)}
-      "postgresql" -> {:noreply, assign(socket, :restore_postgresql_target, value)}
-      _ -> {:noreply, socket}
-    end
-  end
-
-  @impl true
-  def handle_event("toggle_restore_bulk_confirm", _, socket) do
-    {:noreply, assign(socket, :restore_bulk_confirm, not socket.assigns.restore_bulk_confirm)}
-  end
-
-  @impl true
-  def handle_event("dry_run_restored_sql", %{"id" => item_id}, socket) do
-    case Enum.find(socket.assigns.restore_sql_items, &(&1.id == item_id)) do
-      nil ->
-        {:noreply, put_flash(socket, :error, "SQL dump item not found.")}
-
-      item ->
-        target_db = target_for_sql_item(item, socket)
-
-        case Restore.preview_sql(item.kind, item.full_path, target_db) do
-          {:ok, preview} ->
-            lines =
-              ["Dry run OK: #{item.rel_path}"] ++
-                preview.details ++
-                Enum.map(preview.warnings, &"Warning: #{&1}")
-
-            {:noreply,
-             socket
-             |> assign(:restore_dry_run_report, lines)
-             |> put_flash(:info, "Dry run passed for #{item.rel_path}.")}
-
-          {:error, reason} when is_binary(reason) ->
-            {:noreply,
-             socket
-             |> assign(:restore_dry_run_report, ["Dry run failed: #{item.rel_path}", reason])
-             |> put_flash(:error, reason)}
-        end
-    end
-  end
-
-  @impl true
-  def handle_event("dry_run_all_restored_sql", _, socket) do
-    if socket.assigns.restore_sql_items == [] do
-      {:noreply, put_flash(socket, :error, "No extracted SQL dumps available.")}
-    else
-      {ok_count, errors, report_lines} =
-        dry_run_all_sql_items(socket.assigns.restore_sql_items, socket)
-
-      total = length(socket.assigns.restore_sql_items)
-
-      socket = assign(socket, :restore_dry_run_report, report_lines)
-
-      if errors == [] do
-        {:noreply, put_flash(socket, :info, "Dry run passed for #{ok_count}/#{total} SQL dumps.")}
-      else
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Dry run found issues: #{ok_count}/#{total} SQL dumps passed."
-         )}
-      end
-    end
-  end
-
-  @impl true
-  def handle_event("refresh_restore_sources", _, socket) do
-    {local_archives, s3_archives, error} = list_restore_sources(socket.assigns.setting)
-
-    {:noreply,
-     socket
-     |> assign(:restore_local_archives, local_archives)
-     |> assign(:restore_s3_archives, s3_archives)
-     |> assign(:restore_sources_error, error)}
-  end
-
-  @impl true
-  def handle_event("analyze_local_archive", %{"path" => path}, socket) do
-    case Archive.inspect_archive(path) do
-      {:ok, inspected} ->
-        {:noreply,
-         socket
-         |> clear_previous_temp_archive()
-         |> assign(:restore_archive_path, path)
-         |> assign(:restore_archive_temporary, false)
-         |> assign(:restore_source_name, Path.basename(path))
-         |> assign(:restore_items, inspected.items)
-         |> assign(:restore_selected, MapSet.new())
-         |> assign(:restore_index_present, inspected.index_present?)
-         |> assign(:restore_sql_items, [])
-         |> assign(:restore_bulk_confirm, false)
-         |> assign(:restore_dry_run_report, [])
-         |> put_flash(:info, "Local archive analyzed. Choose entries to extract.")}
-
-      {:error, reason} when is_binary(reason) ->
-        {:noreply, put_flash(socket, :error, reason)}
-    end
-  end
-
-  @impl true
-  def handle_event("analyze_s3_archive", %{"key" => key}, socket) do
-    ext = if String.ends_with?(key, ".tgz"), do: ".tgz", else: ".tar.gz"
-
-    tmp_path =
-      Path.join(
-        System.tmp_dir!(),
-        "hostctl-restore-s3-#{System.system_time(:millisecond)}-#{:erlang.unique_integer([:positive])}#{ext}"
-      )
-
-    with {:ok, ^tmp_path} <- S3.download(socket.assigns.setting, key, tmp_path),
-         {:ok, inspected} <- Archive.inspect_archive(tmp_path) do
-      {:noreply,
-       socket
-       |> clear_previous_temp_archive()
-       |> assign(:restore_archive_path, tmp_path)
-       |> assign(:restore_archive_temporary, true)
-       |> assign(:restore_source_name, key)
-       |> assign(:restore_items, inspected.items)
-       |> assign(:restore_selected, MapSet.new())
-       |> assign(:restore_index_present, inspected.index_present?)
-       |> assign(:restore_sql_items, [])
-       |> assign(:restore_bulk_confirm, false)
-       |> assign(:restore_dry_run_report, [])
-       |> put_flash(:info, "S3 archive analyzed. Choose entries to extract.")}
-    else
-      {:error, reason} when is_binary(reason) ->
-        {:noreply, put_flash(socket, :error, reason)}
-    end
-  end
-
-  @impl true
-  def handle_event("analyze_restore_archive", _, socket) do
-    with {:ok, archive_path, source_name, socket} <- consume_uploaded_archive(socket),
-         {:ok, inspected} <- Archive.inspect_archive(archive_path) do
-      {:noreply,
-       socket
-       |> clear_previous_temp_archive()
-       |> assign(:restore_archive_path, archive_path)
-       |> assign(:restore_archive_temporary, true)
-       |> assign(:restore_source_name, source_name)
-       |> assign(:restore_items, inspected.items)
-       |> assign(:restore_selected, MapSet.new())
-       |> assign(:restore_index_present, inspected.index_present?)
-       |> assign(:restore_sql_items, [])
-       |> assign(:restore_bulk_confirm, false)
-       |> assign(:restore_dry_run_report, [])
-       |> put_flash(:info, "Archive analyzed. Choose entries to extract.")}
-    else
-      {:error, :no_file} ->
-        {:noreply, put_flash(socket, :error, "Select a backup archive first.")}
-
-      {:error, reason} when is_binary(reason) ->
-        {:noreply, put_flash(socket, :error, reason)}
-    end
-  end
-
-  @impl true
-  def handle_event("toggle_restore_item", %{"path" => path}, socket) do
-    selected =
-      if MapSet.member?(socket.assigns.restore_selected, path) do
-        MapSet.delete(socket.assigns.restore_selected, path)
-      else
-        MapSet.put(socket.assigns.restore_selected, path)
-      end
-
-    {:noreply, assign(socket, :restore_selected, selected)}
-  end
-
-  @impl true
-  def handle_event("clear_restore_archive", _, socket) do
-    {:noreply,
-     socket
-     |> clear_previous_temp_archive()
-     |> assign(:restore_archive_path, nil)
-     |> assign(:restore_archive_temporary, false)
-     |> assign(:restore_source_name, nil)
-     |> assign(:restore_items, [])
-     |> assign(:restore_selected, MapSet.new())
-     |> assign(:restore_index_present, false)
-     |> assign(:restore_sql_items, [])
-     |> assign(:restore_bulk_confirm, false)
-     |> assign(:restore_dry_run_report, [])}
-  end
-
-  @impl true
-  def handle_event("restore_selected_items", _, socket) do
-    selected_members =
-      socket.assigns.restore_items
-      |> Enum.filter(&MapSet.member?(socket.assigns.restore_selected, &1.path))
-      |> Enum.map(& &1.tar_member)
-
-    with archive_path when is_binary(archive_path) <- socket.assigns.restore_archive_path,
-         false <- selected_members == [],
-         false <- socket.assigns.restore_target_dir in [nil, ""],
-         {:ok, destination} <-
-           Archive.extract_selected(
-             archive_path,
-             selected_members,
-             socket.assigns.restore_target_dir
-           ) do
-      sql_items = Archive.list_sql_dumps(destination)
-
-      {:noreply,
-       socket
-       |> put_flash(
-         :info,
-         "Selected items extracted to #{destination}. " <>
-           if(sql_items == [], do: "", else: "SQL imports are ready below.")
-       )
-       |> assign(:restore_sql_items, sql_items)
-       |> assign(:restore_bulk_confirm, false)
-       |> assign(:restore_dry_run_report, [])
-       |> assign(:restore_selected, MapSet.new())}
-    else
-      nil ->
-        {:noreply, put_flash(socket, :error, "Analyze an archive before restoring.")}
-
-      true ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Choose at least one item and provide a restore destination directory."
-         )}
-
-      {:error, :nothing_selected} ->
-        {:noreply, put_flash(socket, :error, "Choose at least one item to extract.")}
-
-      {:error, reason} when is_binary(reason) ->
-        {:noreply, put_flash(socket, :error, reason)}
-
-      {:error, _reason} ->
-        {:noreply, put_flash(socket, :error, "Selective restore failed.")}
-    end
-  end
-
-  @impl true
-  def handle_event("import_all_restored_sql", _, socket) do
-    cond do
-      socket.assigns.restore_sql_items == [] ->
-        {:noreply, put_flash(socket, :error, "No extracted SQL dumps available to import.")}
-
-      socket.assigns.restore_bulk_confirm != true ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Confirm bulk SQL import first. This operation can overwrite existing data."
-         )}
-
-      true ->
-        {dry_ok_count, dry_errors, dry_report_lines} =
-          dry_run_all_sql_items(socket.assigns.restore_sql_items, socket)
-
-        socket = assign(socket, :restore_dry_run_report, dry_report_lines)
-
-        if dry_errors != [] do
-          {:noreply,
-           put_flash(
-             socket,
-             :error,
-             "Bulk import blocked: dry run found issues (#{dry_ok_count}/#{length(socket.assigns.restore_sql_items)} passed)."
-           )}
-        else
-          {ok_count, errors} = import_all_sql_items(socket.assigns.restore_sql_items, socket)
-          total = length(socket.assigns.restore_sql_items)
-
-          if errors == [] do
-            {:noreply,
-             socket
-             |> put_flash(:info, "Imported #{ok_count}/#{total} SQL dumps successfully.")
-             |> assign(:restore_bulk_confirm, false)}
-          else
-            preview = errors |> Enum.take(2) |> Enum.join(" | ")
-
-            {:noreply,
-             put_flash(
-               socket,
-               :error,
-               "Bulk import completed with errors: #{ok_count}/#{total} succeeded. #{preview}"
-             )}
-          end
-        end
-    end
-  end
-
-  @impl true
-  def handle_event("import_restored_sql", %{"id" => item_id}, socket) do
-    case Enum.find(socket.assigns.restore_sql_items, &(&1.id == item_id)) do
-      nil ->
-        {:noreply, put_flash(socket, :error, "SQL dump item not found.")}
-
-      item ->
-        target_db = target_for_sql_item(item, socket)
-
-        case Restore.import_sql(item.kind, item.full_path, target_db) do
-          :ok ->
-            {:noreply,
-             put_flash(
-               socket,
-               :info,
-               "Imported #{item.rel_path}" <>
-                 if(target_db in [nil, ""], do: "", else: " into #{target_db}") <> "."
-             )}
-
-          {:error, reason} when is_binary(reason) ->
-            {:noreply, put_flash(socket, :error, reason)}
-        end
-    end
-  end
-
-  @impl true
-  def handle_event("restore_from_log", %{"log-id" => log_id_str}, socket) do
-    log_id = String.to_integer(log_id_str)
-    {:noreply, load_restore_log_by_id(socket, log_id)}
-  end
-
-  @impl true
   def handle_info({:backup_started, _log_id}, socket) do
     {:noreply, socket |> assign(:running, true) |> assign(:progress_messages, [])}
   end
@@ -784,24 +393,11 @@ defmodule HostctlWeb.PanelLive.Backup do
      socket
      |> assign(:running, false)
      |> assign(:progress_messages, [])
-     |> assign(:completed_logs, Enum.filter(logs, &(&1.status == "success")))
      |> stream(:logs, logs, reset: true)
      |> put_flash(
        :info,
        "Backup completed successfully (#{format_bytes(log.file_size_bytes || 0)})."
      )}
-  end
-
-  def handle_info({:backup_cancelled, log}, socket) do
-    logs = Backup.list_logs()
-
-    {:noreply,
-     socket
-     |> assign(:running, false)
-     |> assign(:progress_messages, [])
-     |> assign(:completed_logs, Enum.filter(logs, &(&1.status == "success")))
-     |> stream(:logs, logs, reset: true)
-     |> put_flash(:info, "Backup cancelled: #{log.error_message || "Backup cancelled by user."}")}
   end
 
   def handle_info({:backup_failed, log}, socket) do
@@ -812,7 +408,6 @@ defmodule HostctlWeb.PanelLive.Backup do
      socket
      |> assign(:running, false)
      |> assign(:progress_messages, [])
-     |> assign(:completed_logs, Enum.filter(logs, &(&1.status == "success")))
      |> stream(:logs, logs, reset: true)
      |> put_flash(:error, "Backup failed: #{error}")}
   end
@@ -822,218 +417,6 @@ defmodule HostctlWeb.PanelLive.Backup do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
-
-  defp consume_uploaded_archive(socket) do
-    uploaded =
-      consume_uploaded_entries(socket, :restore_archive, fn %{path: temp_path}, entry ->
-        ext = if String.ends_with?(entry.client_name, ".tgz"), do: ".tgz", else: ".tar.gz"
-
-        destination =
-          Path.join(
-            System.tmp_dir!(),
-            "hostctl-restore-#{System.system_time(:millisecond)}-#{:erlang.unique_integer([:positive])}#{ext}"
-          )
-
-        File.cp!(temp_path, destination)
-        {:ok, %{path: destination, name: entry.client_name}}
-      end)
-
-    case uploaded do
-      [%{path: archive_path, name: source_name}] ->
-        if valid_restore_archive_name?(source_name) do
-          {:ok, archive_path, source_name, socket}
-        else
-          File.rm(archive_path)
-          {:error, "Only .tar.gz and .tgz backup archives are supported."}
-        end
-
-      _ ->
-        {:error, :no_file}
-    end
-  end
-
-  defp valid_restore_archive_name?(name) when is_binary(name) do
-    String.ends_with?(name, ".tar.gz") or String.ends_with?(name, ".tgz")
-  end
-
-  defp valid_restore_archive_name?(_), do: false
-
-  defp clear_previous_temp_archive(socket) do
-    path = socket.assigns[:restore_archive_path]
-    temporary? = socket.assigns[:restore_archive_temporary] == true
-
-    if temporary? and is_binary(path) and File.exists?(path) do
-      File.rm(path)
-    end
-
-    socket
-  end
-
-  defp load_restore_log_by_id(socket, log_id) do
-    case Backup.get_log(log_id) do
-      nil ->
-        put_flash(socket, :error, "Backup log entry not found.")
-
-      log ->
-        load_restore_log(socket, log)
-    end
-  end
-
-  defp load_restore_log(socket, log) do
-    cond do
-      is_binary(log.local_path) and log.local_path != "" and File.exists?(log.local_path) ->
-        case Archive.inspect_archive(log.local_path) do
-          {:ok, inspected} ->
-            socket
-            |> clear_previous_temp_archive()
-            |> assign(:restore_archive_path, log.local_path)
-            |> assign(:restore_archive_temporary, false)
-            |> assign(:restore_source_name, Path.basename(log.local_path))
-            |> assign(:restore_items, inspected.items)
-            |> assign(:restore_selected, MapSet.new())
-            |> assign(:restore_index_present, inspected.index_present?)
-            |> assign(:restore_sql_items, [])
-            |> assign(:restore_bulk_confirm, false)
-            |> assign(:restore_dry_run_report, [])
-            |> put_flash(:info, "Loaded backup from history. Scroll to Restore section.")
-
-          {:error, reason} when is_binary(reason) ->
-            put_flash(socket, :error, reason)
-        end
-
-      is_binary(log.s3_key) and archive_key?(log.s3_key) ->
-        ext = if String.ends_with?(log.s3_key, ".tgz"), do: ".tgz", else: ".tar.gz"
-
-        tmp_path =
-          Path.join(
-            System.tmp_dir!(),
-            "hostctl-restore-s3-#{System.system_time(:millisecond)}-#{:erlang.unique_integer([:positive])}#{ext}"
-          )
-
-        with {:ok, ^tmp_path} <- S3.download(socket.assigns.setting, log.s3_key, tmp_path),
-             {:ok, inspected} <- Archive.inspect_archive(tmp_path) do
-          socket
-          |> clear_previous_temp_archive()
-          |> assign(:restore_archive_path, tmp_path)
-          |> assign(:restore_archive_temporary, true)
-          |> assign(:restore_source_name, log.s3_key)
-          |> assign(:restore_items, inspected.items)
-          |> assign(:restore_selected, MapSet.new())
-          |> assign(:restore_index_present, inspected.index_present?)
-          |> assign(:restore_sql_items, [])
-          |> assign(:restore_bulk_confirm, false)
-          |> assign(:restore_dry_run_report, [])
-          |> put_flash(:info, "Loaded S3 backup from history. Scroll to Restore section.")
-        else
-          {:error, reason} when is_binary(reason) ->
-            put_flash(socket, :error, reason)
-        end
-
-      true ->
-        put_flash(
-          socket,
-          :error,
-          "This history entry cannot be opened directly for restore (stream prefix or missing local archive)."
-        )
-    end
-  end
-
-  defp list_restore_sources(_setting) do
-    local_archives = Backup.list_restore_local_archives()
-
-    case Backup.list_restore_s3_archives() do
-      {:ok, s3_archives} -> {local_archives, s3_archives, nil}
-      {:error, reason} -> {local_archives, [], "S3 archive list unavailable: #{reason}"}
-    end
-  end
-
-  defp import_all_sql_items(items, socket) do
-    Enum.reduce(items, {0, []}, fn item, {ok_count, errors} ->
-      target_db = target_for_sql_item(item, socket)
-
-      case Restore.import_sql(item.kind, item.full_path, target_db) do
-        :ok ->
-          {ok_count + 1, errors}
-
-        {:error, reason} when is_binary(reason) ->
-          {ok_count, ["#{item.rel_path}: #{reason}" | errors]}
-      end
-    end)
-  end
-
-  defp dry_run_all_sql_items(items, socket) do
-    Enum.reduce(items, {0, [], []}, fn item, {ok_count, errors, lines} ->
-      target_db = target_for_sql_item(item, socket)
-
-      case Restore.preview_sql(item.kind, item.full_path, target_db) do
-        {:ok, preview} ->
-          ok_lines = ["OK: #{item.rel_path}"] ++ Enum.map(preview.warnings, &"Warning: #{&1}")
-          {ok_count + 1, errors, lines ++ ok_lines}
-
-        {:error, reason} when is_binary(reason) ->
-          {ok_count, ["#{item.rel_path}: #{reason}" | errors],
-           lines ++ ["FAIL: #{item.rel_path} -> #{reason}"]}
-      end
-    end)
-  end
-
-  defp target_for_sql_item(item, socket) do
-    case item.kind do
-      "mysql" -> socket.assigns.restore_mysql_target
-      "postgresql" -> socket.assigns.restore_postgresql_target
-      _ -> nil
-    end
-  end
-
-  defp archive_key?(value) when is_binary(value) do
-    String.ends_with?(value, ".tar.gz") or String.ends_with?(value, ".tgz")
-  end
-
-  defp archive_key?(_), do: false
-
-  defp display_domain_count(log) do
-    log
-    |> domain_names_from_log()
-    |> length()
-  end
-
-  defp display_domain_preview(log) do
-    names = domain_names_from_log(log)
-
-    case names do
-      [] -> ""
-      many -> many |> Enum.take(3) |> Enum.join(", ")
-    end
-  end
-
-  defp domain_names_from_log(log) do
-    details = log.details || %{}
-    names = Map.get(details, :domain_names) || Map.get(details, "domain_names") || []
-
-    names
-    |> Enum.filter(&is_binary/1)
-    |> Enum.uniq()
-  end
-
-  defp restore_kind_label("panel_postgresql"), do: "Panel DB"
-  defp restore_kind_label("mysql"), do: "MySQL"
-  defp restore_kind_label("postgresql"), do: "PostgreSQL"
-  defp restore_kind_label("domain_files"), do: "Domain Files"
-  defp restore_kind_label("mail"), do: "Mail"
-  defp restore_kind_label(_), do: "Item"
-
-  defp error_to_string(:too_large), do: "File is too large"
-  defp error_to_string(:not_accepted), do: "Unsupported file type"
-  defp error_to_string(:too_many_files), do: "Too many files selected"
-  defp error_to_string(_), do: "Upload error"
-
-  defp safe_dom_id(value) when is_binary(value) do
-    value
-    |> String.replace(~r/[^a-zA-Z0-9_-]/, "-")
-    |> String.trim("-")
-  end
-
-  defp safe_dom_id(value), do: to_string(value)
 
   defp format_bytes(nil), do: "—"
 
@@ -1127,51 +510,40 @@ defmodule HostctlWeb.PanelLive.Backup do
               Back up your database and site files locally and to S3-compatible storage.
             </p>
           </div>
-          <div class="flex items-center gap-2">
-            <button
-              :if={@running}
-              id="cancel-backup-btn"
-              phx-click="cancel_backup"
-              class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all bg-red-600 text-white hover:bg-red-700 active:scale-95 shadow-sm"
-            >
-              <.icon name="hero-stop" class="w-4 h-4" /> Cancel Backup
-            </button>
-
-            <button
-              id="run-backup-btn"
-              phx-click="run_now"
-              disabled={@running}
-              class={[
-                "inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all",
-                if(@running,
-                  do:
-                    "bg-gray-200 text-gray-400 cursor-not-allowed dark:bg-gray-700 dark:text-gray-500",
-                  else: "bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-sm"
-                )
-              ]}
-            >
-              <%= if @running do %>
-                <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle
-                    class="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    stroke-width="4"
-                  />
-                  <path
-                    class="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                  />
-                </svg>
-                Running…
-              <% else %>
-                <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Run Backup Now
-              <% end %>
-            </button>
-          </div>
+          <button
+            id="run-backup-btn"
+            phx-click="run_now"
+            disabled={@running}
+            class={[
+              "inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all",
+              if(@running,
+                do:
+                  "bg-gray-200 text-gray-400 cursor-not-allowed dark:bg-gray-700 dark:text-gray-500",
+                else: "bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-sm"
+              )
+            ]}
+          >
+            <%= if @running do %>
+              <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle
+                  class="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  stroke-width="4"
+                />
+                <path
+                  class="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
+              </svg>
+              Running…
+            <% else %>
+              <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Run Backup Now
+            <% end %>
+          </button>
         </div>
 
         <%!-- Progress log (visible while running) --%>
@@ -1725,7 +1097,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                   <%!-- S3 mode selector for domain --%>
                   <div class="w-52 flex justify-center">
                     <div class="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden text-xs">
-                      <%= for {label, val} <- [{"Global", "global"}, {"Archive", "archive"}, {"Stream", "stream"}] do %>
+                      <%= for {label, val} <- [{"Global", "global"}, {"Archive", "archive"}, {"Stream", "stream"}, {"Raw", "raw"}] do %>
                         <button
                           id={"domain-s3mode-#{group.id}-#{val}"}
                           phx-click="set_domain_s3_mode"
@@ -1818,7 +1190,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                     <%!-- S3 mode selector for subdomain --%>
                     <div class="w-52 flex justify-center">
                       <div class="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden text-xs">
-                        <%= for {label, val} <- [{"Global", "global"}, {"Archive", "archive"}, {"Stream", "stream"}] do %>
+                        <%= for {label, val} <- [{"Global", "global"}, {"Archive", "archive"}, {"Stream", "stream"}, {"Raw", "raw"}] do %>
                           <button
                             id={"subdomain-s3mode-#{sub.id}-#{val}"}
                             phx-click="set_subdomain_s3_mode"
@@ -1977,410 +1349,6 @@ defmodule HostctlWeb.PanelLive.Backup do
           </div>
         <% end %>
 
-        <%!-- Restore card --%>
-        <div class="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-800 overflow-hidden">
-          <div class="px-6 py-5 border-b border-gray-200 dark:border-gray-800">
-            <h2 class="text-base font-semibold text-gray-900 dark:text-white">Restore</h2>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Upload a backup archive, inspect contents, then extract only the parts you want into a restore staging directory.
-            </p>
-          </div>
-
-          <div class="p-6 space-y-5">
-            <div class="rounded-xl border border-gray-200 dark:border-gray-800 p-4 space-y-4 bg-gray-50/50 dark:bg-gray-800/20">
-              <div class="flex items-center justify-between gap-3">
-                <p class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Saved backup sources
-                </p>
-                <button
-                  id="refresh-restore-sources"
-                  type="button"
-                  phx-click="refresh_restore_sources"
-                  class="px-3 py-1.5 rounded-md bg-gray-100 text-gray-700 text-xs font-medium hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-                >
-                  Refresh
-                </button>
-              </div>
-
-              <%= if @restore_sources_error do %>
-                <p class="text-xs text-amber-600 dark:text-amber-400">{@restore_sources_error}</p>
-              <% end %>
-
-              <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <div class="space-y-2">
-                  <p class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">
-                    Local archives
-                  </p>
-                  <div class="max-h-40 overflow-auto rounded-lg border border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800">
-                    <%= if @restore_local_archives == [] do %>
-                      <div class="px-3 py-3 text-xs text-gray-400 dark:text-gray-500">
-                        No local archives found.
-                      </div>
-                    <% end %>
-                    <%= for archive <- @restore_local_archives do %>
-                      <div class="px-3 py-2.5 flex items-center gap-2">
-                        <div class="flex-1 min-w-0">
-                          <p class="text-xs text-gray-700 dark:text-gray-300 truncate">
-                            {archive.name}
-                          </p>
-                        </div>
-                        <button
-                          id={"analyze-local-archive-#{safe_dom_id(archive.name)}"}
-                          type="button"
-                          phx-click="analyze_local_archive"
-                          phx-value-path={archive.path}
-                          class="px-2 py-1 rounded-md bg-indigo-50 text-indigo-700 text-xs font-medium hover:bg-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-300"
-                        >
-                          Analyze
-                        </button>
-                      </div>
-                    <% end %>
-                  </div>
-                </div>
-
-                <div class="space-y-2">
-                  <p class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">
-                    S3 archives
-                  </p>
-                  <div class="max-h-40 overflow-auto rounded-lg border border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800">
-                    <%= if @restore_s3_archives == [] do %>
-                      <div class="px-3 py-3 text-xs text-gray-400 dark:text-gray-500">
-                        No S3 archives found.
-                      </div>
-                    <% end %>
-                    <%= for object <- @restore_s3_archives do %>
-                      <div class="px-3 py-2.5 flex items-center gap-2">
-                        <div class="flex-1 min-w-0">
-                          <p class="text-xs text-gray-700 dark:text-gray-300 truncate">
-                            {object.key}
-                          </p>
-                          <p class="text-[11px] text-gray-400 dark:text-gray-500 truncate">
-                            {object.last_modified || ""}
-                          </p>
-                        </div>
-                        <button
-                          id={"analyze-s3-archive-#{safe_dom_id(object.key)}"}
-                          type="button"
-                          phx-click="analyze_s3_archive"
-                          phx-value-key={object.key}
-                          class="px-2 py-1 rounded-md bg-indigo-50 text-indigo-700 text-xs font-medium hover:bg-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-300"
-                        >
-                          Analyze
-                        </button>
-                      </div>
-                    <% end %>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <.form
-              for={%{}}
-              as={:restore}
-              id="restore-analyze-form"
-              phx-submit="analyze_restore_archive"
-            >
-              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div class="space-y-2">
-                  <label
-                    class="text-sm font-medium text-gray-700 dark:text-gray-300"
-                    for="restore-archive-input"
-                  >
-                    Backup archive
-                  </label>
-                  <.live_file_input
-                    upload={@uploads.restore_archive}
-                    id="restore-archive-input"
-                    class="block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-50 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-indigo-700 hover:file:bg-indigo-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
-                  />
-                  <%= for err <- upload_errors(@uploads.restore_archive) do %>
-                    <p class="text-xs text-red-500 dark:text-red-400">{error_to_string(err)}</p>
-                  <% end %>
-                </div>
-
-                <div class="space-y-2">
-                  <label
-                    class="text-sm font-medium text-gray-700 dark:text-gray-300"
-                    for="restore-target-dir"
-                  >
-                    Restore destination
-                  </label>
-                  <input
-                    id="restore-target-dir"
-                    name="restore_target_dir"
-                    type="text"
-                    value={@restore_target_dir}
-                    phx-change="set_restore_target"
-                    class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
-                    placeholder="/var/backups/hostctl/restore-staging"
-                  />
-                  <p class="text-xs text-gray-400 dark:text-gray-500">
-                    Selected entries are extracted into a timestamped folder under this path.
-                  </p>
-                </div>
-              </div>
-
-              <div class="mt-4 flex items-center gap-2">
-                <button
-                  id="analyze-restore-archive"
-                  type="submit"
-                  class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition-colors"
-                >
-                  Analyze archive
-                </button>
-                <button
-                  id="clear-restore-archive"
-                  type="button"
-                  phx-click="clear_restore_archive"
-                  class="px-4 py-2 rounded-lg bg-gray-100 text-gray-600 text-sm font-medium hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700 transition-colors"
-                >
-                  Clear
-                </button>
-              </div>
-            </.form>
-
-            <%= if @restore_source_name do %>
-              <div class="rounded-xl border border-gray-200 dark:border-gray-800 p-4 space-y-2 bg-gray-50/50 dark:bg-gray-800/30">
-                <p class="text-sm text-gray-700 dark:text-gray-300">
-                  Source archive: <span class="font-medium">{@restore_source_name}</span>
-                </p>
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  Index file: {if @restore_index_present,
-                    do: "found",
-                    else: "not found (using tar scan)"}
-                </p>
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  Selective entries available: {length(@restore_items)}
-                </p>
-              </div>
-            <% end %>
-
-            <%= if @restore_items != [] do %>
-              <div class="rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
-                <div class="max-h-80 overflow-auto divide-y divide-gray-100 dark:divide-gray-800">
-                  <%= for item <- @restore_items do %>
-                    <div class="px-4 py-3 flex items-center gap-3">
-                      <button
-                        id={"toggle-restore-item-#{item.id}"}
-                        phx-click="toggle_restore_item"
-                        phx-value-path={item.path}
-                        class={[
-                          "shrink-0 inline-flex items-center justify-center w-6 h-6 rounded-md border text-xs font-semibold transition-colors",
-                          if(MapSet.member?(@restore_selected, item.path),
-                            do: "bg-indigo-600 border-indigo-600 text-white",
-                            else:
-                              "bg-white border-gray-300 text-gray-500 hover:border-indigo-400 dark:bg-gray-900 dark:border-gray-700 dark:text-gray-400"
-                          )
-                        ]}
-                      >
-                        <%= if MapSet.member?(@restore_selected, item.path) do %>
-                          <.icon name="hero-check" class="w-3.5 h-3.5" />
-                        <% else %>
-                          +
-                        <% end %>
-                      </button>
-
-                      <div class="flex-1 min-w-0">
-                        <div class="flex items-center gap-2 flex-wrap">
-                          <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
-                            {restore_kind_label(item.kind)}
-                          </span>
-                          <span class="text-sm text-gray-800 dark:text-gray-200 truncate">
-                            {item.path}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div class="text-xs text-gray-500 dark:text-gray-400 shrink-0">
-                        {format_bytes(item.bytes)}
-                      </div>
-                    </div>
-                  <% end %>
-                </div>
-              </div>
-
-              <div class="flex items-center justify-between gap-3">
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  Selected items: {MapSet.size(@restore_selected)}
-                </p>
-                <button
-                  id="restore-selected-items"
-                  type="button"
-                  phx-click="restore_selected_items"
-                  disabled={MapSet.size(@restore_selected) == 0 or is_nil(@restore_archive_path)}
-                  class={[
-                    "px-4 py-2 rounded-lg text-sm font-medium transition-colors",
-                    if(MapSet.size(@restore_selected) == 0 or is_nil(@restore_archive_path),
-                      do:
-                        "bg-gray-200 text-gray-400 cursor-not-allowed dark:bg-gray-800 dark:text-gray-600",
-                      else: "bg-emerald-600 text-white hover:bg-emerald-700"
-                    )
-                  ]}
-                >
-                  Extract selected
-                </button>
-              </div>
-            <% end %>
-
-            <%= if @restore_sql_items != [] do %>
-              <div class="rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/60 dark:bg-emerald-950/30 p-4 space-y-4">
-                <div>
-                  <p class="text-sm font-medium text-emerald-800 dark:text-emerald-300">
-                    SQL restore actions
-                  </p>
-                  <p class="text-xs text-emerald-700/80 dark:text-emerald-400/80 mt-0.5">
-                    Import extracted SQL dumps into selected target databases.
-                  </p>
-                </div>
-
-                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div>
-                    <label class="text-xs font-medium text-emerald-900/80 dark:text-emerald-300/90">
-                      MySQL target
-                    </label>
-                    <select
-                      id="restore-mysql-target"
-                      name="value"
-                      phx-change="set_restore_db_target"
-                      phx-value-kind="mysql"
-                      class="mt-1 w-full rounded-md border border-emerald-300/60 bg-white px-2.5 py-1.5 text-sm text-gray-700 dark:bg-gray-900 dark:text-gray-200"
-                    >
-                      <option :if={@restore_db_targets.mysql == []} value="">
-                        No MySQL databases
-                      </option>
-                      <%= for db <- @restore_db_targets.mysql do %>
-                        <option value={db} selected={db == @restore_mysql_target}>{db}</option>
-                      <% end %>
-                    </select>
-                  </div>
-                  <div>
-                    <label class="text-xs font-medium text-emerald-900/80 dark:text-emerald-300/90">
-                      PostgreSQL target
-                    </label>
-                    <select
-                      id="restore-postgresql-target"
-                      name="value"
-                      phx-change="set_restore_db_target"
-                      phx-value-kind="postgresql"
-                      class="mt-1 w-full rounded-md border border-emerald-300/60 bg-white px-2.5 py-1.5 text-sm text-gray-700 dark:bg-gray-900 dark:text-gray-200"
-                    >
-                      <option
-                        :if={@restore_db_targets.postgresql == []}
-                        value=""
-                      >
-                        No PostgreSQL databases
-                      </option>
-                      <%= for db <- @restore_db_targets.postgresql do %>
-                        <option value={db} selected={db == @restore_postgresql_target}>{db}</option>
-                      <% end %>
-                    </select>
-                  </div>
-                </div>
-
-                <div class="rounded-lg border border-emerald-200 dark:border-emerald-900 overflow-hidden divide-y divide-emerald-100 dark:divide-emerald-900/60">
-                  <%= for item <- @restore_sql_items do %>
-                    <div class="px-3 py-2.5 flex items-center gap-3">
-                      <div class="flex-1 min-w-0">
-                        <div class="flex items-center gap-2 flex-wrap">
-                          <span class="text-[11px] px-2 py-0.5 rounded-full bg-white text-emerald-800 dark:bg-gray-900 dark:text-emerald-300">
-                            {restore_kind_label(item.kind)}
-                          </span>
-                          <span class="text-sm text-gray-800 dark:text-gray-200 truncate">
-                            {item.rel_path}
-                          </span>
-                        </div>
-                      </div>
-                      <button
-                        id={"dry-run-restored-sql-#{item.id}"}
-                        type="button"
-                        phx-click="dry_run_restored_sql"
-                        phx-value-id={item.id}
-                        class="px-2.5 py-1 rounded-md bg-sky-600 text-white text-xs font-medium hover:bg-sky-700"
-                      >
-                        Dry Run
-                      </button>
-                      <button
-                        id={"import-restored-sql-#{item.id}"}
-                        type="button"
-                        phx-click="import_restored_sql"
-                        phx-value-id={item.id}
-                        class="px-2.5 py-1 rounded-md bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
-                      >
-                        Import
-                      </button>
-                    </div>
-                  <% end %>
-                </div>
-
-                <div class="flex items-center justify-between gap-3 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50/70 dark:bg-amber-950/30 p-3">
-                  <button
-                    id="toggle-restore-bulk-confirm"
-                    type="button"
-                    phx-click="toggle_restore_bulk_confirm"
-                    class={[
-                      "inline-flex items-center gap-2 text-xs font-medium",
-                      if(@restore_bulk_confirm,
-                        do: "text-amber-900 dark:text-amber-300",
-                        else: "text-amber-700 dark:text-amber-400"
-                      )
-                    ]}
-                  >
-                    <span class={[
-                      "inline-flex items-center justify-center w-4 h-4 rounded border",
-                      if(@restore_bulk_confirm,
-                        do: "bg-amber-500 border-amber-500 text-white",
-                        else: "bg-white border-amber-400 text-transparent"
-                      )
-                    ]}>
-                      <.icon name="hero-check" class="w-3 h-3" />
-                    </span>
-                    I confirm bulk SQL import may overwrite existing data
-                  </button>
-
-                  <button
-                    id="dry-run-all-restored-sql"
-                    type="button"
-                    phx-click="dry_run_all_restored_sql"
-                    class="px-3 py-1.5 rounded-md text-xs font-semibold transition-colors bg-sky-600 text-white hover:bg-sky-700"
-                  >
-                    Dry Run All SQL
-                  </button>
-
-                  <button
-                    id="import-all-restored-sql"
-                    type="button"
-                    phx-click="import_all_restored_sql"
-                    disabled={not @restore_bulk_confirm}
-                    class={[
-                      "px-3 py-1.5 rounded-md text-xs font-semibold transition-colors",
-                      if(@restore_bulk_confirm,
-                        do: "bg-amber-600 text-white hover:bg-amber-700",
-                        else:
-                          "bg-gray-200 text-gray-400 cursor-not-allowed dark:bg-gray-800 dark:text-gray-600"
-                      )
-                    ]}
-                  >
-                    Import All SQL
-                  </button>
-                </div>
-
-                <%= if @restore_dry_run_report != [] do %>
-                  <div class="rounded-lg border border-sky-200 dark:border-sky-900 bg-sky-50/80 dark:bg-sky-950/30 p-3">
-                    <p class="text-xs font-semibold text-sky-700 dark:text-sky-300 uppercase tracking-wider">
-                      Dry Run Report
-                    </p>
-                    <div class="mt-2 max-h-36 overflow-auto space-y-1 font-mono text-[11px] text-sky-900 dark:text-sky-200">
-                      <%= for line <- @restore_dry_run_report do %>
-                        <div>{line}</div>
-                      <% end %>
-                    </div>
-                  </div>
-                <% end %>
-              </div>
-            <% end %>
-          </div>
-        </div>
-
         <%!-- History card --%>
         <div class="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-800 overflow-hidden">
           <div class="px-6 py-5 border-b border-gray-200 dark:border-gray-800">
@@ -2405,8 +1373,6 @@ defmodule HostctlWeb.PanelLive.Backup do
                   "shrink-0 inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold",
                   log.status == "success" &&
                     "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-                  log.status == "cancelled" &&
-                    "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
                   log.status == "failed" &&
                     "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400",
                   log.status == "running" &&
@@ -2417,8 +1383,6 @@ defmodule HostctlWeb.PanelLive.Backup do
                   <%= cond do %>
                     <% log.status == "success" -> %>
                       <.icon name="hero-check-circle" class="w-3.5 h-3.5" /> Success
-                    <% log.status == "cancelled" -> %>
-                      <.icon name="hero-stop-circle" class="w-3.5 h-3.5" /> Cancelled
                     <% log.status == "failed" -> %>
                       <.icon name="hero-x-circle" class="w-3.5 h-3.5" /> Failed
                     <% log.status == "running" -> %>
@@ -2458,106 +1422,12 @@ defmodule HostctlWeb.PanelLive.Backup do
                       {log.error_message}
                     </p>
                   <% end %>
-
-                  <%= if display_domain_count(log) > 0 do %>
-                    <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 truncate">
-                      Domains: {display_domain_count(log)}
-                      <span :if={display_domain_preview(log) != ""}>
-                        ({display_domain_preview(log)})
-                      </span>
-                    </p>
-                  <% end %>
                 </div>
 
                 <%!-- Size --%>
                 <div class="shrink-0 text-sm text-gray-500 dark:text-gray-400">
                   {format_bytes(log.file_size_bytes)}
                 </div>
-
-                <button
-                  :if={log.status == "success"}
-                  id={"history-restore-#{log.id}"}
-                  type="button"
-                  phx-click="restore_from_log"
-                  phx-value-log-id={log.id}
-                  class="shrink-0 px-2.5 py-1 rounded-md bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
-                >
-                  Restore
-                </button>
-
-                <.link
-                  :if={log.status == "success"}
-                  href={~p"/panel/backups/#{log.id}/download"}
-                  class="shrink-0 px-2.5 py-1 rounded-md border border-gray-300 text-gray-700 text-xs font-medium hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
-                >
-                  Download
-                </.link>
-              </div>
-            <% end %>
-          </div>
-        </div>
-
-        <%!-- Completed backups quick access --%>
-        <div class="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-800 overflow-hidden">
-          <div class="px-6 py-5 border-b border-gray-200 dark:border-gray-800">
-            <h2 class="text-base font-semibold text-gray-900 dark:text-white">Completed Backups</h2>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Quick restore shortcuts for successful backups.
-            </p>
-          </div>
-
-          <div class="divide-y divide-gray-100 dark:divide-gray-800">
-            <div
-              :if={@completed_logs == []}
-              class="px-6 py-10 text-sm text-gray-400 dark:text-gray-500"
-            >
-              No completed backups yet.
-            </div>
-
-            <%= for log <- @completed_logs do %>
-              <div id={"completed-backup-#{log.id}"} class="px-6 py-4 flex items-center gap-4">
-                <div class="flex-1 min-w-0">
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <span class="text-sm font-medium text-gray-900 dark:text-white">
-                      {if log.completed_at,
-                        do: Calendar.strftime(log.completed_at, "%Y-%m-%d %H:%M UTC"),
-                        else: "Completed"}
-                    </span>
-                    <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400">
-                      {trigger_label(log.trigger)}
-                    </span>
-                    <span :if={log.destination} class="text-xs text-gray-400 dark:text-gray-500">
-                      {log.destination}
-                    </span>
-                  </div>
-                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 truncate">
-                    Domains: {display_domain_count(log)}
-                    <span :if={display_domain_preview(log) != ""}>
-                      ({display_domain_preview(log)})
-                    </span>
-                  </p>
-                </div>
-
-                <div class="text-sm text-gray-500 dark:text-gray-400 shrink-0">
-                  {format_bytes(log.file_size_bytes)}
-                </div>
-
-                <button
-                  id={"completed-restore-#{log.id}"}
-                  type="button"
-                  phx-click="restore_from_log"
-                  phx-value-log-id={log.id}
-                  class="shrink-0 px-3 py-1.5 rounded-md bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
-                >
-                  Restore
-                </button>
-
-                <.link
-                  href={~p"/panel/backups/#{log.id}/download"}
-                  class="shrink-0 px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 text-xs font-medium hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
-                >
-                  Download
-                </.link>
               </div>
             <% end %>
           </div>
