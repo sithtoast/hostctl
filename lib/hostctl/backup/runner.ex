@@ -553,15 +553,23 @@ defmodule Hostctl.Backup.Runner do
     files_dir = Path.join(tmp_dir, "domains")
     File.mkdir_p!(files_dir)
 
-    include_domain_files =
+    {include_domain_files, domain_excluded_dirs} =
       case Repo.get_by(DomainSetting, domain_id: domain.id) do
-        nil -> true
-        %DomainSetting{include_files: include_files} -> include_files
+        nil ->
+          {true, []}
+
+        %DomainSetting{include_files: include_files, excluded_dirs: excluded_dirs} ->
+          {include_files, excluded_dirs || []}
       end
 
     if (include_domain_files and domain.document_root) && File.dir?(domain.document_root) do
       archive = Path.join(files_dir, "#{domain.name}.tar.gz")
-      System.cmd(tar, ["-czf", archive, "-C", domain.document_root, "."], stderr_to_stdout: true)
+
+      System.cmd(
+        tar,
+        tar_args_with_excludes(archive, domain.document_root, domain_excluded_dirs),
+        stderr_to_stdout: true
+      )
     end
 
     subdomains =
@@ -570,13 +578,18 @@ defmodule Hostctl.Backup.Runner do
           left_join: ss in SubdomainSetting,
           on: ss.subdomain_id == s.id,
           where: s.domain_id == ^domain.id,
-          select: {s.name, s.document_root, ss.include_files}
+          select: {s.name, s.document_root, ss.include_files, ss.excluded_dirs}
       )
 
-    Enum.each(subdomains, fn {sub_name, doc_root, include_files} ->
+    Enum.each(subdomains, fn {sub_name, doc_root, include_files, excluded_dirs} ->
       if ((is_nil(include_files) or include_files) and doc_root) && File.dir?(doc_root) do
         archive = Path.join(files_dir, "#{sub_name}.#{domain.name}.tar.gz")
-        System.cmd(tar, ["-czf", archive, "-C", doc_root, "."], stderr_to_stdout: true)
+
+        System.cmd(
+          tar,
+          tar_args_with_excludes(archive, doc_root, excluded_dirs || []),
+          stderr_to_stdout: true
+        )
       end
     end)
   end
@@ -769,14 +782,15 @@ defmodule Hostctl.Backup.Runner do
           left_join: ds in Hostctl.Backup.DomainSetting,
           on: ds.domain_id == d.id,
           where: d.id in ^included_ids,
-          select: {d.id, d.name, d.document_root, ds.s3_mode}
+          select: {d.id, d.name, d.document_root, ds.s3_mode, ds.excluded_dirs}
       )
 
     files_dir = Path.join(tmp_dir, "domains")
     File.mkdir_p!(files_dir)
 
-    Enum.each(domains, fn {_id, name, doc_root, per_mode} ->
+    Enum.each(domains, fn {_id, name, doc_root, per_mode, excluded_dirs} ->
       effective_mode = per_mode || settings.s3_mode || "archive"
+      excluded_dirs = excluded_dirs || []
 
       cond do
         is_nil(doc_root) or not File.dir?(doc_root) ->
@@ -786,7 +800,7 @@ defmodule Hostctl.Backup.Runner do
           prefix = "#{settings.s3_path_prefix || "hostctl-backups"}/domains"
           s3_key = "#{prefix}/#{name}.tar.gz"
           broadcast_progress("  → Streaming #{name} to S3…")
-          stream = command_to_stream(tar, ["-czf", "-", "-C", doc_root, "."])
+          stream = command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs))
 
           case S3.upload_stream(settings, s3_key, stream) do
             {:ok, _} -> :ok
@@ -795,7 +809,12 @@ defmodule Hostctl.Backup.Runner do
 
         true ->
           archive = Path.join(files_dir, "#{name}.tar.gz")
-          System.cmd(tar, ["-czf", archive, "-C", doc_root, "."], stderr_to_stdout: true)
+
+          System.cmd(
+            tar,
+            tar_args_with_excludes(archive, doc_root, excluded_dirs),
+            stderr_to_stdout: true
+          )
       end
     end)
 
@@ -817,13 +836,15 @@ defmodule Hostctl.Backup.Runner do
             name: s.name,
             domain_name: d.name,
             document_root: s.document_root,
-            s3_mode: ss.s3_mode
+            s3_mode: ss.s3_mode,
+            excluded_dirs: ss.excluded_dirs
           }
       )
 
     Enum.each(subdomains, fn sub ->
       effective_mode = sub.s3_mode || settings.s3_mode || "archive"
       filename = "#{sub.name}.#{sub.domain_name}.tar.gz"
+      excluded_dirs = sub.excluded_dirs || []
 
       cond do
         is_nil(sub.document_root) or not File.dir?(sub.document_root) ->
@@ -833,7 +854,9 @@ defmodule Hostctl.Backup.Runner do
           prefix = "#{settings.s3_path_prefix || "hostctl-backups"}/domains"
           s3_key = "#{prefix}/#{filename}"
           broadcast_progress("  → Streaming #{filename} to S3…")
-          stream = command_to_stream(tar, ["-czf", "-", "-C", sub.document_root, "."])
+
+          stream =
+            command_to_stream(tar, tar_args_with_excludes("-", sub.document_root, excluded_dirs))
 
           case S3.upload_stream(settings, s3_key, stream) do
             {:ok, _} -> :ok
@@ -842,7 +865,12 @@ defmodule Hostctl.Backup.Runner do
 
         true ->
           archive = Path.join(files_dir, filename)
-          System.cmd(tar, ["-czf", archive, "-C", sub.document_root, "."], stderr_to_stdout: true)
+
+          System.cmd(
+            tar,
+            tar_args_with_excludes(archive, sub.document_root, excluded_dirs),
+            stderr_to_stdout: true
+          )
       end
     end)
   end
@@ -852,15 +880,23 @@ defmodule Hostctl.Backup.Runner do
   # ---------------------------------------------------------------------------
 
   defp stream_domain_scope_files_to_s3(settings, prefix, tar, %Domain{} = domain) do
-    include_domain_files =
+    {include_domain_files, domain_excluded_dirs} =
       case Repo.get_by(DomainSetting, domain_id: domain.id) do
-        nil -> true
-        %DomainSetting{include_files: include_files} -> include_files
+        nil ->
+          {true, []}
+
+        %DomainSetting{include_files: include_files, excluded_dirs: excluded_dirs} ->
+          {include_files, excluded_dirs || []}
       end
 
     if (include_domain_files and domain.document_root) && File.dir?(domain.document_root) do
       s3_key = "#{prefix}/domains/#{domain.name}.tar.gz"
-      stream = command_to_stream(tar, ["-czf", "-", "-C", domain.document_root, "."])
+
+      stream =
+        command_to_stream(
+          tar,
+          tar_args_with_excludes("-", domain.document_root, domain_excluded_dirs)
+        )
 
       case S3.upload_stream(settings, s3_key, stream) do
         {:ok, _} -> :ok
@@ -874,14 +910,16 @@ defmodule Hostctl.Backup.Runner do
           left_join: ss in SubdomainSetting,
           on: ss.subdomain_id == s.id,
           where: s.domain_id == ^domain.id,
-          select: {s.name, s.document_root, ss.include_files}
+          select: {s.name, s.document_root, ss.include_files, ss.excluded_dirs}
       )
 
-    Enum.each(subdomains, fn {sub_name, doc_root, include_files} ->
+    Enum.each(subdomains, fn {sub_name, doc_root, include_files, excluded_dirs} ->
       if ((is_nil(include_files) or include_files) and doc_root) && File.dir?(doc_root) do
         filename = "#{sub_name}.#{domain.name}.tar.gz"
         s3_key = "#{prefix}/domains/#{filename}"
-        stream = command_to_stream(tar, ["-czf", "-", "-C", doc_root, "."])
+
+        stream =
+          command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs || []))
 
         case S3.upload_stream(settings, s3_key, stream) do
           {:ok, _} -> :ok
@@ -1058,7 +1096,7 @@ defmodule Hostctl.Backup.Runner do
           left_join: ds in Hostctl.Backup.DomainSetting,
           on: ds.domain_id == d.id,
           where: d.id in ^included_ids,
-          select: {d.name, d.document_root, ds.s3_mode}
+          select: {d.name, d.document_root, ds.s3_mode, ds.excluded_dirs}
       )
 
     subdomains =
@@ -1069,18 +1107,20 @@ defmodule Hostctl.Backup.Runner do
           left_join: ss in Hostctl.Backup.SubdomainSetting,
           on: ss.subdomain_id == s.id,
           where: s.id not in ^excluded_sub_ids,
-          select: {s.name, d.name, s.document_root, ss.s3_mode}
+          select: {s.name, d.name, s.document_root, ss.s3_mode, ss.excluded_dirs}
       )
 
     entries =
-      Enum.map(domains, fn {name, doc_root, mode} -> {"#{name}.tar.gz", doc_root, mode} end) ++
-        Enum.map(subdomains, fn {sname, dname, doc_root, mode} ->
-          {"#{sname}.#{dname}.tar.gz", doc_root, mode}
+      Enum.map(domains, fn {name, doc_root, mode, excluded_dirs} ->
+        {"#{name}.tar.gz", doc_root, mode, excluded_dirs || []}
+      end) ++
+        Enum.map(subdomains, fn {sname, dname, doc_root, mode, excluded_dirs} ->
+          {"#{sname}.#{dname}.tar.gz", doc_root, mode, excluded_dirs || []}
         end)
 
     entries
-    |> Enum.filter(fn {_, doc_root, _} -> doc_root && File.dir?(doc_root) end)
-    |> Enum.each(fn {filename, doc_root, per_mode} ->
+    |> Enum.filter(fn {_, doc_root, _, _} -> doc_root && File.dir?(doc_root) end)
+    |> Enum.each(fn {filename, doc_root, per_mode, excluded_dirs} ->
       effective_mode = per_mode || "stream"
       s3_key = "#{prefix}/domains/#{filename}"
 
@@ -1089,7 +1129,10 @@ defmodule Hostctl.Backup.Runner do
         tmp = Path.join(System.tmp_dir!(), "hostctl-override-#{filename}")
 
         try do
-          System.cmd(tar, ["-czf", tmp, "-C", doc_root, "."], stderr_to_stdout: true)
+          System.cmd(tar, tar_args_with_excludes(tmp, doc_root, excluded_dirs),
+            stderr_to_stdout: true
+          )
+
           broadcast_progress("  → Uploading #{filename} (archive override)…")
 
           case S3.upload(settings, tmp, s3_key) do
@@ -1101,7 +1144,7 @@ defmodule Hostctl.Backup.Runner do
         end
       else
         broadcast_progress("  → Streaming #{filename}…")
-        stream = command_to_stream(tar, ["-czf", "-", "-C", doc_root, "."])
+        stream = command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs))
 
         case S3.upload_stream(settings, s3_key, stream) do
           {:ok, _} -> :ok
@@ -1109,6 +1152,22 @@ defmodule Hostctl.Backup.Runner do
         end
       end
     end)
+  end
+
+  defp tar_args_with_excludes(output_path, root_dir, excluded_dirs) do
+    ["-czf", output_path]
+    |> Kernel.++(tar_exclude_args(excluded_dirs || []))
+    |> Kernel.++(["-C", root_dir, "."])
+  end
+
+  defp tar_exclude_args(excluded_dirs) do
+    excluded_dirs
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&String.trim_leading(&1, "/"))
+    |> Enum.reject(&String.contains?(&1, ".."))
+    |> Enum.flat_map(fn dir -> ["--exclude", "./#{dir}"] end)
   end
 
   # Returns a lazy Stream that opens a Port running `executable args` and

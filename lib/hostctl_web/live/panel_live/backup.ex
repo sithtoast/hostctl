@@ -27,6 +27,7 @@ defmodule HostctlWeb.PanelLive.Backup do
      |> assign(:settings_tab, :local)
      |> assign(:running, running)
      |> assign(:progress_messages, [])
+     |> assign(:exclude_picker, nil)
      |> assign(:domain_groups, domain_groups)
      |> stream(:logs, logs)}
   end
@@ -162,6 +163,159 @@ defmodule HostctlWeb.PanelLive.Backup do
     {:noreply, put_flash(socket, :error, "A backup is already running.")}
   end
 
+  @impl true
+  def handle_event("open_domain_excludes", %{"domain-id" => id_str}, socket) do
+    domain_id = String.to_integer(id_str)
+
+    case Enum.find(socket.assigns.domain_groups, &(&1.id == domain_id)) do
+      nil ->
+        {:noreply, put_flash(socket, :error, "Domain not found.")}
+
+      group ->
+        case build_exclude_picker(
+               :domain,
+               group.id,
+               group.name,
+               group.document_root,
+               group.excluded_dirs || []
+             ) do
+          {:ok, picker} ->
+            {:noreply, assign(socket, :exclude_picker, picker)}
+
+          {:error, :not_dir} ->
+            {:noreply,
+             put_flash(
+               socket,
+               :error,
+               "Cannot browse excludes: document root is missing or not a directory."
+             )}
+        end
+    end
+  end
+
+  @impl true
+  def handle_event("open_subdomain_excludes", %{"subdomain-id" => id_str}, socket) do
+    subdomain_id = String.to_integer(id_str)
+
+    subdomain =
+      socket.assigns.domain_groups
+      |> Enum.flat_map(& &1.subdomains)
+      |> Enum.find(&(&1.id == subdomain_id))
+
+    case subdomain do
+      nil ->
+        {:noreply, put_flash(socket, :error, "Subdomain not found.")}
+
+      sub ->
+        case build_exclude_picker(
+               :subdomain,
+               sub.id,
+               sub.full_name,
+               sub.document_root,
+               sub.excluded_dirs || []
+             ) do
+          {:ok, picker} ->
+            {:noreply, assign(socket, :exclude_picker, picker)}
+
+          {:error, :not_dir} ->
+            {:noreply,
+             put_flash(
+               socket,
+               :error,
+               "Cannot browse excludes: document root is missing or not a directory."
+             )}
+        end
+    end
+  end
+
+  @impl true
+  def handle_event("close_excludes", _, socket) do
+    {:noreply, assign(socket, :exclude_picker, nil)}
+  end
+
+  @impl true
+  def handle_event("exclude_open_path", %{"path" => rel_path}, socket) do
+    picker = socket.assigns.exclude_picker
+
+    if is_nil(picker) do
+      {:noreply, socket}
+    else
+      rel_path = normalize_rel_path(rel_path)
+
+      case list_directories(picker.root, rel_path) do
+        {:ok, entries} ->
+          {:noreply,
+           assign(socket, :exclude_picker, %{picker | current_path: rel_path, entries: entries})}
+
+        {:error, _} ->
+          {:noreply, put_flash(socket, :error, "Unable to read directory.")}
+      end
+    end
+  end
+
+  @impl true
+  def handle_event("exclude_up", _, socket) do
+    picker = socket.assigns.exclude_picker
+
+    if is_nil(picker) do
+      {:noreply, socket}
+    else
+      next_path =
+        case picker.current_path do
+          "" -> ""
+          path -> path |> String.split("/", trim: true) |> Enum.drop(-1) |> Enum.join("/")
+        end
+
+      case list_directories(picker.root, next_path) do
+        {:ok, entries} ->
+          {:noreply,
+           assign(socket, :exclude_picker, %{picker | current_path: next_path, entries: entries})}
+
+        {:error, _} ->
+          {:noreply, put_flash(socket, :error, "Unable to read directory.")}
+      end
+    end
+  end
+
+  @impl true
+  def handle_event("toggle_excluded_dir", %{"path" => rel_path, "current" => current_str}, socket) do
+    picker = socket.assigns.exclude_picker
+    rel_path = normalize_rel_path(rel_path)
+
+    selected =
+      if current_str == "true" do
+        MapSet.delete(picker.selected, rel_path)
+      else
+        MapSet.put(picker.selected, rel_path)
+      end
+
+    {:noreply, assign(socket, :exclude_picker, %{picker | selected: selected})}
+  end
+
+  @impl true
+  def handle_event("save_excludes", _, socket) do
+    picker = socket.assigns.exclude_picker
+    excluded_dirs = picker.selected |> MapSet.to_list() |> Enum.sort()
+
+    result =
+      case picker.scope do
+        :domain -> Backup.set_domain_excluded_dirs(picker.id, excluded_dirs)
+        :subdomain -> Backup.set_subdomain_excluded_dirs(picker.id, excluded_dirs)
+      end
+
+    case result do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> assign(:exclude_picker, nil)
+         |> assign(:domain_groups, Backup.list_domain_groups())
+         |> put_flash(:info, "Excluded directories updated.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to update excluded directories.")}
+    end
+  end
+
   def handle_event("run_domain_now", %{"domain-id" => id_str}, socket) do
     domain_id = String.to_integer(id_str)
 
@@ -259,6 +413,63 @@ defmodule HostctlWeb.PanelLive.Backup do
   defp day_name(6), do: "Saturday"
   defp day_name(7), do: "Sunday"
   defp day_name(_), do: "Monday"
+
+  defp build_exclude_picker(scope, id, name, root, excluded_dirs) do
+    case list_directories(root, "") do
+      {:ok, entries} ->
+        {:ok,
+         %{
+           scope: scope,
+           id: id,
+           name: name,
+           root: root,
+           current_path: "",
+           entries: entries,
+           selected: MapSet.new(excluded_dirs || [])
+         }}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp list_directories(root, rel_path) when is_binary(root) and root != "" do
+    path = if rel_path == "", do: root, else: Path.join(root, rel_path)
+
+    if File.dir?(path) do
+      entries =
+        case File.ls(path) do
+          {:ok, names} ->
+            names
+            |> Enum.filter(fn name -> File.dir?(Path.join(path, name)) end)
+            |> Enum.sort()
+            |> Enum.map(fn name ->
+              %{name: name, path: join_rel(rel_path, name)}
+            end)
+
+          _ ->
+            []
+        end
+
+      {:ok, entries}
+    else
+      {:error, :not_dir}
+    end
+  end
+
+  defp list_directories(_, _), do: {:ok, []}
+
+  defp normalize_rel_path(path) do
+    path
+    |> String.trim()
+    |> String.trim_leading("/")
+    |> String.split("/", trim: true)
+    |> Enum.reject(&(&1 in ["", ".", ".."] or String.contains?(&1, "..")))
+    |> Enum.join("/")
+  end
+
+  defp join_rel("", name), do: name
+  defp join_rel(rel, name), do: Path.join(rel, name)
 
   defp trigger_label("manual_domain"), do: "Manual Domain"
   defp trigger_label(nil), do: "Manual"
@@ -764,6 +975,15 @@ defmodule HostctlWeb.PanelLive.Backup do
                         {group.name}
                       </p>
                       <button
+                        id={"domain-excludes-#{group.id}"}
+                        phx-click="open_domain_excludes"
+                        phx-value-domain-id={group.id}
+                        class="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium transition-colors bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+                        title="Choose directories to exclude"
+                      >
+                        <.icon name="hero-folder-minus" class="w-3 h-3" /> Exclude dirs
+                      </button>
+                      <button
                         id={"run-domain-backup-#{group.id}"}
                         phx-click="run_domain_now"
                         phx-value-domain-id={group.id}
@@ -891,9 +1111,20 @@ defmodule HostctlWeb.PanelLive.Backup do
                         class="w-3 h-3 text-gray-300 dark:text-gray-600 shrink-0"
                       />
                       <div class="min-w-0">
-                        <p class="text-sm text-gray-700 dark:text-gray-300 truncate">
-                          {sub.full_name}
-                        </p>
+                        <div class="flex items-center gap-2">
+                          <p class="text-sm text-gray-700 dark:text-gray-300 truncate">
+                            {sub.full_name}
+                          </p>
+                          <button
+                            id={"subdomain-excludes-#{sub.id}"}
+                            phx-click="open_subdomain_excludes"
+                            phx-value-subdomain-id={sub.id}
+                            class="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium transition-colors bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+                            title="Choose directories to exclude"
+                          >
+                            <.icon name="hero-folder-minus" class="w-3 h-3" /> Exclude dirs
+                          </button>
+                        </div>
                         <p class="text-xs text-gray-400 dark:text-gray-500 truncate mt-0.5">
                           {sub.document_root}
                         </p>
@@ -973,6 +1204,128 @@ defmodule HostctlWeb.PanelLive.Backup do
             </div>
           <% end %>
         </div>
+
+        <%= if @exclude_picker do %>
+          <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div class="absolute inset-0 bg-black/50" phx-click="close_excludes"></div>
+            <div class="relative w-full max-w-2xl bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+              <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-800">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+                      Exclude Directories
+                    </h3>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                      {@exclude_picker.name}
+                    </p>
+                  </div>
+                  <button
+                    id="close-excludes"
+                    phx-click="close_excludes"
+                    class="inline-flex items-center justify-center rounded-md p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+                  >
+                    <.icon name="hero-x-mark" class="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div class="px-5 py-4 space-y-3">
+                <div class="flex items-center gap-2">
+                  <button
+                    id="exclude-root"
+                    phx-click="exclude_open_path"
+                    phx-value-path=""
+                    class="text-xs px-2 py-1 rounded-md bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300"
+                  >
+                    Root
+                  </button>
+                  <button
+                    id="exclude-up"
+                    phx-click="exclude_up"
+                    class="text-xs px-2 py-1 rounded-md bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300"
+                  >
+                    Up
+                  </button>
+                  <span class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate">
+                    {if @exclude_picker.current_path == "",
+                      do: "/",
+                      else: "/#{@exclude_picker.current_path}"}
+                  </span>
+                </div>
+
+                <div class="max-h-80 overflow-auto rounded-lg border border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800">
+                  <%= if @exclude_picker.entries == [] do %>
+                    <div class="px-4 py-6 text-center text-xs text-gray-400 dark:text-gray-500">
+                      No subdirectories here.
+                    </div>
+                  <% end %>
+
+                  <%= for entry <- @exclude_picker.entries do %>
+                    <div class="px-4 py-2.5 flex items-center gap-3">
+                      <div class="flex-1 min-w-0">
+                        <p class="text-sm text-gray-800 dark:text-gray-200 truncate">{entry.name}</p>
+                        <p class="text-xs text-gray-400 dark:text-gray-500 font-mono truncate">
+                          /{entry.path}
+                        </p>
+                      </div>
+                      <button
+                        id={"open-exclude-path-#{entry.path}"}
+                        phx-click="exclude_open_path"
+                        phx-value-path={entry.path}
+                        class="text-xs px-2 py-1 rounded-md bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300"
+                      >
+                        Open
+                      </button>
+                      <button
+                        id={"toggle-exclude-path-#{entry.path}"}
+                        phx-click="toggle_excluded_dir"
+                        phx-value-path={entry.path}
+                        phx-value-current={
+                          to_string(MapSet.member?(@exclude_picker.selected, entry.path))
+                        }
+                        class={[
+                          "text-xs px-2.5 py-1 rounded-md font-medium",
+                          if(MapSet.member?(@exclude_picker.selected, entry.path),
+                            do: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
+                            else:
+                              "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                          )
+                        ]}
+                      >
+                        <%= if MapSet.member?(@exclude_picker.selected, entry.path) do %>
+                          Excluded
+                        <% else %>
+                          Include
+                        <% end %>
+                      </button>
+                    </div>
+                  <% end %>
+                </div>
+
+                <div class="text-xs text-gray-500 dark:text-gray-400">
+                  Selected exclusions: {MapSet.size(@exclude_picker.selected)}
+                </div>
+              </div>
+
+              <div class="px-5 py-3 border-t border-gray-200 dark:border-gray-800 flex items-center justify-end gap-2">
+                <button
+                  id="cancel-excludes"
+                  phx-click="close_excludes"
+                  class="px-3 py-1.5 rounded-md text-sm bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  id="save-excludes"
+                  phx-click="save_excludes"
+                  class="px-3 py-1.5 rounded-md text-sm bg-indigo-600 text-white hover:bg-indigo-700"
+                >
+                  Save exclusions
+                </button>
+              </div>
+            </div>
+          </div>
+        <% end %>
 
         <%!-- History card --%>
         <div class="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-800 overflow-hidden">

@@ -90,7 +90,13 @@ defmodule Hostctl.Backup do
     |> Repo.all()
     |> Enum.map(fn {domain, setting} ->
       {domain,
-       setting || %DomainSetting{domain_id: domain.id, include_files: true, include_mail: true}}
+       setting ||
+         %DomainSetting{
+           domain_id: domain.id,
+           include_files: true,
+           include_mail: true,
+           excluded_dirs: []
+         }}
     end)
   end
 
@@ -184,7 +190,13 @@ defmodule Hostctl.Backup do
 
     Enum.map(domain_rows, fn {domain, ds} ->
       domain_setting =
-        ds || %DomainSetting{domain_id: domain.id, include_files: true, include_mail: true}
+        ds ||
+          %DomainSetting{
+            domain_id: domain.id,
+            include_files: true,
+            include_mail: true,
+            excluded_dirs: []
+          }
 
       subdomains =
         subs_by_domain
@@ -196,6 +208,7 @@ defmodule Hostctl.Backup do
             full_name: "#{sub.name}.#{domain.name}",
             document_root: sub.document_root,
             include_files: if(ss, do: ss.include_files, else: true),
+            excluded_dirs: if(ss, do: ss.excluded_dirs || [], else: []),
             s3_mode: if(ss, do: ss.s3_mode, else: nil)
           }
         end)
@@ -206,6 +219,7 @@ defmodule Hostctl.Backup do
         document_root: domain.document_root,
         include_files: domain_setting.include_files,
         include_mail: domain_setting.include_mail,
+        excluded_dirs: domain_setting.excluded_dirs || [],
         s3_mode: domain_setting.s3_mode,
         subdomains: subdomains
       }
@@ -223,6 +237,36 @@ defmodule Hostctl.Backup do
       setting ->
         setting
         |> SubdomainSetting.changeset(%{include_files: include_files})
+        |> Repo.update()
+    end
+  end
+
+  @doc "Upserts excluded directories for a single domain."
+  def set_domain_excluded_dirs(domain_id, excluded_dirs) when is_list(excluded_dirs) do
+    case Repo.get_by(DomainSetting, domain_id: domain_id) do
+      nil ->
+        %DomainSetting{domain_id: domain_id}
+        |> DomainSetting.changeset(%{excluded_dirs: excluded_dirs})
+        |> Repo.insert()
+
+      setting ->
+        setting
+        |> DomainSetting.changeset(%{excluded_dirs: excluded_dirs})
+        |> Repo.update()
+    end
+  end
+
+  @doc "Upserts excluded directories for a single subdomain."
+  def set_subdomain_excluded_dirs(subdomain_id, excluded_dirs) when is_list(excluded_dirs) do
+    case Repo.get_by(SubdomainSetting, subdomain_id: subdomain_id) do
+      nil ->
+        %SubdomainSetting{subdomain_id: subdomain_id}
+        |> SubdomainSetting.changeset(%{excluded_dirs: excluded_dirs})
+        |> Repo.insert()
+
+      setting ->
+        setting
+        |> SubdomainSetting.changeset(%{excluded_dirs: excluded_dirs})
         |> Repo.update()
     end
   end
