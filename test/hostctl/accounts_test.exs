@@ -2,6 +2,7 @@ defmodule Hostctl.AccountsTest do
   use Hostctl.DataCase
 
   alias Hostctl.Accounts
+  alias Hostctl.Settings
 
   import Hostctl.AccountsFixtures
   alias Hostctl.Accounts.{User, UserToken}
@@ -84,6 +85,52 @@ defmodule Hostctl.AccountsTest do
       assert is_nil(user.hashed_password)
       assert is_nil(user.confirmed_at)
       assert is_nil(user.password)
+    end
+  end
+
+  describe "setup_admin/1" do
+    test "loads the default DNS template records during initial setup" do
+      assert Settings.list_dns_template_records() == []
+
+      assert {:ok, %User{} = user} =
+               Accounts.setup_admin(%{
+                 name: "Admin User",
+                 email: unique_user_email(),
+                 password: "adminpassword!"
+               })
+
+      assert user.role == "admin"
+
+      template_records = Settings.list_dns_template_records()
+
+      assert length(template_records) > 0
+
+      assert Enum.any?(template_records, fn record ->
+               record.type == "A" and record.name == "{{domain}}" and record.value == "{{ip}}"
+             end)
+    end
+
+    test "does not overwrite an existing DNS template during initial setup" do
+      assert {:ok, custom_record} =
+               Settings.create_dns_template_record(%{
+                 type: "TXT",
+                 name: "{{domain}}",
+                 value: "custom-template",
+                 ttl: 3600,
+                 description: "Custom template"
+               })
+
+      assert {:ok, %User{}} =
+               Accounts.setup_admin(%{
+                 name: "Admin User",
+                 email: unique_user_email(),
+                 password: "adminpassword!"
+               })
+
+      template_records = Settings.list_dns_template_records()
+
+      assert Enum.map(template_records, & &1.id) == [custom_record.id]
+      assert hd(template_records).value == "custom-template"
     end
   end
 

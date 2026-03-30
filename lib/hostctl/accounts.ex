@@ -7,6 +7,7 @@ defmodule Hostctl.Accounts do
   alias Hostctl.Repo
 
   alias Hostctl.Accounts.{User, UserToken, UserNotifier}
+  alias Hostctl.Settings
 
   ## Database getters
 
@@ -127,9 +128,16 @@ defmodule Hostctl.Accounts do
   The user is immediately confirmed and given the admin role.
   """
   def setup_admin(attrs) do
-    %User{}
-    |> User.setup_changeset(attrs)
-    |> Repo.insert()
+    Repo.transact(fn ->
+      case %User{} |> User.setup_changeset(attrs) |> Repo.insert() do
+        {:ok, user} ->
+          :ok = Settings.ensure_default_dns_template_records()
+          {:ok, user}
+
+        {:error, %Ecto.Changeset{} = changeset} ->
+          {:error, changeset}
+      end
+    end)
   end
 
   @doc """

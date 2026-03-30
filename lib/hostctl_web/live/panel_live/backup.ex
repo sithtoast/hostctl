@@ -72,7 +72,11 @@ defmodule HostctlWeb.PanelLive.Backup do
 
             case File.mkdir_p(local_path) do
               :ok ->
-                put_flash(socket, :info, "Backup settings saved. Local directory #{local_path} is ready.")
+                put_flash(
+                  socket,
+                  :info,
+                  "Backup settings saved. Local directory #{local_path} is ready."
+                )
 
               {:error, reason} ->
                 put_flash(

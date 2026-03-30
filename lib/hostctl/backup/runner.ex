@@ -1349,7 +1349,13 @@ defmodule Hostctl.Backup.Runner do
       else
         if effective_mode == "raw" do
           broadcast_progress("  → Uploading raw files for #{name}…")
-          upload_directory_raw_to_s3(settings, "#{prefix}/domains/#{name}", doc_root, excluded_dirs)
+
+          upload_directory_raw_to_s3(
+            settings,
+            "#{prefix}/domains/#{name}",
+            doc_root,
+            excluded_dirs
+          )
         else
           broadcast_progress("  → Streaming #{archive_name}…")
           stream = command_to_stream(tar, tar_args_with_excludes("-", doc_root, excluded_dirs))

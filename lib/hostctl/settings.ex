@@ -177,6 +177,14 @@ defmodule Hostctl.Settings do
   @doc "Gets a single DNS template record by id, raises if not found."
   def get_dns_template_record!(id), do: Repo.get!(DnsTemplateRecord, id)
 
+  @doc "Ensures the default DNS template records exist when no template has been configured yet."
+  def ensure_default_dns_template_records do
+    case Repo.aggregate(DnsTemplateRecord, :count) do
+      0 -> load_default_dns_template_records()
+      _ -> :ok
+    end
+  end
+
   @doc "Creates a DNS template record."
   def create_dns_template_record(attrs) do
     %DnsTemplateRecord{}
