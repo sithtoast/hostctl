@@ -303,11 +303,42 @@ defmodule HostctlWeb.UpdatesLive do
               <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Release notes</h2>
             </div>
             <div class="px-6 py-5">
-              <div id="release-notes" class="release-notes">
+              <div id="release-notes" phx-hook=".ReleaseNotes" phx-update="ignore">
                 {render_markdown(@update_info.release.body)}
               </div>
             </div>
           </div>
+          <script :type={Phoenix.LiveView.ColocatedHook} name=".ReleaseNotes">
+            export default {
+              mounted() {
+                const el = this.el;
+                const apply = (selector, classes) =>
+                  el.querySelectorAll(selector).forEach(n => n.classList.add(...classes.split(" ")));
+
+                apply("h1", "text-xl font-bold text-gray-900 dark:text-white mt-5 mb-2 first:mt-0");
+                apply("h2", "text-lg font-bold text-gray-900 dark:text-white mt-5 mb-2 first:mt-0");
+                apply("h3", "text-base font-semibold text-gray-900 dark:text-white mt-4 mb-1 first:mt-0");
+                apply("h4,h5,h6", "text-sm font-semibold text-gray-900 dark:text-white mt-3 mb-1");
+                apply("p", "text-sm text-gray-700 dark:text-gray-300 mb-3 last:mb-0");
+                apply("ul", "list-disc pl-5 text-sm text-gray-700 dark:text-gray-300 mb-3 space-y-0.5");
+                apply("ol", "list-decimal pl-5 text-sm text-gray-700 dark:text-gray-300 mb-3 space-y-0.5");
+                apply("li > p", "mb-0");
+                apply("a", "text-indigo-500 dark:text-indigo-400 underline underline-offset-2 hover:text-indigo-700 dark:hover:text-indigo-300");
+                apply("strong", "font-semibold text-gray-900 dark:text-white");
+                apply("em", "italic");
+                apply("hr", "border-gray-200 dark:border-gray-700 my-4");
+                apply("blockquote", "border-l-2 border-gray-300 dark:border-gray-600 pl-3 italic text-gray-500 dark:text-gray-400 mb-3");
+                el.querySelectorAll("code").forEach(n => {
+                  if (n.closest("pre")) return;
+                  n.classList.add("font-mono", "text-xs", "bg-gray-100", "dark:bg-gray-800", "text-gray-800", "dark:text-gray-200", "px-1", "py-0.5", "rounded");
+                });
+                apply("pre", "bg-gray-900 text-gray-100 font-mono text-xs p-4 rounded-lg overflow-x-auto mb-3 leading-relaxed");
+                apply("table", "w-full text-sm border-collapse mb-3");
+                apply("th", "text-left font-semibold px-3 py-1.5 border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800");
+                apply("td", "px-3 py-1.5 border border-gray-200 dark:border-gray-700");
+              }
+            }
+          </script>
         <% end %>
 
         <%!-- Update instructions --%>
@@ -413,7 +444,7 @@ defmodule HostctlWeb.UpdatesLive do
 
   defp render_markdown(text) when is_binary(text) do
     text
-    |> Earmark.as_html!()
+    |> Earmark.as_html!(%Earmark.Options{pure_links: true})
     |> Phoenix.HTML.raw()
   end
 
