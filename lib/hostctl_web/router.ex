@@ -85,6 +85,7 @@ defmodule HostctlWeb.Router do
       live "/panel/smarthost", PanelLive.Smarthost, :index
       live "/panel/databases", PanelLive.Databases, :index
       live "/panel/emails", PanelLive.Emails, :index
+      live "/panel/backup", PanelLive.Backup, :index
     end
 
     post "/users/update-password", UserSessionController, :update_password

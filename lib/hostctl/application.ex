@@ -14,6 +14,13 @@ defmodule Hostctl.Application do
         []
       end
 
+    backup_children =
+      if Application.get_env(:hostctl, Hostctl.Backup.Runner, [])[:enabled] != false do
+        [Hostctl.Backup.Runner]
+      else
+        []
+      end
+
     children =
       [
         HostctlWeb.Telemetry,
@@ -23,6 +30,7 @@ defmodule Hostctl.Application do
         {Task.Supervisor, name: Hostctl.TaskSupervisor}
       ] ++
         metrics_children ++
+        backup_children ++
         [
           # Start to serve requests, typically the last entry
           HostctlWeb.Endpoint

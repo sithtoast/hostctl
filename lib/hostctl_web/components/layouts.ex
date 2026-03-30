@@ -110,6 +110,12 @@ defmodule HostctlWeb.Layouts do
               active={@active_tab == :panel_smarthost}
             />
             <.nav_item
+              icon="hero-arrow-down-tray"
+              label="Backup"
+              href={~p"/panel/backup"}
+              active={@active_tab == :panel_backup}
+            />
+            <.nav_item
               icon="hero-adjustments-horizontal"
               label="Panel Settings"
               href={~p"/panel/settings"}

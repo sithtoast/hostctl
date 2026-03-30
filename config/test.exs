@@ -47,6 +47,9 @@ config :hostctl, :mail_server, enabled: false
 # Disable the metrics collector in tests (no Nginx logs or filesystem to scan)
 config :hostctl, Hostctl.Metrics.Collector, enabled: false
 
+# Disable the backup runner in tests
+config :hostctl, Hostctl.Backup.Runner, enabled: false
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 
