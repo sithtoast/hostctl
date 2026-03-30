@@ -422,6 +422,16 @@ defmodule Hostctl.Hosting do
     )
   end
 
+  def list_all_email_accounts_for_admin do
+    Repo.all(
+      from ea in EmailAccount,
+        join: d in assoc(ea, :domain),
+        join: u in assoc(d, :user),
+        order_by: [asc: d.name, asc: ea.username],
+        preload: [domain: {d, user: u}]
+    )
+  end
+
   def create_email_account(%Domain{} = domain, attrs) do
     result =
       %EmailAccount{domain_id: domain.id}
@@ -467,6 +477,16 @@ defmodule Hostctl.Hosting do
 
   def list_databases(%Domain{} = domain) do
     Repo.all(from d in Database, where: d.domain_id == ^domain.id, order_by: [asc: d.name])
+  end
+
+  def list_all_databases_with_domains do
+    Repo.all(
+      from d in Database,
+        join: dom in assoc(d, :domain),
+        join: u in assoc(dom, :user),
+        order_by: [asc: dom.name, asc: d.name],
+        preload: [domain: {dom, user: u}]
+    )
   end
 
   def get_database!(%Domain{} = domain, id) do

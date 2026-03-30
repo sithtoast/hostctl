@@ -86,6 +86,18 @@ defmodule HostctlWeb.Layouts do
           />
           <%= if @current_scope && @current_scope.user && @current_scope.user.role == "admin" do %>
             <.nav_item
+              icon="hero-circle-stack"
+              label="All Databases"
+              href={~p"/panel/databases"}
+              active={@active_tab == :panel_databases}
+            />
+            <.nav_item
+              icon="hero-envelope"
+              label="All Emails"
+              href={~p"/panel/emails"}
+              active={@active_tab == :panel_emails}
+            />
+            <.nav_item
               icon="hero-puzzle-piece"
               label="Features"
               href={~p"/panel/features"}
