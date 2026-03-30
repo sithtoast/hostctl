@@ -239,6 +239,12 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
 
                 <div class="shrink-0 flex items-center gap-2">
                   <.link
+                    href={~p"/panel/backups/#{log.id}/download"}
+                    class="inline-flex items-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+                  >
+                    <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Download
+                  </.link>
+                  <.link
                     :if={restorable_log?(log)}
                     navigate={~p"/panel/backup?restore_log_id=#{log.id}"}
                     class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700"

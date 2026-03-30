@@ -2484,6 +2484,14 @@ defmodule HostctlWeb.PanelLive.Backup do
                 >
                   Restore
                 </button>
+
+                <.link
+                  :if={log.status == "success"}
+                  href={~p"/panel/backups/#{log.id}/download"}
+                  class="shrink-0 px-2.5 py-1 rounded-md border border-gray-300 text-gray-700 text-xs font-medium hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+                >
+                  Download
+                </.link>
               </div>
             <% end %>
           </div>
@@ -2543,6 +2551,13 @@ defmodule HostctlWeb.PanelLive.Backup do
                 >
                   Restore
                 </button>
+
+                <.link
+                  href={~p"/panel/backups/#{log.id}/download"}
+                  class="shrink-0 px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 text-xs font-medium hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+                >
+                  Download
+                </.link>
               </div>
             <% end %>
           </div>

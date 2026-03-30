@@ -89,6 +89,8 @@ defmodule HostctlWeb.Router do
       live "/panel/backups", PanelLive.CompletedBackups, :index
     end
 
+    get "/panel/backups/:id/download", BackupDownloadController, :show
+
     post "/users/update-password", UserSessionController, :update_password
   end
 
