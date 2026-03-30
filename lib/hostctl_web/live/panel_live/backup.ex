@@ -16,6 +16,7 @@ defmodule HostctlWeb.PanelLive.Backup do
     form = to_form(Backup.change_settings(setting), as: :backup_setting)
     logs = Backup.list_logs()
     running = Backup.backup_running?()
+    domain_groups = Backup.list_domain_groups()
 
     {:ok,
      socket
@@ -26,10 +27,18 @@ defmodule HostctlWeb.PanelLive.Backup do
      |> assign(:settings_tab, :local)
      |> assign(:running, running)
      |> assign(:progress_messages, [])
+     |> assign(:domain_groups, domain_groups)
      |> stream(:logs, logs)}
   end
 
   @impl true
+  def handle_event("switch_tab", %{"tab" => "domains"}, socket) do
+    {:noreply,
+     socket
+     |> assign(:settings_tab, :domains)
+     |> assign(:domain_groups, Backup.list_domain_groups())}
+  end
+
   def handle_event("switch_tab", %{"tab" => tab}, socket) do
     {:noreply, assign(socket, :settings_tab, String.to_existing_atom(tab))}
   end
@@ -58,6 +67,40 @@ defmodule HostctlWeb.PanelLive.Backup do
 
       {:error, changeset} ->
         {:noreply, assign(socket, :form, to_form(changeset, as: :backup_setting))}
+    end
+  end
+
+  @impl true
+  def handle_event(
+        "toggle_domain_files",
+        %{"domain-id" => id_str, "current" => current_str},
+        socket
+      ) do
+    domain_id = String.to_integer(id_str)
+
+    case Backup.set_domain_include_files(domain_id, current_str != "true") do
+      {:ok, _} ->
+        {:noreply, assign(socket, :domain_groups, Backup.list_domain_groups())}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to update domain backup setting.")}
+    end
+  end
+
+  @impl true
+  def handle_event(
+        "toggle_subdomain_files",
+        %{"subdomain-id" => id_str, "current" => current_str},
+        socket
+      ) do
+    subdomain_id = String.to_integer(id_str)
+
+    case Backup.set_subdomain_include_files(subdomain_id, current_str != "true") do
+      {:ok, _} ->
+        {:noreply, assign(socket, :domain_groups, Backup.list_domain_groups())}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to update subdomain backup setting.")}
     end
   end
 
@@ -257,6 +300,21 @@ defmodule HostctlWeb.PanelLive.Backup do
               >
                 Schedule
               </button>
+              <button
+                id="tab-domains"
+                phx-click="switch_tab"
+                phx-value-tab="domains"
+                class={[
+                  "pb-3 text-sm font-medium border-b-2 transition-colors",
+                  if(@settings_tab == :domains,
+                    do: "border-indigo-600 text-indigo-600",
+                    else:
+                      "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                  )
+                ]}
+              >
+                Domains
+              </button>
             </div>
           </div>
 
@@ -265,9 +323,9 @@ defmodule HostctlWeb.PanelLive.Backup do
             id="backup-settings-form"
             phx-change="validate"
             phx-submit="save"
-            class="p-6 space-y-6"
+            class={["p-6 space-y-6", @settings_tab == :domains && "hidden"]}
           >
-            <%!-- What to back up (always visible) --%>
+            <%!-- What to back up (always visible on non-domains tabs) --%>
             <fieldset>
               <legend class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
                 What to include
@@ -492,6 +550,147 @@ defmodule HostctlWeb.PanelLive.Backup do
               </button>
             </div>
           </.form>
+
+          <%!-- Domains tab (outside the form, manages its own events) --%>
+          <%= if @settings_tab == :domains do %>
+            <div id="domains-settings" class="divide-y divide-gray-100 dark:divide-gray-800">
+              <%!-- Header row --%>
+              <div class="flex items-center gap-4 px-6 py-3 bg-gray-50 dark:bg-gray-800/50">
+                <span class="flex-1 text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                  Domain / Subdomain
+                </span>
+                <span class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-32 text-center">
+                  Include files
+                </span>
+              </div>
+
+              <%!-- Empty state --%>
+              <%= if @domain_groups == [] do %>
+                <div class="flex flex-col items-center justify-center py-12 gap-2 text-center">
+                  <.icon name="hero-globe-alt" class="w-8 h-8 text-gray-300 dark:text-gray-600" />
+                  <p class="text-sm text-gray-400 dark:text-gray-500">No domains found.</p>
+                  <p class="text-xs text-gray-400 dark:text-gray-500">
+                    Add domains to configure per-domain backup settings.
+                  </p>
+                </div>
+              <% end %>
+
+              <%!-- Domain + subdomain rows --%>
+              <%= for group <- @domain_groups do %>
+                <%!-- Domain row --%>
+                <div
+                  id={"backup-domain-#{group.id}"}
+                  class="flex items-center gap-4 px-6 py-4 hover:bg-gray-50 dark:hover:bg-gray-800/40 transition-colors"
+                >
+                  <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-gray-900 dark:text-white truncate">
+                      {group.name}
+                    </p>
+                    <p class="text-xs text-gray-400 dark:text-gray-500 truncate mt-0.5">
+                      {group.document_root}
+                    </p>
+                  </div>
+                  <div class="w-32 flex justify-center">
+                    <button
+                      id={"toggle-domain-#{group.id}"}
+                      phx-click="toggle_domain_files"
+                      phx-value-domain-id={group.id}
+                      phx-value-current={group.include_files}
+                      title={
+                        if(group.include_files,
+                          do: "Included – click to exclude",
+                          else: "Excluded – click to include"
+                        )
+                      }
+                      class={[
+                        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent",
+                        "transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2",
+                        if(group.include_files,
+                          do: "bg-indigo-600",
+                          else: "bg-gray-200 dark:bg-gray-700"
+                        )
+                      ]}
+                      role="switch"
+                      aria-checked={to_string(group.include_files)}
+                    >
+                      <span
+                        aria-hidden="true"
+                        class={[
+                          "pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0",
+                          "transition duration-200 ease-in-out",
+                          if(group.include_files, do: "translate-x-5", else: "translate-x-0")
+                        ]}
+                      />
+                    </button>
+                  </div>
+                </div>
+
+                <%!-- Subdomain rows (indented) --%>
+                <%= for sub <- group.subdomains do %>
+                  <div
+                    id={"backup-subdomain-#{sub.id}"}
+                    class="flex items-center gap-4 pl-10 pr-6 py-3 bg-gray-50/50 dark:bg-gray-800/20 hover:bg-gray-50 dark:hover:bg-gray-800/40 transition-colors"
+                  >
+                    <div class="flex items-center gap-2 flex-1 min-w-0">
+                      <.icon
+                        name="hero-arrow-turn-down-right"
+                        class="w-3 h-3 text-gray-300 dark:text-gray-600 shrink-0"
+                      />
+                      <div class="min-w-0">
+                        <p class="text-sm text-gray-700 dark:text-gray-300 truncate">
+                          {sub.full_name}
+                        </p>
+                        <p class="text-xs text-gray-400 dark:text-gray-500 truncate mt-0.5">
+                          {sub.document_root}
+                        </p>
+                      </div>
+                    </div>
+                    <div class="w-32 flex justify-center">
+                      <button
+                        id={"toggle-subdomain-#{sub.id}"}
+                        phx-click="toggle_subdomain_files"
+                        phx-value-subdomain-id={sub.id}
+                        phx-value-current={sub.include_files}
+                        title={
+                          if(sub.include_files,
+                            do: "Included – click to exclude",
+                            else: "Excluded – click to include"
+                          )
+                        }
+                        class={[
+                          "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent",
+                          "transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2",
+                          if(sub.include_files,
+                            do: "bg-indigo-600",
+                            else: "bg-gray-200 dark:bg-gray-700"
+                          )
+                        ]}
+                        role="switch"
+                        aria-checked={to_string(sub.include_files)}
+                      >
+                        <span
+                          aria-hidden="true"
+                          class={[
+                            "pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0",
+                            "transition duration-200 ease-in-out",
+                            if(sub.include_files, do: "translate-x-5", else: "translate-x-0")
+                          ]}
+                        />
+                      </button>
+                    </div>
+                  </div>
+                <% end %>
+              <% end %>
+
+              <%!-- Footer note --%>
+              <div class="px-6 py-3 bg-gray-50 dark:bg-gray-800/30">
+                <p class="text-xs text-gray-400 dark:text-gray-500">
+                  Controls which domain and subdomain document roots are included when "Domain document roots"
+                  is enabled. The database dump is always global. Changes take effect on the next backup run.
+                </p>
+              </div>
+            </div>
+          <% end %>
         </div>
 
         <%!-- History card --%>

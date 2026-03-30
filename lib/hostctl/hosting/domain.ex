@@ -36,6 +36,7 @@ defmodule Hostctl.Hosting.Domain do
     has_many :ftp_accounts, FtpAccount
     has_one :smarthost_setting, DomainSmarthostSetting
     has_many :bandwidth_snapshots, BandwidthSnapshot
+    has_one :backup_setting, Hostctl.Backup.DomainSetting
 
     timestamps(type: :utc_datetime)
   end

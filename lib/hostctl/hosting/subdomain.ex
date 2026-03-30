@@ -11,6 +11,7 @@ defmodule Hostctl.Hosting.Subdomain do
     field :domain_name, :string, virtual: true
 
     belongs_to :domain, Domain
+    has_one :backup_setting, Hostctl.Backup.SubdomainSetting
 
     timestamps(type: :utc_datetime)
   end

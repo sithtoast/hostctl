@@ -1330,10 +1330,6 @@ defmodule HostctlWeb.DomainLive.Show do
     """
   end
 
-  attr :label, :string, required: true
-  attr :value, :string, required: true
-  attr :icon, :string, required: true
-
   defp format_mb(mb) when is_integer(mb) do
     cond do
       mb >= 1024 -> "#{Float.round(mb / 1024, 2)} GB"
@@ -1341,6 +1337,8 @@ defmodule HostctlWeb.DomainLive.Show do
       true -> "0 MB"
     end
   end
+
+  defp format_mb(_), do: "0 MB"
 
   # Builds a 6-slot chart dataset (most recent month last).
   # Slots with no snapshot default to 0. The current month is flagged with current?: true.
@@ -1375,6 +1373,10 @@ defmodule HostctlWeb.DomainLive.Show do
   defp month_short(10), do: "Oct"
   defp month_short(11), do: "Nov"
   defp month_short(12), do: "Dec"
+
+  attr :label, :string, required: true
+  attr :value, :string, required: true
+  attr :icon, :string, required: true
 
   defp info_card(assigns) do
     ~H"""

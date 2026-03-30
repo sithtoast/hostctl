@@ -29,7 +29,7 @@ defmodule Hostctl.Backup.Runner do
   alias Hostctl.Backup
   alias Hostctl.Backup.S3
   alias Hostctl.Repo
-  alias Hostctl.Hosting.Domain
+  alias Hostctl.Hosting.{Domain, Subdomain}
 
   import Ecto.Query
 
@@ -303,7 +303,15 @@ defmodule Hostctl.Backup.Runner do
   end
 
   defp backup_domain_files(tmp_dir) do
-    domains = Repo.all(from d in Domain, select: [:id, :name, :document_root])
+    included_ids = Backup.file_backup_domain_ids()
+
+    domains =
+      Repo.all(
+        from d in Domain,
+          where: d.id in ^included_ids,
+          select: [:id, :name, :document_root]
+      )
+
     files_dir = Path.join(tmp_dir, "domains")
     File.mkdir_p!(files_dir)
     tar = System.find_executable("tar") || "tar"
@@ -313,6 +321,28 @@ defmodule Hostctl.Backup.Runner do
     |> Enum.each(fn domain ->
       archive = Path.join(files_dir, "#{domain.name}.tar.gz")
       System.cmd(tar, ["-czf", archive, "-C", domain.document_root, "."], stderr_to_stdout: true)
+    end)
+
+    backup_subdomains(files_dir, tar)
+  end
+
+  defp backup_subdomains(files_dir, tar) do
+    excluded_ids = Backup.file_backup_excluded_subdomain_ids()
+
+    subdomains =
+      Repo.all(
+        from s in Subdomain,
+          join: d in Domain,
+          on: d.id == s.domain_id,
+          where: s.id not in ^excluded_ids,
+          select: %{id: s.id, name: s.name, domain_name: d.name, document_root: s.document_root}
+      )
+
+    subdomains
+    |> Enum.filter(fn s -> s.document_root && File.dir?(s.document_root) end)
+    |> Enum.each(fn sub ->
+      archive = Path.join(files_dir, "#{sub.name}.#{sub.domain_name}.tar.gz")
+      System.cmd(tar, ["-czf", archive, "-C", sub.document_root, "."], stderr_to_stdout: true)
     end)
   end
 
