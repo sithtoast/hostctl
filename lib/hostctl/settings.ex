@@ -460,6 +460,8 @@ defmodule Hostctl.Settings do
     SmarthostSetting.changeset(setting, attrs)
   end
 
+  def server_ips, do: primary_server_ips()
+
   defp primary_server_ips do
     settings = list_ip_settings()
 

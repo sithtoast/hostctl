@@ -156,7 +156,8 @@ defmodule Hostctl.Hosting do
     |> Subdomain.changeset(attrs)
     |> Repo.insert()
     |> case do
-      {:ok, _subdomain} = result ->
+      {:ok, subdomain} = result ->
+        maybe_create_subdomain_dns_records(domain, subdomain.name)
         WebServer.sync_domain(domain)
         result
 
@@ -401,6 +402,32 @@ defmodule Hostctl.Hosting do
         _ -> :ok
       end
     end)
+  end
+
+  defp maybe_create_subdomain_dns_records(%Domain{} = domain, subdomain_name) do
+    zone = get_dns_zone_for_domain(domain)
+
+    if zone do
+      {ipv4, ipv6} = Settings.server_ips()
+      fqdn = "#{subdomain_name}.#{domain.name}"
+
+      records =
+        [
+          if(ipv4 != "", do: %{type: "A", name: fqdn, value: ipv4, ttl: 14400}),
+          if(ipv6 != "", do: %{type: "AAAA", name: fqdn, value: ipv6, ttl: 14400})
+        ]
+        |> Enum.reject(&is_nil/1)
+
+      Enum.each(records, fn attrs ->
+        %DnsRecord{dns_zone_id: zone.id}
+        |> DnsRecord.changeset(attrs)
+        |> Repo.insert()
+        |> case do
+          {:ok, record} -> maybe_sync_create_to_cloudflare(zone, record)
+          _ -> :ok
+        end
+      end)
+    end
   end
 
   # ---------------------------------------------------------------------------
