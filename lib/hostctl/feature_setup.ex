@@ -124,6 +124,39 @@ defmodule Hostctl.FeatureSetup do
   end
 
   @doc """
+  Reconciles each feature's DB state with the actual running system.
+
+  For service-based features that are recorded as `not_installed` but whose
+  systemd services are all currently active, this marks them as `installed`.
+  This handles features that were installed outside the panel (e.g. via
+  `install.sh`) without a prior panel interaction.
+  """
+  def reconcile_installed_features do
+    for feature <- @features, feature.services != [] do
+      setting = Settings.get_feature_setting(feature.key)
+
+      if setting.status == "not_installed" and services_active?(feature.services) do
+        Settings.save_feature_setting(feature.key, %{
+          enabled: true,
+          status: "installed",
+          status_message: nil
+        })
+      end
+    end
+
+    :ok
+  end
+
+  defp services_active?(services) do
+    Enum.all?(services, fn service ->
+      case System.cmd("systemctl", ["is-active", "--quiet", service], stderr_to_stdout: true) do
+        {_, 0} -> true
+        _ -> false
+      end
+    end)
+  end
+
+  @doc """
   Installs a feature asynchronously. Broadcasts progress to
   `"feature_setup:<key>"` via PubSub.
 

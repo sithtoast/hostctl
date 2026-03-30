@@ -6,13 +6,15 @@ defmodule HostctlWeb.PanelLive.Features do
 
   @impl true
   def mount(_params, _session, socket) do
-    features = load_features()
-
     if connected?(socket) do
+      FeatureSetup.reconcile_installed_features()
+
       for feature <- FeatureSetup.available_features() do
         Phoenix.PubSub.subscribe(Hostctl.PubSub, "feature_setup:#{feature.key}")
       end
     end
+
+    features = load_features()
 
     {:ok,
      socket
