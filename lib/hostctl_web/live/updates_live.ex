@@ -5,19 +5,31 @@ defmodule HostctlWeb.UpdatesLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    {:ok,
+     socket
+     |> assign(:page_title, "Updates")
+     |> assign(:check_status, :loading)
+     |> assign(:update_info, nil)
+     |> assign(:update_state, :idle)
+     |> assign(:update_output, [])
+     |> assign(:update_port, nil)
+     |> assign(:include_prereleases?, Updater.prereleases_enabled?())
+     |> assign(:update_possible?, Updater.update_possible?())}
+  end
+
+  @impl true
+  def handle_params(params, _url, socket) do
+    prereleases? = prereleases_param(params)
+
     socket =
       socket
-      |> assign(:page_title, "Updates")
+      |> assign(:include_prereleases?, prereleases?)
       |> assign(:check_status, :loading)
       |> assign(:update_info, nil)
-      |> assign(:update_state, :idle)
-      |> assign(:update_output, [])
-      |> assign(:update_port, nil)
-      |> assign(:update_possible?, Updater.update_possible?())
 
     if connected?(socket), do: send(self(), :check_updates)
 
-    {:ok, socket}
+    {:noreply, socket}
   end
 
   @impl true
@@ -42,7 +54,7 @@ defmodule HostctlWeb.UpdatesLive do
   @impl true
   def handle_info(:check_updates, socket) do
     socket =
-      case Updater.check_for_updates() do
+      case Updater.check_for_updates(prereleases: socket.assigns.include_prereleases?) do
         {:ok, info} ->
           socket
           |> assign(:check_status, :ok)
@@ -69,15 +81,52 @@ defmodule HostctlWeb.UpdatesLive do
               Check for new versions and view release notes.
             </p>
           </div>
-          <%= if @check_status != :loading do %>
+          <div class="flex items-center gap-3">
             <button
-              id="recheck-btn"
-              phx-click="recheck"
-              class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              id="prerelease-toggle"
+              type="button"
+              role="switch"
+              aria-checked={to_string(@include_prereleases?)}
+              aria-label="Include pre-releases"
+              phx-click="toggle_prereleases"
+              disabled={@update_state == :running}
+              class={[
+                "group inline-flex items-center gap-3 rounded-xl border px-3 py-2 text-sm transition-colors",
+                @update_state == :running &&
+                  "cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-600",
+                @update_state != :running &&
+                  "border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+              ]}
             >
-              <.icon name="hero-arrow-path" class="w-4 h-4" /> Check again
+              <span class="text-left">
+                <span class="block font-medium text-gray-900 dark:text-white">Pre-releases</span>
+                <span class="block text-xs text-gray-500 dark:text-gray-400">
+                  Include beta and release candidate builds
+                </span>
+              </span>
+              <span class={[
+                "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
+                @include_prereleases? && "bg-amber-500",
+                !@include_prereleases? && "bg-gray-300 dark:bg-gray-700"
+              ]}>
+                <span class={[
+                  "inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
+                  @include_prereleases? && "translate-x-5",
+                  !@include_prereleases? && "translate-x-0.5"
+                ]} />
+              </span>
             </button>
-          <% end %>
+
+            <%= if @check_status != :loading do %>
+              <button
+                id="recheck-btn"
+                phx-click="recheck"
+                class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                <.icon name="hero-arrow-path" class="w-4 h-4" /> Check again
+              </button>
+            <% end %>
+          </div>
         </div>
 
         <%!-- Status card --%>
@@ -376,7 +425,23 @@ defmodule HostctlWeb.UpdatesLive do
     {:noreply, socket}
   end
 
+  @impl true
+  def handle_event("toggle_prereleases", _params, socket) do
+    {:noreply,
+     push_patch(socket,
+       to: updates_path(!socket.assigns.include_prereleases?)
+     )}
+  end
+
   # --- Private helpers ---
+
+  defp prereleases_param(%{"prereleases" => value}) when value in [true, "true", "1"], do: true
+  defp prereleases_param(%{"prereleases" => value}) when value in [false, "false", "0"], do: false
+  defp prereleases_param(_params), do: Updater.prereleases_enabled?()
+
+  defp updates_path(prereleases?) do
+    "/updates?prereleases=#{if(prereleases?, do: "true", else: "false")}"
+  end
 
   defp format_date(iso_string) do
     case DateTime.from_iso8601(iso_string) do

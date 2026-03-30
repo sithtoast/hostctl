@@ -47,16 +47,21 @@ defmodule Hostctl.Updater do
 
   Returns `{:error, reason}` on failure.
   """
-  def check_for_updates do
+  def check_for_updates(opts \\ []) do
     case Application.get_env(:hostctl, :github_repo) do
       nil -> {:error, :not_configured}
-      repo -> do_check(repo)
+      repo -> do_check(repo, Keyword.get(opts, :prereleases, prereleases_enabled?()))
     end
   end
 
-  defp do_check(repo) do
-    prereleases? = Application.get_env(:hostctl, :github_prereleases, false)
+  @doc """
+  Returns whether update checks should include pre-releases by default.
+  """
+  def prereleases_enabled? do
+    Application.get_env(:hostctl, :github_prereleases, false)
+  end
 
+  defp do_check(repo, prereleases?) do
     case fetch_latest_release(repo, prereleases?) do
       {:ok, release} ->
         current = current_version()
