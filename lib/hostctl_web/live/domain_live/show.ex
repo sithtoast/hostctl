@@ -187,6 +187,8 @@ defmodule HostctlWeb.DomainLive.Show do
 
   # Subdomain events
   def handle_event("validate_subdomain", %{"subdomain" => params}, socket) do
+    params = Map.put(params, "domain_name", socket.assigns.domain.name)
+
     form =
       %Subdomain{}
       |> Hosting.change_subdomain(params)
@@ -196,6 +198,8 @@ defmodule HostctlWeb.DomainLive.Show do
   end
 
   def handle_event("save_subdomain", %{"subdomain" => params}, socket) do
+    params = Map.put(params, "domain_name", socket.assigns.domain.name)
+
     case Hosting.create_subdomain(socket.assigns.domain, params) do
       {:ok, subdomain} ->
         {:noreply,
@@ -673,7 +677,7 @@ defmodule HostctlWeb.DomainLive.Show do
                   <.input
                     field={@subdomain_form[:document_root]}
                     type="text"
-                    placeholder="/var/www/sub"
+                    placeholder="/var/www/sub.example.com/public"
                     label="Document root (optional)"
                   />
                 </div>
