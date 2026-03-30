@@ -27,6 +27,7 @@ defmodule Hostctl.Backup.Runner do
   require Logger
 
   alias Hostctl.Backup
+  alias Hostctl.Backup.Archive
   alias Hostctl.Backup.S3
   alias Hostctl.Repo
   alias Hostctl.Backup.{DomainSetting, SubdomainSetting}
@@ -327,6 +328,9 @@ defmodule Hostctl.Backup.Runner do
           broadcast_progress("Mailbox backup complete.")
         end
 
+        broadcast_progress("Building archive index…")
+        Archive.write_index!(tmp_dir)
+
         broadcast_progress("Creating archive…")
         create_archive(archive_path, tmp_dir)
         {:ok, %File.Stat{size: file_size}} = File.stat(archive_path)
@@ -416,6 +420,9 @@ defmodule Hostctl.Backup.Runner do
           backup_domain_mail(tmp_dir, domain.name)
           broadcast_progress("Mailbox backup complete.")
         end
+
+        broadcast_progress("Building archive index…")
+        Archive.write_index!(tmp_dir)
 
         broadcast_progress("Creating archive…")
         create_archive(archive_path, tmp_dir)

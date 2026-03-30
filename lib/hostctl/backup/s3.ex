@@ -165,6 +165,53 @@ defmodule Hostctl.Backup.S3 do
     end
   end
 
+  @doc """
+  Downloads a single object from S3 into a local file path.
+  Returns `{:ok, destination_path}` or `{:error, reason}`.
+  """
+  def download(%{} = cfg, s3_key, destination_path)
+      when is_binary(s3_key) and is_binary(destination_path) do
+    now = DateTime.utc_now()
+    path = object_path(cfg.s3_bucket, s3_key)
+    host = endpoint_host(cfg.s3_endpoint)
+    payload_hash = sha256_hex("")
+
+    headers =
+      sign(
+        "GET",
+        path,
+        "",
+        [
+          {"host", host},
+          {"x-amz-content-sha256", payload_hash},
+          {"x-amz-date", fmt_datetime(now)}
+        ],
+        payload_hash,
+        now,
+        cfg
+      )
+
+    url = endpoint_url(cfg.s3_endpoint) <> path
+
+    case Req.get(url, headers: headers) do
+      {:ok, %Req.Response{status: 200, body: body}} ->
+        destination_path
+        |> Path.dirname()
+        |> File.mkdir_p!()
+
+        case File.write(destination_path, body) do
+          :ok -> {:ok, destination_path}
+          {:error, reason} -> {:error, "Failed to write downloaded archive: #{inspect(reason)}"}
+        end
+
+      {:ok, %Req.Response{status: s, body: b}} ->
+        {:error, "Download failed: HTTP #{s}: #{body_text(b)}"}
+
+      {:error, reason} ->
+        {:error, "Download request failed: #{inspect(reason)}"}
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Single PUT upload
   # ---------------------------------------------------------------------------
@@ -552,23 +599,31 @@ defmodule Hostctl.Backup.S3 do
     headers |> Map.get(name) |> List.wrap() |> List.first()
   end
 
-  defp get_response_header(headers, name) when is_list(headers) do
-    case Enum.find(headers, fn {k, _} -> String.downcase(to_string(k)) == name end) do
-      {_, v} -> v
-      nil -> nil
-    end
-  end
-
   defp parse_list_response(body) when is_binary(body) do
     Regex.scan(
-      ~r/<Contents>.*?<Key>(.*?)<\/Key>.*?<LastModified>(.*?)<\/LastModified>.*?<\/Contents>/s,
+      ~r/<Contents>.*?<Key>(.*?)<\/Key>.*?<LastModified>(.*?)<\/LastModified>.*?(?:<Size>(\d+)<\/Size>)?.*?<\/Contents>/s,
       body
     )
-    |> Enum.map(fn [_, key, last_modified] -> %{key: key, last_modified: last_modified} end)
+    |> Enum.map(fn
+      [_, key, last_modified, size] ->
+        %{key: key, last_modified: last_modified, size: parse_int(size)}
+
+      [_, key, last_modified] ->
+        %{key: key, last_modified: last_modified, size: nil}
+    end)
   end
 
   defp parse_list_response(_), do: []
 
   defp body_text(body) when is_binary(body), do: body
   defp body_text(body), do: inspect(body)
+
+  defp parse_int(nil), do: nil
+
+  defp parse_int(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} -> int
+      _ -> nil
+    end
+  end
 end

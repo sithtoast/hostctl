@@ -5,8 +5,10 @@ defmodule Hostctl.Backup do
 
   import Ecto.Query
   alias Hostctl.Repo
+  alias Hostctl.Backup.S3
   alias Hostctl.Backup.{Setting, Log, DomainSetting, SubdomainSetting}
   alias Hostctl.Hosting.{Domain, Subdomain}
+  alias Hostctl.Hosting.Database
 
   # ---------------------------------------------------------------------------
   # Settings
@@ -307,4 +309,89 @@ defmodule Hostctl.Backup do
       from ss in SubdomainSetting, where: ss.include_files == false, select: ss.subdomain_id
     )
   end
+
+  # ---------------------------------------------------------------------------
+  # Restore helpers
+  # ---------------------------------------------------------------------------
+
+  @doc "Lists local backup archives available for restore selection."
+  def list_restore_local_archives(limit \\ 25) do
+    local_dir = get_or_create_settings().local_path || "/var/backups/hostctl"
+
+    case File.ls(local_dir) do
+      {:ok, files} ->
+        files
+        |> Enum.filter(&archive_file?/1)
+        |> Enum.map(fn name ->
+          path = Path.join(local_dir, name)
+
+          %{mtime: mtime} =
+            case File.stat(path, time: :posix) do
+              {:ok, %File.Stat{mtime: file_mtime}} -> %{mtime: file_mtime}
+              _ -> %{mtime: 0}
+            end
+
+          %{name: name, path: path, mtime: mtime}
+        end)
+        |> Enum.sort_by(& &1.mtime, :desc)
+        |> Enum.take(limit)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  @doc "Lists S3 backup archives under the configured backup prefix."
+  def list_restore_s3_archives(limit \\ 50) do
+    settings = get_or_create_settings()
+
+    if settings.s3_enabled do
+      prefix = settings.s3_path_prefix || "hostctl-backups"
+
+      case S3.list_objects(settings, prefix <> "/") do
+        {:ok, objects} ->
+          archives =
+            objects
+            |> Enum.filter(fn %{key: key} -> archive_file?(key) end)
+            |> Enum.sort_by(fn %{last_modified: lm} -> lm || "" end, :desc)
+            |> Enum.take(limit)
+
+          {:ok, archives}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  @doc "Returns available database names grouped by backend for restore targeting."
+  def restore_database_targets do
+    panel_db = to_string(Keyword.get(Hostctl.Repo.config(), :database, "hostctl"))
+
+    mysql =
+      Repo.all(
+        from d in Database,
+          where: d.db_type == "mysql" and d.status == "active",
+          order_by: [asc: d.name],
+          select: d.name
+      )
+
+    postgresql =
+      Repo.all(
+        from d in Database,
+          where: d.db_type == "postgresql" and d.status == "active",
+          order_by: [asc: d.name],
+          select: d.name
+      )
+
+    %{panel_postgresql: panel_db, mysql: mysql, postgresql: postgresql}
+  end
+
+  defp archive_file?(name) when is_binary(name) do
+    String.ends_with?(name, ".tar.gz") or String.ends_with?(name, ".tgz")
+  end
+
+  defp archive_file?(_), do: false
 end
