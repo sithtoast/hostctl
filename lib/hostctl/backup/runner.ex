@@ -37,6 +37,17 @@ defmodule Hostctl.Backup.Runner do
   alias Hostctl.Backup.DomainSetting
   alias Hostctl.Hosting.{Domain, Subdomain, Database}
 
+  alias Hostctl.Hosting.{
+    DnsZone,
+    DnsRecord,
+    EmailAccount,
+    DomainProxy,
+    SslCertificate,
+    CronJob,
+    FtpAccount,
+    DomainSmarthostSetting
+  }
+
   import Ecto.Query
 
   @schedule_check_interval :timer.minutes(1)
@@ -516,6 +527,12 @@ defmodule Hostctl.Backup.Runner do
 
     result =
       try do
+        if settings.backup_mysql do
+          broadcast_progress("Backing up databases for #{domain.name}…")
+          dump_domain_databases(tmp_dir, domain)
+          broadcast_progress("Domain database backup complete.")
+        end
+
         if settings.backup_files do
           broadcast_progress("Backing up domain files for #{domain.name}…")
           backup_domain_scope_files(tmp_dir, domain, settings)
@@ -527,6 +544,12 @@ defmodule Hostctl.Backup.Runner do
           backup_domain_mail(tmp_dir, domain.name)
           broadcast_progress("Mailbox backup complete.")
         end
+
+        broadcast_progress("Exporting domain metadata…")
+        metadata = export_domain_metadata(domain)
+        metadata_json = Jason.encode!(metadata, pretty: true)
+        File.write!(Path.join(tmp_dir, "domain-metadata.json"), metadata_json)
+        broadcast_progress("Domain metadata exported.")
 
         broadcast_progress("Building archive index…")
         Archive.write_index!(tmp_dir)
@@ -616,6 +639,12 @@ defmodule Hostctl.Backup.Runner do
 
     result =
       try do
+        if settings.backup_mysql do
+          broadcast_progress("Streaming databases for #{domain.name} to S3…")
+          stream_domain_databases_to_s3(settings, prefix, domain)
+          broadcast_progress("Domain database streaming complete.")
+        end
+
         if settings.backup_files do
           broadcast_progress("Streaming domain files for #{domain.name} to S3…")
           stream_domain_scope_files_to_s3(settings, prefix, tar, domain)
@@ -627,6 +656,18 @@ defmodule Hostctl.Backup.Runner do
           stream_domain_mail_to_s3(settings, prefix, tar, domain.name)
           broadcast_progress("Mailbox streaming complete.")
         end
+
+        broadcast_progress("Exporting domain metadata to S3…")
+        metadata = export_domain_metadata(domain)
+        metadata_json = Jason.encode!(metadata, pretty: true)
+        metadata_s3_key = "#{prefix}/domain-metadata.json"
+
+        case S3.upload_binary(settings, metadata_s3_key, metadata_json) do
+          {:ok, _} -> :ok
+          {:error, reason} -> raise "Domain metadata upload failed: #{reason}"
+        end
+
+        broadcast_progress("Domain metadata exported.")
 
         apply_s3_retention(settings)
 
@@ -725,11 +766,14 @@ defmodule Hostctl.Backup.Runner do
       )
       |> Enum.map(fn subdomain_name -> "#{subdomain_name}.#{domain.name}" end)
 
+    mysql_db_names = domain_mysql_databases(domain.id)
+    postgresql_db_names = domain_postgresql_databases(domain.id)
+
     %{
       scope: "domain",
       includes: %{
         database: false,
-        mysql: false,
+        mysql: settings.backup_mysql,
         files: settings.backup_files,
         files_incremental: settings.backup_incremental,
         mail: settings.backup_mail and domain_mail_included?(domain.id)
@@ -737,8 +781,199 @@ defmodule Hostctl.Backup.Runner do
       domain_names: [domain.name],
       subdomain_names: subdomain_names,
       mail_domain_names: if(domain_mail_included?(domain.id), do: [domain.name], else: []),
-      mysql_databases: [],
-      postgresql_databases: []
+      mysql_databases: mysql_db_names,
+      postgresql_databases: postgresql_db_names
+    }
+  end
+
+  # Exports all panel metadata for a domain as a JSON-serializable map.
+  # This captures everything needed to restore a domain's configuration
+  # independently of the full panel database backup.
+  defp export_domain_metadata(%Domain{} = domain) do
+    subdomains =
+      Repo.all(
+        from s in Subdomain,
+          where: s.domain_id == ^domain.id,
+          order_by: [asc: s.name]
+      )
+
+    dns_zone = Repo.get_by(DnsZone, domain_id: domain.id)
+
+    dns_records =
+      if dns_zone do
+        Repo.all(
+          from r in DnsRecord,
+            where: r.dns_zone_id == ^dns_zone.id,
+            order_by: [asc: r.type, asc: r.name]
+        )
+      else
+        []
+      end
+
+    email_accounts =
+      Repo.all(
+        from e in EmailAccount,
+          where: e.domain_id == ^domain.id,
+          order_by: [asc: e.username]
+      )
+
+    databases =
+      Repo.all(
+        from d in Database,
+          where: d.domain_id == ^domain.id,
+          order_by: [asc: d.name],
+          preload: [:db_users]
+      )
+
+    proxies =
+      Repo.all(
+        from p in DomainProxy,
+          where: p.domain_id == ^domain.id,
+          order_by: [asc: p.path]
+      )
+
+    ssl_cert = Repo.get_by(SslCertificate, domain_id: domain.id)
+
+    cron_jobs =
+      Repo.all(
+        from c in CronJob,
+          where: c.domain_id == ^domain.id,
+          order_by: [asc: c.id]
+      )
+
+    ftp_accounts =
+      Repo.all(
+        from f in FtpAccount,
+          where: f.domain_id == ^domain.id,
+          order_by: [asc: f.username]
+      )
+
+    smarthost = Repo.get_by(DomainSmarthostSetting, domain_id: domain.id)
+
+    backup_setting = Repo.get_by(DomainSetting, domain_id: domain.id)
+
+    subdomain_backup_settings =
+      Repo.all(
+        from sbs in Hostctl.Backup.SubdomainSetting,
+          join: s in Subdomain,
+          on: s.id == sbs.subdomain_id,
+          where: s.domain_id == ^domain.id
+      )
+
+    %{
+      exported_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      version: 1,
+      domain: %{
+        name: domain.name,
+        document_root: domain.document_root,
+        php_version: domain.php_version,
+        status: domain.status,
+        ssl_enabled: domain.ssl_enabled
+      },
+      subdomains:
+        Enum.map(subdomains, fn s ->
+          sub_bs = Enum.find(subdomain_backup_settings, &(&1.subdomain_id == s.id))
+
+          %{
+            name: s.name,
+            document_root: s.document_root,
+            status: s.status,
+            backup_setting:
+              if(sub_bs,
+                do: %{
+                  include_files: sub_bs.include_files,
+                  excluded_dirs: sub_bs.excluded_dirs,
+                  s3_mode: sub_bs.s3_mode
+                }
+              )
+          }
+        end),
+      dns_zone:
+        if(dns_zone,
+          do: %{
+            ttl: dns_zone.ttl,
+            status: dns_zone.status,
+            records:
+              Enum.map(dns_records, fn r ->
+                %{type: r.type, name: r.name, value: r.value, ttl: r.ttl, priority: r.priority}
+              end)
+          }
+        ),
+      email_accounts:
+        Enum.map(email_accounts, fn e ->
+          %{
+            username: e.username,
+            hashed_password: e.hashed_password,
+            quota_mb: e.quota_mb,
+            status: e.status
+          }
+        end),
+      databases:
+        Enum.map(databases, fn d ->
+          %{
+            name: d.name,
+            db_type: d.db_type,
+            status: d.status,
+            db_users:
+              Enum.map(d.db_users, fn u ->
+                %{username: u.username, hashed_password: u.hashed_password}
+              end)
+          }
+        end),
+      proxies:
+        Enum.map(proxies, fn p ->
+          %{
+            path: p.path,
+            container_name: p.container_name,
+            upstream_port: p.upstream_port,
+            enabled: p.enabled
+          }
+        end),
+      ssl_certificate:
+        if(ssl_cert,
+          do: %{
+            cert_type: ssl_cert.cert_type,
+            certificate: ssl_cert.certificate,
+            private_key: ssl_cert.private_key,
+            expires_at:
+              if(ssl_cert.expires_at, do: DateTime.to_iso8601(ssl_cert.expires_at)),
+            status: ssl_cert.status,
+            email: ssl_cert.email
+          }
+        ),
+      cron_jobs:
+        Enum.map(cron_jobs, fn c ->
+          %{schedule: c.schedule, command: c.command, enabled: c.enabled}
+        end),
+      ftp_accounts:
+        Enum.map(ftp_accounts, fn f ->
+          %{
+            username: f.username,
+            hashed_password: f.hashed_password,
+            home_dir: f.home_dir,
+            status: f.status
+          }
+        end),
+      smarthost_setting:
+        if(smarthost,
+          do: %{
+            enabled: smarthost.enabled,
+            host: smarthost.host,
+            port: smarthost.port,
+            auth_required: smarthost.auth_required,
+            username: smarthost.username,
+            password: smarthost.password
+          }
+        ),
+      backup_setting:
+        if(backup_setting,
+          do: %{
+            include_files: backup_setting.include_files,
+            include_mail: backup_setting.include_mail,
+            excluded_dirs: backup_setting.excluded_dirs,
+            s3_mode: backup_setting.s3_mode
+          }
+        )
     }
   end
 
@@ -845,6 +1080,24 @@ defmodule Hostctl.Backup.Runner do
     )
   end
 
+  defp domain_mysql_databases(domain_id) do
+    Repo.all(
+      from d in Database,
+        where: d.domain_id == ^domain_id and d.db_type == "mysql",
+        select: d.name,
+        order_by: d.name
+    )
+  end
+
+  defp domain_postgresql_databases(domain_id) do
+    Repo.all(
+      from d in Database,
+        where: d.domain_id == ^domain_id and d.db_type == "postgresql",
+        select: d.name,
+        order_by: d.name
+    )
+  end
+
   defp postgres_server_config do
     config = Hostctl.Repo.config()
     host = to_string(Keyword.get(config, :hostname, "localhost"))
@@ -931,6 +1184,89 @@ defmodule Hostctl.Backup.Runner do
           raise "pg_dump failed for #{db_name} (exit #{code}): #{output}"
       end
     end)
+  end
+
+  # Dumps databases belonging to a specific domain into tmp_dir.
+  defp dump_domain_databases(tmp_dir, %Domain{} = domain) do
+    mysql_dbs = domain_mysql_databases(domain.id)
+
+    if mysql_dbs != [] do
+      {host, port, username, password} = mysql_server_config()
+      mysql_dump = System.find_executable("mysqldump") || "mysqldump"
+      mysql_dir = Path.join(tmp_dir, "mysql")
+      File.mkdir_p!(mysql_dir)
+
+      Enum.each(mysql_dbs, fn db_name ->
+        dump_file = Path.join(mysql_dir, "#{db_name}.sql")
+        broadcast_progress("  → Dumping MySQL database #{db_name}…")
+
+        args = [
+          "--host",
+          host,
+          "--port",
+          port,
+          "--user",
+          username,
+          "--single-transaction",
+          "--routines",
+          "--triggers",
+          "--result-file",
+          dump_file,
+          db_name
+        ]
+
+        case System.cmd(mysql_dump, args,
+               env: [{"MYSQL_PWD", password}],
+               stderr_to_stdout: true
+             ) do
+          {_, 0} ->
+            :ok
+
+          {output, code} ->
+            raise "mysqldump failed for #{db_name} (exit #{code}): #{output}"
+        end
+      end)
+    end
+
+    pg_dbs = domain_postgresql_databases(domain.id)
+
+    if pg_dbs != [] do
+      {pg_host, pg_port, pg_user, pg_password} = postgres_server_config()
+      pg_dump = System.find_executable("pg_dump") || "pg_dump"
+      pg_dir = Path.join(tmp_dir, "postgresql")
+      File.mkdir_p!(pg_dir)
+
+      Enum.each(pg_dbs, fn db_name ->
+        dump_file = Path.join(pg_dir, "#{db_name}.sql")
+        broadcast_progress("  → Dumping PostgreSQL database #{db_name}…")
+
+        args = [
+          "--host",
+          pg_host,
+          "--port",
+          pg_port,
+          "--username",
+          pg_user,
+          "--no-password",
+          "--format",
+          "plain",
+          "--file",
+          dump_file,
+          db_name
+        ]
+
+        case System.cmd(pg_dump, args,
+               env: [{"PGPASSWORD", pg_password}],
+               stderr_to_stdout: true
+             ) do
+          {_, 0} ->
+            :ok
+
+          {output, code} ->
+            raise "pg_dump failed for #{db_name} (exit #{code}): #{output}"
+        end
+      end)
+    end
   end
 
   # Archives each included domain's mailboxes to `tmp_dir/mail/<domain>.tar.gz`.
@@ -1170,6 +1506,91 @@ defmodule Hostctl.Backup.Runner do
         end
       end
     end)
+  end
+
+  # Streams a single domain's associated databases to S3.
+  defp stream_domain_databases_to_s3(settings, prefix, %Domain{} = domain) do
+    mysql_dbs = domain_mysql_databases(domain.id)
+
+    if mysql_dbs != [] do
+      {host, port, username, password} = mysql_server_config()
+      mysql_dump = System.find_executable("mysqldump") || "mysqldump"
+
+      Enum.each(mysql_dbs, fn db_name ->
+        broadcast_progress("  → Streaming MySQL database #{db_name} to S3…")
+        s3_key = "#{prefix}/mysql/#{db_name}.sql.gz"
+
+        args = [
+          "--host",
+          host,
+          "--port",
+          port,
+          "--user",
+          username,
+          "--single-transaction",
+          "--routines",
+          "--triggers",
+          db_name
+        ]
+
+        case System.cmd(mysql_dump, args,
+               env: [{"MYSQL_PWD", password}],
+               stderr_to_stdout: true
+             ) do
+          {dump_data, 0} ->
+            compressed = :zlib.gzip(dump_data)
+
+            case S3.upload_binary(settings, s3_key, compressed) do
+              {:ok, _} -> :ok
+              {:error, reason} -> raise "MySQL S3 upload failed for #{db_name}: #{reason}"
+            end
+
+          {output, code} ->
+            raise "mysqldump failed for #{db_name} (exit #{code}): #{output}"
+        end
+      end)
+    end
+
+    pg_dbs = domain_postgresql_databases(domain.id)
+
+    if pg_dbs != [] do
+      {pg_host, pg_port, pg_user, pg_password} = postgres_server_config()
+      pg_dump = System.find_executable("pg_dump") || "pg_dump"
+
+      Enum.each(pg_dbs, fn db_name ->
+        broadcast_progress("  → Streaming PostgreSQL database #{db_name} to S3…")
+        s3_key = "#{prefix}/postgresql/#{db_name}.sql.gz"
+
+        args = [
+          "--host",
+          pg_host,
+          "--port",
+          pg_port,
+          "--username",
+          pg_user,
+          "--no-password",
+          "--format",
+          "plain",
+          db_name
+        ]
+
+        case System.cmd(pg_dump, args,
+               env: [{"PGPASSWORD", pg_password}],
+               stderr_to_stdout: true
+             ) do
+          {dump_data, 0} ->
+            compressed = :zlib.gzip(dump_data)
+
+            case S3.upload_binary(settings, s3_key, compressed) do
+              {:ok, _} -> :ok
+              {:error, reason} -> raise "PostgreSQL S3 upload failed for #{db_name}: #{reason}"
+            end
+
+          {output, code} ->
+            raise "pg_dump failed for #{db_name} (exit #{code}): #{output}"
+        end
+      end)
+    end
   end
 
   # Runs pg_dump, gzip-compresses the output in memory, and uploads to S3.
