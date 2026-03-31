@@ -183,6 +183,12 @@ defmodule Hostctl.Backup.Runner do
   defp start_backup(trigger, state) do
     settings = Backup.get_or_create_settings()
 
+    # One-off (manual) backups always run as full, never incremental
+    settings =
+      if trigger == "manual",
+        do: %{settings | backup_incremental: false},
+        else: settings
+
     with {:ok, log} <-
            Backup.create_log(%{
              trigger: trigger,
@@ -210,6 +216,9 @@ defmodule Hostctl.Backup.Runner do
 
   defp start_domain_backup(%Domain{} = domain, state) do
     settings = Backup.get_or_create_settings()
+
+    # One-off domain backups always run as full, never incremental
+    settings = %{settings | backup_incremental: false}
 
     with {:ok, log} <-
            Backup.create_log(%{
@@ -1290,9 +1299,18 @@ defmodule Hostctl.Backup.Runner do
 
   defp incremental_snapshot_path(%{backup_incremental: true, backup_files: true}, scope, name)
        when is_binary(scope) and is_binary(name) do
-    File.mkdir_p!(@incremental_state_dir)
-    safe = String.replace(name, ~r/[^a-zA-Z0-9._-]/, "_")
-    Path.join(@incremental_state_dir, "#{scope}-#{safe}.snar")
+    case File.mkdir_p(@incremental_state_dir) do
+      :ok ->
+        safe = String.replace(name, ~r/[^a-zA-Z0-9._-]/, "_")
+        Path.join(@incremental_state_dir, "#{scope}-#{safe}.snar")
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Backup.Runner] Cannot create incremental state dir #{@incremental_state_dir}: #{inspect(reason)}, falling back to full backup"
+        )
+
+        nil
+    end
   end
 
   defp incremental_snapshot_path(_, _, _), do: nil
