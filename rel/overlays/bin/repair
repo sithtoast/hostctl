@@ -521,7 +521,7 @@ else
 fi
 
 # =============================================================================
-# 7.7. vsftpd virtual user delete permissions
+# 7.7. vsftpd virtual user permissions
 # =============================================================================
 section "7.7. vsftpd config"
 
@@ -530,20 +530,19 @@ if dpkg -l vsftpd &>/dev/null 2>&1; then
   if [[ -f "$VSFTPD_CONF" ]]; then
     vsftpd_changed=false
 
-    for directive in anon_other_write_enable anon_mkdir_write_enable; do
-      if grep -q "^${directive}=YES" "$VSFTPD_CONF"; then
-        ok "$directive already set"
-      else
-        # Remove any existing (possibly =NO) line, then append =YES
-        sed -i "/^${directive}=/d" "$VSFTPD_CONF"
-        echo "${directive}=YES" >> "$VSFTPD_CONF"
-        fix "$directive → YES"
-        FIXED=$((FIXED + 1))
-        vsftpd_changed=true
-      fi
-    done
+    # Ensure virtual_use_local_privs=YES is in the global config
+    if grep -q "^virtual_use_local_privs=YES" "$VSFTPD_CONF"; then
+      ok "virtual_use_local_privs already set"
+    else
+      sed -i "/^virtual_use_local_privs=/d" "$VSFTPD_CONF"
+      echo "virtual_use_local_privs=YES" >> "$VSFTPD_CONF"
+      fix "virtual_use_local_privs → YES"
+      FIXED=$((FIXED + 1))
+      vsftpd_changed=true
+    fi
 
-    # Patch per-user config files under vsftpd_user_conf
+    # Patch per-user config files: ensure virtual_use_local_privs=YES is present
+    # and remove stale anon_* directives (irrelevant when local privs are active)
     VSFTPD_USER_CONF_DIR="/etc/vsftpd/vsftpd_user_conf"
     if [[ -d "$VSFTPD_USER_CONF_DIR" ]]; then
       for uconf in "$VSFTPD_USER_CONF_DIR"/*; do
@@ -551,23 +550,49 @@ if dpkg -l vsftpd &>/dev/null 2>&1; then
         uname="$(basename "$uconf")"
         per_user_changed=false
 
-        for directive in anon_other_write_enable anon_mkdir_write_enable; do
-          if ! grep -q "^${directive}=YES" "$uconf"; then
-            sed -i "/^${directive}=/d" "$uconf"
-            echo "${directive}=YES" >> "$uconf"
-            per_user_changed=true
-          fi
-        done
+        # Add virtual_use_local_privs=YES if missing
+        if ! grep -q "^virtual_use_local_privs=YES" "$uconf"; then
+          sed -i "/^virtual_use_local_privs=/d" "$uconf"
+          echo "virtual_use_local_privs=YES" >> "$uconf"
+          per_user_changed=true
+        fi
+
+        # Remove anon_* directives (not needed with local privs)
+        if grep -q "^anon_" "$uconf"; then
+          sed -i "/^anon_/d" "$uconf"
+          per_user_changed=true
+        fi
 
         if $per_user_changed; then
           fix "Patched per-user config for $uname"
           FIXED=$((FIXED + 1))
+          vsftpd_changed=true
         fi
       done
     fi
 
     if $vsftpd_changed && systemctl is-active --quiet vsftpd 2>/dev/null; then
       systemctl reload vsftpd 2>/dev/null && fix "vsftpd reloaded" || warn "vsftpd reload failed"
+    fi
+
+    # Fix ownership: FTP home directories must be owned by www-data since
+    # vsftpd maps all virtual users to guest_username=www-data
+    if [[ -d "$VSFTPD_USER_CONF_DIR" ]]; then
+      for uconf in "$VSFTPD_USER_CONF_DIR"/*; do
+        [[ -f "$uconf" ]] || continue
+        uname="$(basename "$uconf")"
+        local_root="$(grep '^local_root=' "$uconf" 2>/dev/null | cut -d= -f2)"
+        [[ -z "$local_root" || ! -d "$local_root" ]] && continue
+
+        cur_owner="$(stat -c '%U' "$local_root" 2>/dev/null)"
+        if [[ "$cur_owner" != "www-data" ]]; then
+          chown -R www-data:www-data "$local_root"
+          fix "chown $local_root → www-data (was $cur_owner) for FTP user $uname"
+          FIXED=$((FIXED + 1))
+        else
+          ok "FTP home $local_root owned by www-data"
+        fi
+      done
     fi
   else
     ok "vsftpd.conf not found — skipping"

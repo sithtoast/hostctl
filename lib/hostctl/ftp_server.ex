@@ -151,8 +151,7 @@ defmodule Hostctl.FtpServer do
     content = """
     local_root=#{home_dir}
     write_enable=YES
-    anon_other_write_enable=YES
-    anon_mkdir_write_enable=YES
+    virtual_use_local_privs=YES
     """
 
     with :ok <- escaped_mkdir_p(dir),
