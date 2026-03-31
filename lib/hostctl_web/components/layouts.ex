@@ -104,6 +104,12 @@ defmodule HostctlWeb.Layouts do
               active={@active_tab == :panel_features}
             />
             <.nav_item
+              icon="hero-cube"
+              label="Docker Proxy"
+              href={~p"/panel/docker"}
+              active={@active_tab == :panel_docker}
+            />
+            <.nav_item
               icon="hero-envelope-open"
               label="Smarthost"
               href={~p"/panel/smarthost"}

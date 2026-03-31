@@ -82,6 +82,7 @@ defmodule HostctlWeb.Router do
       # Panel settings (admin only)
       live "/panel/settings", PanelLive.Settings, :index
       live "/panel/features", PanelLive.Features, :index
+      live "/panel/docker", PanelLive.Docker, :index
       live "/panel/smarthost", PanelLive.Smarthost, :index
       live "/panel/databases", PanelLive.Databases, :index
       live "/panel/emails", PanelLive.Emails, :index

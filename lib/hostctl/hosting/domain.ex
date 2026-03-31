@@ -9,6 +9,7 @@ defmodule Hostctl.Hosting.Domain do
     DnsZone,
     EmailAccount,
     Database,
+    DomainProxy,
     SslCertificate,
     CronJob,
     FtpAccount,
@@ -34,6 +35,7 @@ defmodule Hostctl.Hosting.Domain do
     has_one :ssl_certificate, SslCertificate
     has_many :cron_jobs, CronJob
     has_many :ftp_accounts, FtpAccount
+    has_many :domain_proxies, DomainProxy
     has_one :smarthost_setting, DomainSmarthostSetting
     has_many :bandwidth_snapshots, BandwidthSnapshot
     has_one :backup_setting, Hostctl.Backup.DomainSetting

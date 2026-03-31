@@ -29,11 +29,11 @@ defmodule Hostctl.WebServer.Nginx do
   subdomains. Pass the domain's `SslCertificate` record (or nil) to control
   whether SSL server blocks are included.
   """
-  def generate_config(%Domain{} = domain, subdomains \\ [], ssl_cert \\ nil) do
+  def generate_config(%Domain{} = domain, subdomains \\ [], ssl_cert \\ nil, proxies \\ []) do
     if domain.status == "suspended" do
       suspended_config(domain)
     else
-      active_config(domain, subdomains, ssl_cert)
+      active_config(domain, subdomains, ssl_cert, proxies)
     end
   end
 
@@ -41,7 +41,7 @@ defmodule Hostctl.WebServer.Nginx do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  defp active_config(%Domain{} = domain, subdomains, ssl_cert) do
+  defp active_config(%Domain{} = domain, subdomains, ssl_cert, proxies) do
     doc_root = domain.document_root || "/var/www/#{domain.name}/public"
     php_socket = php_fpm_socket(domain.php_version)
     use_ssl = ssl_active?(domain, ssl_cert)
@@ -53,7 +53,8 @@ defmodule Hostctl.WebServer.Nginx do
         doc_root,
         php_socket,
         use_ssl,
-        ssl_cert
+        ssl_cert,
+        proxies
       )
 
     sub_blocks =
@@ -70,14 +71,17 @@ defmodule Hostctl.WebServer.Nginx do
           sub_root,
           php_socket,
           false,
-          nil
+          nil,
+          []
         )
       end)
 
     Enum.join([main | sub_blocks], "\n")
   end
 
-  defp vhost_block(log_name, server_names, doc_root, php_socket, false = _ssl, _cert) do
+  defp vhost_block(log_name, server_names, doc_root, php_socket, false = _ssl, _cert, proxies) do
+    proxy_locations = proxy_location_blocks(proxies)
+
     """
     # #{log_name} — managed by hostctl
     server {
@@ -90,6 +94,8 @@ defmodule Hostctl.WebServer.Nginx do
 
         access_log /var/log/nginx/#{log_name}.access.log;
         error_log /var/log/nginx/#{log_name}.error.log;
+
+      #{proxy_locations}
 
         location / {
             try_files $uri $uri/ /index.php?$query_string;
@@ -110,10 +116,11 @@ defmodule Hostctl.WebServer.Nginx do
     """
   end
 
-  defp vhost_block(log_name, server_names, doc_root, php_socket, true = _ssl, ssl_cert) do
+  defp vhost_block(log_name, server_names, doc_root, php_socket, true = _ssl, ssl_cert, proxies) do
     primary = server_names |> String.split(" ") |> hd()
     ssl_cert_path = cert_path(ssl_cert, primary)
     ssl_key_path = key_path(ssl_cert, primary)
+    proxy_locations = proxy_location_blocks(proxies)
 
     """
     # #{log_name} — managed by hostctl
@@ -143,6 +150,8 @@ defmodule Hostctl.WebServer.Nginx do
         access_log /var/log/nginx/#{log_name}.access.log;
         error_log /var/log/nginx/#{log_name}.error.log;
 
+      #{proxy_locations}
+
         location / {
             try_files $uri $uri/ /index.php?$query_string;
         }
@@ -161,6 +170,52 @@ defmodule Hostctl.WebServer.Nginx do
     }
     """
   end
+
+  defp proxy_location_blocks([]), do: ""
+
+  defp proxy_location_blocks(proxies) do
+    proxies
+    |> Enum.filter(& &1.enabled)
+    |> Enum.map(fn proxy ->
+      path = normalize_proxy_path(proxy.path)
+      target = "http://127.0.0.1:#{proxy.upstream_port}/"
+
+      """
+        location = #{path} {
+            return 301 #{path}/;
+        }
+
+        location ^~ #{path}/ {
+            proxy_pass #{target};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+      """
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp normalize_proxy_path(path) when is_binary(path) do
+    trimmed = String.trim(path)
+
+    normalized =
+      if String.starts_with?(trimmed, "/") do
+        trimmed
+      else
+        "/" <> trimmed
+      end
+
+    if normalized != "/" do
+      String.trim_trailing(normalized, "/")
+    else
+      normalized
+    end
+  end
+
+  defp normalize_proxy_path(_), do: "/"
 
   defp suspended_config(%Domain{} = domain) do
     """

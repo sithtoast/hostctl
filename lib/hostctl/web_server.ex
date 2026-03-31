@@ -33,7 +33,7 @@ defmodule Hostctl.WebServer do
   import Ecto.Query
 
   alias Hostctl.Repo
-  alias Hostctl.Hosting.{Domain, Subdomain, SslCertificate}
+  alias Hostctl.Hosting.{Domain, DomainProxy, Subdomain, SslCertificate}
   alias Hostctl.WebServer.Nginx
 
   @doc """
@@ -47,6 +47,13 @@ defmodule Hostctl.WebServer do
       domain = Repo.get!(Domain, domain.id)
 
       subdomains = Repo.all(from s in Subdomain, where: s.domain_id == ^domain.id)
+
+      proxies =
+        Repo.all(
+          from p in DomainProxy,
+            where: p.domain_id == ^domain.id and p.enabled == true,
+            order_by: [asc: p.path]
+        )
 
       ssl_cert = Repo.get_by(SslCertificate, domain_id: domain.id)
 
@@ -65,7 +72,7 @@ defmodule Hostctl.WebServer do
         provision_webroot(sub_root)
       end)
 
-      config = Nginx.generate_config(domain, subdomains, ssl_cert)
+      config = Nginx.generate_config(domain, subdomains, ssl_cert, proxies)
 
       case write_vhost(domain, config) do
         :ok ->

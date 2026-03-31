@@ -17,6 +17,7 @@ defmodule Hostctl.Hosting do
   alias Hostctl.Hosting.{
     Domain,
     Subdomain,
+    DomainProxy,
     DnsZone,
     DnsRecord,
     EmailAccount,
@@ -185,6 +186,66 @@ defmodule Hostctl.Hosting do
       )
 
     %{total: total, active: active, ssl_enabled: ssl_enabled}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Domain proxies
+  # ---------------------------------------------------------------------------
+
+  def list_domain_proxies_for_admin do
+    Repo.all(
+      from p in DomainProxy,
+        join: d in assoc(p, :domain),
+        join: u in assoc(d, :user),
+        order_by: [asc: d.name, asc: p.path],
+        preload: [domain: {d, user: u}]
+    )
+  end
+
+  def list_domain_proxies(%Domain{} = domain) do
+    Repo.all(
+      from p in DomainProxy,
+        where: p.domain_id == ^domain.id,
+        order_by: [asc: p.path]
+    )
+  end
+
+  def get_domain_proxy_for_admin!(id) do
+    Repo.get!(DomainProxy, id)
+    |> Repo.preload(domain: [:user])
+  end
+
+  def create_domain_proxy(attrs) do
+    %DomainProxy{}
+    |> DomainProxy.changeset(attrs)
+    |> Repo.insert()
+    |> case do
+      {:ok, proxy} ->
+        domain = Repo.get!(Domain, proxy.domain_id)
+        WebServer.sync_domain(domain)
+        {:ok, Repo.preload(proxy, domain: [:user])}
+
+      error ->
+        error
+    end
+  end
+
+  def delete_domain_proxy(%DomainProxy{} = proxy) do
+    domain = Repo.get!(Domain, proxy.domain_id)
+
+    Repo.delete(proxy)
+    |> case do
+      {:ok, deleted} ->
+        WebServer.sync_domain(domain)
+        {:ok, Repo.preload(deleted, domain: [:user])}
+
+      error ->
+        error
+    end
+  end
+
+  def change_domain_proxy(%DomainProxy{} = proxy, attrs \\ %{}) do
+    DomainProxy.changeset(proxy, attrs)
   end
 
   # ---------------------------------------------------------------------------
