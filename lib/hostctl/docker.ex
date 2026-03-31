@@ -174,6 +174,95 @@ defmodule Hostctl.Docker do
     end
   end
 
+  @doc "Removes a stopped container by name or ID."
+  def remove_container(container_id) when is_binary(container_id) do
+    case run(["rm", container_id]) do
+      {:ok, _} -> :ok
+      {:error, :command_failed} -> {:error, "Failed to remove container. Is it still running?"}
+      error -> error
+    end
+  end
+
+  @doc """
+  Runs a new container from an image with optional name, port mappings, env vars, and detach mode.
+
+  Options:
+    * `:name` - container name (string)
+    * `:ports` - list of port mapping strings, e.g. ["8080:80", "5432:5432"]
+    * `:env` - list of {key, value} tuples or keyword list for environment variables
+    * `:restart` - restart policy, e.g. "unless-stopped", "always"
+  """
+  def run_container(image, opts \\ []) when is_binary(image) do
+    name = Keyword.get(opts, :name)
+    ports = Keyword.get(opts, :ports, [])
+    env = Keyword.get(opts, :env, [])
+    restart = Keyword.get(opts, :restart)
+
+    args =
+      ["run", "-d"] ++
+        name_args(name) ++
+        restart_args(restart) ++
+        port_args(ports) ++
+        env_args(env) ++
+        [image]
+
+    case run(args) do
+      {:ok, container_id} -> {:ok, String.trim(container_id)}
+      {:error, :command_failed} -> {:error, "Failed to run container from image #{image}"}
+      error -> error
+    end
+  end
+
+  defp name_args(nil), do: []
+  defp name_args(""), do: []
+  defp name_args(name), do: ["--name", name]
+
+  defp restart_args(nil), do: []
+  defp restart_args(""), do: []
+  defp restart_args(policy), do: ["--restart", policy]
+
+  defp port_args(ports) do
+    Enum.flat_map(ports, fn port ->
+      port = String.trim(port)
+      if port == "", do: [], else: ["-p", port]
+    end)
+  end
+
+  defp env_args(env) do
+    Enum.flat_map(env, fn
+      {key, value} ->
+        key = String.trim(to_string(key))
+        if key == "", do: [], else: ["-e", "#{key}=#{value}"]
+    end)
+  end
+
+  @doc "Starts services defined in a compose stack by project name and config file path."
+  def compose_up(project_name) when is_binary(project_name) do
+    case run(["compose", "-p", project_name, "up", "-d"]) do
+      {:ok, _} -> :ok
+      {:error, :command_failed} -> {:error, "Failed to start compose stack"}
+      error -> error
+    end
+  end
+
+  @doc "Stops services in a compose stack by project name."
+  def compose_down(project_name) when is_binary(project_name) do
+    case run(["compose", "-p", project_name, "down"]) do
+      {:ok, _} -> :ok
+      {:error, :command_failed} -> {:error, "Failed to stop compose stack"}
+      error -> error
+    end
+  end
+
+  @doc "Restarts services in a compose stack by project name."
+  def compose_restart(project_name) when is_binary(project_name) do
+    case run(["compose", "-p", project_name, "restart"]) do
+      {:ok, _} -> :ok
+      {:error, :command_failed} -> {:error, "Failed to restart compose stack"}
+      error -> error
+    end
+  end
+
   defp parse_ps_output(output) do
     output
     |> String.split("\n", trim: true)

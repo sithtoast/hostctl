@@ -18,6 +18,8 @@ defmodule HostctlWeb.PanelLive.Docker do
       |> Hosting.change_domain_proxy(default_proxy_params(domains, containers))
       |> to_form(as: :domain_proxy)
 
+    compose_stacks = load_compose_stacks()
+
     {:ok,
      socket
      |> assign(:page_title, "Docker")
@@ -29,6 +31,13 @@ defmodule HostctlWeb.PanelLive.Docker do
      |> assign(:proxy_form, form)
      |> assign(:proxies_empty?, proxies == [])
      |> assign(:inspecting, nil)
+     |> assign(:pull_image_name, "")
+     |> assign(:pulling, false)
+     |> assign(:search_query, "")
+     |> assign(:search_results, nil)
+     |> assign(:compose_stacks, compose_stacks)
+     |> assign(:show_run_form, false)
+     |> assign(:run_env_count, 1)
      |> stream(:all_containers, all_containers)
      |> stream(:proxies, proxies)}
   end
@@ -54,6 +63,7 @@ defmodule HostctlWeb.PanelLive.Docker do
      |> assign(:containers, containers)
      |> assign(:proxy_form, proxy_form)
      |> assign(:inspecting, nil)
+     |> assign(:compose_stacks, load_compose_stacks())
      |> stream(:all_containers, all_containers, reset: true)}
   end
 
@@ -128,6 +138,199 @@ defmodule HostctlWeb.PanelLive.Docker do
   @impl true
   def handle_event("close_inspect", _params, socket) do
     {:noreply, assign(socket, :inspecting, nil)}
+  end
+
+  @impl true
+  def handle_event("toggle_run_form", _params, socket) do
+    {:noreply, assign(socket, :show_run_form, !socket.assigns.show_run_form)}
+  end
+
+  @impl true
+  def handle_event("add_env_row", _params, socket) do
+    {:noreply, assign(socket, :run_env_count, socket.assigns.run_env_count + 1)}
+  end
+
+  @impl true
+  def handle_event("run_container", params, socket) do
+    image = String.trim(params["image"] || "")
+    name = String.trim(params["name"] || "")
+    restart = String.trim(params["restart"] || "")
+
+    if image == "" do
+      {:noreply, put_flash(socket, :error, "Image name is required.")}
+    else
+      ports =
+        (params["ports"] || "")
+        |> String.split("\n")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+
+      env =
+        parse_env_pairs(params)
+
+      opts =
+        [name: name, ports: ports, env: env, restart: restart]
+        |> Enum.reject(fn {_k, v} -> v == "" or v == [] end)
+
+      case Docker.run_container(image, opts) do
+        {:ok, _container_id} ->
+          {docker_status, containers} = load_containers()
+          all_containers = load_all_containers()
+
+          {:noreply,
+           socket
+           |> assign(:docker_status, docker_status)
+           |> assign(:containers, containers)
+           |> assign(:show_run_form, false)
+           |> assign(:run_env_count, 1)
+           |> stream(:all_containers, all_containers, reset: true)
+           |> put_flash(:info, "Container started from #{image}.")}
+
+        {:error, msg} ->
+          {:noreply, put_flash(socket, :error, msg)}
+      end
+    end
+  end
+
+  @impl true
+  def handle_event("search_registry", %{"search_query" => query}, socket) do
+    query = String.trim(query)
+
+    if query == "" do
+      {:noreply, assign(socket, :search_results, nil)}
+    else
+      case Docker.search_registry(query) do
+        {:ok, results} ->
+          {:noreply, assign(socket, search_results: results, search_query: query)}
+
+        {:error, msg} ->
+          {:noreply, put_flash(socket, :error, msg)}
+      end
+    end
+  end
+
+  @impl true
+  def handle_event("pull_image", %{"image_name" => image_name}, socket) do
+    image_name = String.trim(image_name)
+
+    if image_name == "" do
+      {:noreply, put_flash(socket, :error, "Please enter an image name.")}
+    else
+      socket = assign(socket, :pulling, true)
+
+      case Docker.pull_image(image_name) do
+        {:ok, _output} ->
+          all_containers = load_all_containers()
+
+          {:noreply,
+           socket
+           |> assign(:pulling, false)
+           |> assign(:pull_image_name, "")
+           |> stream(:all_containers, all_containers, reset: true)
+           |> put_flash(:info, "Image #{image_name} pulled successfully.")}
+
+        {:error, msg} ->
+          {:noreply,
+           socket
+           |> assign(:pulling, false)
+           |> put_flash(:error, msg)}
+      end
+    end
+  end
+
+  @impl true
+  def handle_event("pull_search_result", %{"name" => image_name}, socket) do
+    socket = assign(socket, :pulling, true)
+
+    case Docker.pull_image(image_name) do
+      {:ok, _output} ->
+        all_containers = load_all_containers()
+
+        {:noreply,
+         socket
+         |> assign(:pulling, false)
+         |> stream(:all_containers, all_containers, reset: true)
+         |> put_flash(:info, "Image #{image_name} pulled successfully.")}
+
+      {:error, msg} ->
+        {:noreply,
+         socket
+         |> assign(:pulling, false)
+         |> put_flash(:error, msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("remove_container", %{"id" => container_id}, socket) do
+    case Docker.remove_container(container_id) do
+      :ok ->
+        {docker_status, containers} = load_containers()
+        all_containers = load_all_containers()
+
+        {:noreply,
+         socket
+         |> assign(:docker_status, docker_status)
+         |> assign(:containers, containers)
+         |> stream(:all_containers, all_containers, reset: true)
+         |> put_flash(:info, "Container #{container_id} removed.")}
+
+      {:error, msg} ->
+        {:noreply, put_flash(socket, :error, msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("compose_up", %{"name" => name}, socket) do
+    case Docker.compose_up(name) do
+      :ok ->
+        {docker_status, containers} = load_containers()
+        all_containers = load_all_containers()
+
+        {:noreply,
+         socket
+         |> assign(:docker_status, docker_status)
+         |> assign(:containers, containers)
+         |> assign(:compose_stacks, load_compose_stacks())
+         |> stream(:all_containers, all_containers, reset: true)
+         |> put_flash(:info, "Compose stack \"#{name}\" started.")}
+
+      {:error, msg} ->
+        {:noreply, put_flash(socket, :error, msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("compose_down", %{"name" => name}, socket) do
+    case Docker.compose_down(name) do
+      :ok ->
+        {docker_status, containers} = load_containers()
+        all_containers = load_all_containers()
+
+        {:noreply,
+         socket
+         |> assign(:docker_status, docker_status)
+         |> assign(:containers, containers)
+         |> assign(:compose_stacks, load_compose_stacks())
+         |> stream(:all_containers, all_containers, reset: true)
+         |> put_flash(:info, "Compose stack \"#{name}\" stopped.")}
+
+      {:error, msg} ->
+        {:noreply, put_flash(socket, :error, msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("compose_restart", %{"name" => name}, socket) do
+    case Docker.compose_restart(name) do
+      :ok ->
+        {:noreply,
+         socket
+         |> assign(:compose_stacks, load_compose_stacks())
+         |> put_flash(:info, "Compose stack \"#{name}\" restarted.")}
+
+      {:error, msg} ->
+        {:noreply, put_flash(socket, :error, msg)}
+    end
   end
 
   @impl true
@@ -265,10 +468,163 @@ defmodule HostctlWeb.PanelLive.Docker do
           >
             <.icon name="hero-link" class="w-4 h-4 inline mr-1 -mt-0.5" /> Proxy Mappings
           </button>
+          <button
+            phx-click="switch_tab"
+            phx-value-tab="images"
+            class={[
+              "px-4 py-2 text-sm font-medium rounded-t-lg transition-colors -mb-px",
+              if(@tab == "images",
+                do:
+                  "border-b-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400",
+                else:
+                  "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 border-b-2 border-transparent"
+              )
+            ]}
+          >
+            <.icon name="hero-arrow-down-tray" class="w-4 h-4 inline mr-1 -mt-0.5" /> Images
+          </button>
+          <button
+            phx-click="switch_tab"
+            phx-value-tab="compose"
+            class={[
+              "px-4 py-2 text-sm font-medium rounded-t-lg transition-colors -mb-px",
+              if(@tab == "compose",
+                do:
+                  "border-b-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400",
+                else:
+                  "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 border-b-2 border-transparent"
+              )
+            ]}
+          >
+            <.icon name="hero-square-3-stack-3d" class="w-4 h-4 inline mr-1 -mt-0.5" /> Compose
+          </button>
         </div>
 
         <%!-- ============= Containers tab ============= --%>
         <div :if={@tab == "containers"} class="space-y-4">
+          <%!-- Run new container --%>
+          <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+            <button
+              id="toggle-run-form-btn"
+              phx-click="toggle_run_form"
+              class="w-full flex items-center justify-between px-6 py-4 text-left hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+            >
+              <div class="flex items-center gap-2">
+                <.icon name="hero-plus-circle" class="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                <span class="text-sm font-semibold text-gray-900 dark:text-white">
+                  Run New Container
+                </span>
+              </div>
+              <.icon
+                name={if(@show_run_form, do: "hero-chevron-up", else: "hero-chevron-down")}
+                class="w-4 h-4 text-gray-400"
+              />
+            </button>
+
+            <div :if={@show_run_form} class="px-6 pb-6 border-t border-gray-200 dark:border-gray-800">
+              <form id="run-container-form" phx-submit="run_container" class="space-y-4 pt-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Image <span class="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      name="image"
+                      placeholder="e.g. nginx:latest, postgres:16"
+                      required
+                      class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Container Name
+                    </label>
+                    <input
+                      type="text"
+                      name="name"
+                      placeholder="e.g. my-app"
+                      class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                    />
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Ports
+                    </label>
+                    <textarea
+                      name="ports"
+                      rows="2"
+                      placeholder="One per line, e.g.&#10;8080:80&#10;5432:5432"
+                      class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                    />
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      host:container format, one per line
+                    </p>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Restart Policy
+                    </label>
+                    <select
+                      name="restart"
+                      class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                    >
+                      <option value="">None (default)</option>
+                      <option value="always">Always</option>
+                      <option value="unless-stopped">Unless Stopped</option>
+                      <option value="on-failure">On Failure</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <div class="flex items-center justify-between mb-2">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Environment Variables
+                    </label>
+                    <button
+                      type="button"
+                      id="add-env-row-btn"
+                      phx-click="add_env_row"
+                      class="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
+                    >
+                      <.icon name="hero-plus" class="w-3 h-3" /> Add Row
+                    </button>
+                  </div>
+                  <div class="space-y-2">
+                    <div :for={i <- 0..(@run_env_count - 1)} class="flex gap-2">
+                      <input
+                        type="text"
+                        name={"env_key_#{i}"}
+                        placeholder="KEY"
+                        class="w-1/3 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                      />
+                      <input
+                        type="text"
+                        name={"env_val_#{i}"}
+                        placeholder="value"
+                        class="flex-1 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <button
+                    id="run-container-btn"
+                    type="submit"
+                    class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+                  >
+                    <.icon name="hero-play" class="w-4 h-4" /> Run Container
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
               <h2 class="text-base font-semibold text-gray-900 dark:text-white">All Containers</h2>
@@ -346,6 +702,15 @@ defmodule HostctlWeb.PanelLive.Docker do
                       class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/50 text-xs font-medium transition-colors"
                     >
                       <.icon name="hero-play" class="w-3.5 h-3.5" /> Start
+                    </button>
+                    <button
+                      id={"remove-#{container.id}"}
+                      phx-click="remove_container"
+                      phx-value-id={container.name}
+                      data-confirm={"Remove container #{container.name}? This cannot be undone."}
+                      class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/50 text-xs font-medium transition-colors"
+                    >
+                      <.icon name="hero-trash" class="w-3.5 h-3.5" /> Remove
                     </button>
                   <% end %>
                   <button
@@ -566,6 +931,197 @@ defmodule HostctlWeb.PanelLive.Docker do
             </div>
           </div>
         </div>
+
+        <%!-- ============= Images tab ============= --%>
+        <div :if={@tab == "images"} class="space-y-4">
+          <%!-- Pull image --%>
+          <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6">
+            <h2 class="text-base font-semibold text-gray-900 dark:text-white mb-4">Pull Image</h2>
+
+            <form id="pull-image-form" phx-submit="pull_image" class="flex gap-3">
+              <div class="flex-1">
+                <input
+                  type="text"
+                  name="image_name"
+                  value={@pull_image_name}
+                  placeholder="e.g. nginx:latest, postgres:16, myrepo/myapp:v2"
+                  class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-4 py-2.5 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                />
+              </div>
+              <button
+                id="pull-image-btn"
+                type="submit"
+                disabled={@pulling}
+                class={[
+                  "inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-colors shrink-0",
+                  if(@pulling,
+                    do: "bg-indigo-400 text-white cursor-wait",
+                    else: "bg-indigo-600 hover:bg-indigo-500 text-white"
+                  )
+                ]}
+              >
+                <%= if @pulling do %>
+                  <.icon name="hero-arrow-path" class="w-4 h-4 animate-spin" /> Pulling…
+                <% else %>
+                  <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Pull
+                <% end %>
+              </button>
+            </form>
+          </div>
+
+          <%!-- Search registry --%>
+          <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6">
+            <h2 class="text-base font-semibold text-gray-900 dark:text-white mb-4">
+              Search Docker Hub
+            </h2>
+
+            <form id="search-registry-form" phx-submit="search_registry" class="flex gap-3 mb-4">
+              <div class="flex-1">
+                <input
+                  type="text"
+                  name="search_query"
+                  value={@search_query}
+                  placeholder="Search for images…"
+                  class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-4 py-2.5 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                />
+              </div>
+              <button
+                id="search-registry-btn"
+                type="submit"
+                class="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 text-sm font-medium transition-colors shrink-0"
+              >
+                <.icon name="hero-magnifying-glass" class="w-4 h-4" /> Search
+              </button>
+            </form>
+
+            <%= if @search_results do %>
+              <div class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+                <%= if @search_results == [] do %>
+                  <div class="py-10 text-center text-gray-400 dark:text-gray-500 text-sm">
+                    No results found for "{@search_query}".
+                  </div>
+                <% else %>
+                  <div class="divide-y divide-gray-200 dark:divide-gray-700">
+                    <div
+                      :for={result <- @search_results}
+                      class="flex items-center gap-4 px-4 py-3"
+                    >
+                      <div class="flex-1 min-w-0">
+                        <p class="text-sm font-medium text-gray-900 dark:text-white truncate">
+                          {result.name}
+                        </p>
+                        <p class="text-xs text-gray-500 dark:text-gray-400 truncate">
+                          {result.description}
+                        </p>
+                      </div>
+                      <div class="flex items-center gap-3 shrink-0">
+                        <span class="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                          <.icon name="hero-star" class="w-3.5 h-3.5" /> {result.stars}
+                        </span>
+                        <button
+                          id={"pull-#{String.replace(result.name, "/", "-")}"}
+                          phx-click="pull_search_result"
+                          phx-value-name={result.name}
+                          disabled={@pulling}
+                          class={[
+                            "inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+                            if(@pulling,
+                              do:
+                                "bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-wait",
+                              else:
+                                "bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/50"
+                            )
+                          ]}
+                        >
+                          <.icon name="hero-arrow-down-tray" class="w-3.5 h-3.5" /> Pull
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        </div>
+
+        <%!-- ============= Compose tab ============= --%>
+        <div :if={@tab == "compose"} class="space-y-4">
+          <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
+              <h2 class="text-base font-semibold text-gray-900 dark:text-white">Compose Stacks</h2>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Manage Docker Compose projects running on this server.
+              </p>
+            </div>
+
+            <%= if @compose_stacks == [] do %>
+              <div class="py-16 text-center text-gray-400 dark:text-gray-500 text-sm">
+                No compose stacks found. Deploy a stack with
+                <code class="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs">
+                  docker compose up -d
+                </code>
+                to see it here.
+              </div>
+            <% else %>
+              <div class="divide-y divide-gray-100 dark:divide-gray-800">
+                <div
+                  :for={stack <- @compose_stacks}
+                  class="flex items-center gap-4 px-6 py-4"
+                >
+                  <div class={[
+                    "flex items-center justify-center w-9 h-9 rounded-lg shrink-0",
+                    if(compose_running?(stack),
+                      do: "bg-green-100 dark:bg-green-900/40 text-green-600 dark:text-green-400",
+                      else: "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+                    )
+                  ]}>
+                    <.icon name="hero-square-3-stack-3d" class="w-4 h-4" />
+                  </div>
+
+                  <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-gray-900 dark:text-white truncate">
+                      {stack.name}
+                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      {stack.container_count} container(s) &bull; {stack.status}
+                    </p>
+                  </div>
+
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <%= if compose_running?(stack) do %>
+                      <button
+                        id={"compose-restart-#{stack.name}"}
+                        phx-click="compose_restart"
+                        phx-value-name={stack.name}
+                        class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/50 text-xs font-medium transition-colors"
+                      >
+                        <.icon name="hero-arrow-path" class="w-3.5 h-3.5" /> Restart
+                      </button>
+                      <button
+                        id={"compose-down-#{stack.name}"}
+                        phx-click="compose_down"
+                        phx-value-name={stack.name}
+                        data-confirm={"Stop compose stack \"#{stack.name}\"?"}
+                        class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 text-xs font-medium transition-colors"
+                      >
+                        <.icon name="hero-stop" class="w-3.5 h-3.5" /> Down
+                      </button>
+                    <% else %>
+                      <button
+                        id={"compose-up-#{stack.name}"}
+                        phx-click="compose_up"
+                        phx-value-name={stack.name}
+                        class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/50 text-xs font-medium transition-colors"
+                      >
+                        <.icon name="hero-play" class="w-3.5 h-3.5" /> Up
+                      </button>
+                    <% end %>
+                  </div>
+                </div>
+              </div>
+            <% end %>
+          </div>
+        </div>
       </div>
     </Layouts.app>
     """
@@ -585,6 +1141,13 @@ defmodule HostctlWeb.PanelLive.Docker do
     end
   end
 
+  defp load_compose_stacks do
+    case Docker.list_compose_stacks() do
+      {:ok, stacks} -> stacks
+      {:error, _} -> []
+    end
+  end
+
   defp running?(container) do
     String.starts_with?(String.downcase(container.status), "up")
   end
@@ -597,6 +1160,25 @@ defmodule HostctlWeb.PanelLive.Docker do
       "#{Enum.join(host_ports, ",")}->#{port_proto}"
     end)
     |> Enum.join(", ")
+  end
+
+  defp compose_running?(stack) do
+    String.contains?(String.downcase(stack.status), "running")
+  end
+
+  defp parse_env_pairs(params) do
+    0..99
+    |> Enum.reduce_while([], fn i, acc ->
+      key = String.trim(params["env_key_#{i}"] || "")
+      val = params["env_val_#{i}"] || ""
+
+      cond do
+        is_nil(params["env_key_#{i}"]) -> {:halt, acc}
+        key == "" -> {:cont, acc}
+        true -> {:cont, [{key, val} | acc]}
+      end
+    end)
+    |> Enum.reverse()
   end
 
   defp domain_options(domains) do
