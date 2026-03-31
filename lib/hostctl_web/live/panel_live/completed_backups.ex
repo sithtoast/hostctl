@@ -182,31 +182,18 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
       if target_dir == "" do
         %{archive: archive_path, status: :error, message: "Target directory is required."}
       else
-        temp_extract = archive_path <> "-extracted"
-        File.mkdir_p!(temp_extract)
+        # Use direct sudo (not escaped_cmd/systemd-run) because the archive lives
+        # in our PrivateTmp namespace which a transient systemd unit cannot see.
+        # A forked sudo process inherits our mount namespace and can access our /tmp.
+        System.cmd("sudo", ["mkdir", "-p", target_dir], stderr_to_stdout: true)
 
-        case System.cmd("tar", ["-xzf", archive_path, "-C", temp_extract], stderr_to_stdout: true) do
+        case System.cmd("sudo", ["tar", "-xzf", archive_path, "-C", target_dir],
+               stderr_to_stdout: true
+             ) do
           {_, 0} ->
-            escaped_cmd("mkdir", ["-p", target_dir])
-
-            case escaped_cmd("cp", ["-a", temp_extract <> "/.", target_dir]) do
-              {_, 0} ->
-                File.rm_rf(temp_extract)
-                %{archive: archive_path, status: :ok, message: "Restored to #{target_dir}"}
-
-              {output, _} ->
-                File.rm_rf(temp_extract)
-
-                %{
-                  archive: archive_path,
-                  status: :error,
-                  message: "Copy failed: #{String.slice(output, 0, 300)}"
-                }
-            end
+            %{archive: archive_path, status: :ok, message: "Restored to #{target_dir}"}
 
           {output, _} ->
-            File.rm_rf(temp_extract)
-
             %{
               archive: archive_path,
               status: :error,
@@ -584,9 +571,13 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
 
     case Backup.restore_all_s3_prefix_to_dir(prefix, temp_dir) do
       {:ok, count} ->
-        escaped_cmd("mkdir", ["-p", target_dir])
+        # Use direct sudo (not escaped_cmd/systemd-run) because temp_dir lives
+        # in our PrivateTmp namespace which a transient systemd unit cannot see.
+        System.cmd("sudo", ["mkdir", "-p", target_dir], stderr_to_stdout: true)
 
-        case escaped_cmd("cp", ["-a"] ++ copy_source_args(temp_dir) ++ [target_dir]) do
+        case System.cmd("sudo", ["cp", "-a"] ++ copy_source_args(temp_dir) ++ [target_dir],
+               stderr_to_stdout: true
+             ) do
           {_, 0} ->
             File.rm_rf(temp_dir)
 
@@ -625,44 +616,30 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   def handle_info({:do_stream_archive_restore, s3_key, target_dir}, socket) do
     settings = Backup.get_or_create_settings()
     temp_path = restore_temp_path(s3_key)
-    temp_extract = temp_path <> "-extracted"
 
     case S3.download(settings, s3_key, temp_path) do
       {:ok, local_path} ->
-        File.mkdir_p!(temp_extract)
+        # Use direct sudo (not escaped_cmd/systemd-run) because local_path lives
+        # in our PrivateTmp namespace which a transient systemd unit cannot see.
+        System.cmd("sudo", ["mkdir", "-p", target_dir], stderr_to_stdout: true)
 
-        case System.cmd("tar", ["-xzf", local_path, "-C", temp_extract], stderr_to_stdout: true) do
+        case System.cmd("sudo", ["tar", "-xzf", local_path, "-C", target_dir],
+               stderr_to_stdout: true
+             ) do
           {_, 0} ->
             File.rm(local_path)
-            escaped_cmd("mkdir", ["-p", target_dir])
 
-            case escaped_cmd("cp", ["-a", temp_extract <> "/.", target_dir]) do
-              {_, 0} ->
-                File.rm_rf(temp_extract)
-
-                {:noreply,
-                 socket
-                 |> assign(:raw_restore, %{
-                   socket.assigns.raw_restore
-                   | step: :done,
-                     progress: "Archive extracted to #{target_dir}"
-                 })
-                 |> put_flash(:info, "Stream archive restored to #{target_dir}")}
-
-              {output, _code} ->
-                File.rm_rf(temp_extract)
-
-                {:noreply,
-                 assign(socket, :raw_restore, %{
-                   socket.assigns.raw_restore
-                   | step: :error,
-                     error: "Copy failed: #{String.slice(output, 0, 500)}"
-                 })}
-            end
+            {:noreply,
+             socket
+             |> assign(:raw_restore, %{
+               socket.assigns.raw_restore
+               | step: :done,
+                 progress: "Archive extracted to #{target_dir}"
+             })
+             |> put_flash(:info, "Stream archive restored to #{target_dir}")}
 
           {output, _code} ->
             File.rm(local_path)
-            File.rm_rf(temp_extract)
 
             {:noreply,
              assign(socket, :raw_restore, %{
