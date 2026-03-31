@@ -193,7 +193,7 @@ defmodule Hostctl.Backup.S3 do
 
     url = endpoint_url(cfg.s3_endpoint) <> path
 
-    case Req.get(url, headers: headers) do
+    case Req.get(url, headers: headers, raw: true) do
       {:ok, %Req.Response{status: 200, body: body}} ->
         destination_path
         |> Path.dirname()
