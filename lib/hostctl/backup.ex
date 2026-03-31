@@ -595,6 +595,17 @@ defmodule Hostctl.Backup do
   end
 
   @doc """
+  Returns the base directory for a domain (parent of document_root).
+  This is the root of the domain's file tree including all subdomains.
+  """
+  def domain_base_dir(domain_name) when is_binary(domain_name) do
+    case domain_document_root(domain_name) do
+      nil -> "/var/www/#{domain_name}"
+      doc_root -> Path.dirname(doc_root)
+    end
+  end
+
+  @doc """
   Lists all S3 objects (including archives) under a specific key prefix.
   Returns `{:ok, [%{key, rel_path, size, last_modified}]}` or `{:error, reason}`.
   """

@@ -34,7 +34,7 @@ defmodule Hostctl.Backup.Runner do
   alias Hostctl.Backup.Archive
   alias Hostctl.Backup.S3
   alias Hostctl.Repo
-  alias Hostctl.Backup.{DomainSetting, SubdomainSetting}
+  alias Hostctl.Backup.DomainSetting
   alias Hostctl.Hosting.{Domain, Subdomain, Database}
 
   import Ecto.Query
@@ -747,45 +747,21 @@ defmodule Hostctl.Backup.Runner do
           {include_files, excluded_dirs || []}
       end
 
-    if (include_domain_files and domain.document_root) && File.dir?(domain.document_root) do
+    base_dir = domain_base_dir(domain.document_root, domain.name)
+
+    if include_domain_files && base_dir && File.dir?(base_dir) do
+      all_excludes =
+        domain_excluded_dirs ++ excluded_subdomain_rel_dirs(domain.id, base_dir)
+
       archive = Path.join(files_dir, "#{domain.name}.tar.gz")
       snapshot_path = incremental_snapshot_path(settings, "domain", domain.name)
 
       System.cmd(
         tar,
-        tar_args_with_excludes(
-          archive,
-          domain.document_root,
-          domain_excluded_dirs,
-          snapshot_path
-        ),
+        tar_args_with_excludes(archive, base_dir, all_excludes, snapshot_path),
         stderr_to_stdout: true
       )
     end
-
-    subdomains =
-      Repo.all(
-        from s in Subdomain,
-          left_join: ss in SubdomainSetting,
-          on: ss.subdomain_id == s.id,
-          where: s.domain_id == ^domain.id,
-          select: {s.name, s.document_root, ss.include_files, ss.excluded_dirs}
-      )
-
-    Enum.each(subdomains, fn {sub_name, doc_root, include_files, excluded_dirs} ->
-      if ((is_nil(include_files) or include_files) and doc_root) && File.dir?(doc_root) do
-        archive = Path.join(files_dir, "#{sub_name}.#{domain.name}.tar.gz")
-
-        snapshot_path =
-          incremental_snapshot_path(settings, "subdomain", "#{sub_name}.#{domain.name}")
-
-        System.cmd(
-          tar,
-          tar_args_with_excludes(archive, doc_root, excluded_dirs || [], snapshot_path),
-          stderr_to_stdout: true
-        )
-      end
-    end)
   end
 
   defp backup_domain_mail(tmp_dir, domain_name) do
@@ -982,13 +958,15 @@ defmodule Hostctl.Backup.Runner do
     files_dir = Path.join(tmp_dir, "domains")
     File.mkdir_p!(files_dir)
 
-    Enum.each(domains, fn {_id, name, doc_root, per_mode, excluded_dirs} ->
+    Enum.each(domains, fn {domain_id, name, doc_root, per_mode, excluded_dirs} ->
       effective_mode = per_mode || settings.s3_mode || "archive"
       excluded_dirs = excluded_dirs || []
+      base_dir = domain_base_dir(doc_root, name)
+      all_excludes = excluded_dirs ++ excluded_subdomain_rel_dirs(domain_id, base_dir)
       snapshot_path = incremental_snapshot_path(settings, "domain", name)
 
       cond do
-        is_nil(doc_root) or not File.dir?(doc_root) ->
+        is_nil(base_dir) or not File.dir?(base_dir) ->
           :skip
 
         effective_mode == "stream" and settings.s3_enabled ->
@@ -999,7 +977,7 @@ defmodule Hostctl.Backup.Runner do
           stream =
             command_to_stream(
               tar,
-              tar_args_with_excludes("-", doc_root, excluded_dirs, snapshot_path)
+              tar_args_with_excludes("-", base_dir, all_excludes, snapshot_path)
             )
 
           case S3.upload_stream(settings, s3_key, stream) do
@@ -1012,69 +990,7 @@ defmodule Hostctl.Backup.Runner do
 
           System.cmd(
             tar,
-            tar_args_with_excludes(archive, doc_root, excluded_dirs, snapshot_path),
-            stderr_to_stdout: true
-          )
-      end
-    end)
-
-    backup_subdomains(files_dir, settings, tar)
-  end
-
-  defp backup_subdomains(files_dir, settings, tar) do
-    excluded_ids = Backup.file_backup_excluded_subdomain_ids()
-
-    subdomains =
-      Repo.all(
-        from s in Subdomain,
-          join: d in Domain,
-          on: d.id == s.domain_id,
-          left_join: ss in Hostctl.Backup.SubdomainSetting,
-          on: ss.subdomain_id == s.id,
-          where: s.id not in ^excluded_ids,
-          select: %{
-            name: s.name,
-            domain_name: d.name,
-            document_root: s.document_root,
-            s3_mode: ss.s3_mode,
-            excluded_dirs: ss.excluded_dirs
-          }
-      )
-
-    Enum.each(subdomains, fn sub ->
-      effective_mode = sub.s3_mode || settings.s3_mode || "archive"
-      filename = "#{sub.name}.#{sub.domain_name}.tar.gz"
-      excluded_dirs = sub.excluded_dirs || []
-
-      snapshot_path =
-        incremental_snapshot_path(settings, "subdomain", "#{sub.name}.#{sub.domain_name}")
-
-      cond do
-        is_nil(sub.document_root) or not File.dir?(sub.document_root) ->
-          :skip
-
-        effective_mode == "stream" and settings.s3_enabled ->
-          prefix = "#{settings.s3_path_prefix || "hostctl-backups"}/domains"
-          s3_key = "#{prefix}/#{filename}"
-          broadcast_progress("  → Streaming #{filename} to S3…")
-
-          stream =
-            command_to_stream(
-              tar,
-              tar_args_with_excludes("-", sub.document_root, excluded_dirs, snapshot_path)
-            )
-
-          case S3.upload_stream(settings, s3_key, stream) do
-            {:ok, _} -> :ok
-            {:error, reason} -> raise "S3 stream upload failed for #{filename}: #{reason}"
-          end
-
-        true ->
-          archive = Path.join(files_dir, filename)
-
-          System.cmd(
-            tar,
-            tar_args_with_excludes(archive, sub.document_root, excluded_dirs, snapshot_path),
+            tar_args_with_excludes(archive, base_dir, all_excludes, snapshot_path),
             stderr_to_stdout: true
           )
       end
@@ -1101,14 +1017,19 @@ defmodule Hostctl.Backup.Runner do
 
     if (include_domain_files and domain.document_root) && File.dir?(domain.document_root) do
       effective_mode = domain_s3_mode || "stream"
+      base_dir = domain_base_dir(domain.document_root, domain.name)
+
+      all_excludes =
+        domain_excluded_dirs ++ excluded_subdomain_rel_dirs(domain.id, base_dir)
+
       snapshot_path = incremental_snapshot_path(settings, "domain", domain.name)
 
       if effective_mode == "raw" do
         upload_directory_raw_to_s3(
           settings,
           "#{prefix}/domains/#{domain.name}",
-          domain.document_root,
-          domain_excluded_dirs
+          base_dir,
+          all_excludes
         )
       else
         s3_key = "#{prefix}/domains/#{domain.name}.tar.gz"
@@ -1116,7 +1037,7 @@ defmodule Hostctl.Backup.Runner do
         stream =
           command_to_stream(
             tar,
-            tar_args_with_excludes("-", domain.document_root, domain_excluded_dirs, snapshot_path)
+            tar_args_with_excludes("-", base_dir, all_excludes, snapshot_path)
           )
 
         case S3.upload_stream(settings, s3_key, stream) do
@@ -1125,46 +1046,6 @@ defmodule Hostctl.Backup.Runner do
         end
       end
     end
-
-    subdomains =
-      Repo.all(
-        from s in Subdomain,
-          left_join: ss in SubdomainSetting,
-          on: ss.subdomain_id == s.id,
-          where: s.domain_id == ^domain.id,
-          select: {s.name, s.document_root, ss.include_files, ss.excluded_dirs, ss.s3_mode}
-      )
-
-    Enum.each(subdomains, fn {sub_name, doc_root, include_files, excluded_dirs, s3_mode} ->
-      if ((is_nil(include_files) or include_files) and doc_root) && File.dir?(doc_root) do
-        base_name = "#{sub_name}.#{domain.name}"
-        effective_mode = s3_mode || "stream"
-        snapshot_path = incremental_snapshot_path(settings, "subdomain", base_name)
-
-        if effective_mode == "raw" do
-          upload_directory_raw_to_s3(
-            settings,
-            "#{prefix}/domains/#{base_name}",
-            doc_root,
-            excluded_dirs || []
-          )
-        else
-          filename = "#{base_name}.tar.gz"
-          s3_key = "#{prefix}/domains/#{filename}"
-
-          stream =
-            command_to_stream(
-              tar,
-              tar_args_with_excludes("-", doc_root, excluded_dirs || [], snapshot_path)
-            )
-
-          case S3.upload_stream(settings, s3_key, stream) do
-            {:ok, _} -> :ok
-            {:error, reason} -> raise "S3 stream upload failed for #{filename}: #{reason}"
-          end
-        end
-      end
-    end)
   end
 
   defp stream_domain_mail_to_s3(settings, prefix, tar, domain_name) do
@@ -1326,7 +1207,6 @@ defmodule Hostctl.Backup.Runner do
   # dir instead and included in the combined archive at the end.
   defp stream_domains_to_s3(settings, prefix, tar) do
     included_ids = Backup.file_backup_domain_ids()
-    excluded_sub_ids = Backup.file_backup_excluded_subdomain_ids()
 
     domains =
       Repo.all(
@@ -1334,42 +1214,27 @@ defmodule Hostctl.Backup.Runner do
           left_join: ds in Hostctl.Backup.DomainSetting,
           on: ds.domain_id == d.id,
           where: d.id in ^included_ids,
-          select: {d.name, d.document_root, ds.s3_mode, ds.excluded_dirs}
+          select: {d.id, d.name, d.document_root, ds.s3_mode, ds.excluded_dirs}
       )
 
-    subdomains =
-      Repo.all(
-        from s in Subdomain,
-          join: d in Domain,
-          on: d.id == s.domain_id,
-          left_join: ss in Hostctl.Backup.SubdomainSetting,
-          on: ss.subdomain_id == s.id,
-          where: s.id not in ^excluded_sub_ids,
-          select: {s.name, d.name, s.document_root, ss.s3_mode, ss.excluded_dirs}
-      )
-
-    entries =
-      Enum.map(domains, fn {name, doc_root, mode, excluded_dirs} ->
-        {name, doc_root, mode, excluded_dirs || []}
-      end) ++
-        Enum.map(subdomains, fn {sname, dname, doc_root, mode, excluded_dirs} ->
-          {"#{sname}.#{dname}", doc_root, mode, excluded_dirs || []}
-        end)
-
-    entries
-    |> Enum.filter(fn {_, doc_root, _, _} -> doc_root && File.dir?(doc_root) end)
-    |> Enum.each(fn {name, doc_root, per_mode, excluded_dirs} ->
+    domains
+    |> Enum.map(fn {domain_id, name, doc_root, mode, excluded_dirs} ->
+      base_dir = domain_base_dir(doc_root, name)
+      all_excludes = (excluded_dirs || []) ++ excluded_subdomain_rel_dirs(domain_id, base_dir)
+      {name, base_dir, mode, all_excludes}
+    end)
+    |> Enum.filter(fn {_, base_dir, _, _} -> base_dir && File.dir?(base_dir) end)
+    |> Enum.each(fn {name, base_dir, per_mode, excluded_dirs} ->
       effective_mode = per_mode || "stream"
       archive_name = "#{name}.tar.gz"
       s3_key = "#{prefix}/domains/#{archive_name}"
       snapshot_path = incremental_snapshot_path(settings, "entry", name)
 
       if effective_mode == "archive" do
-        # Per-domain override: tar to a tmp file then upload
         tmp = Path.join(System.tmp_dir!(), "hostctl-override-#{archive_name}")
 
         try do
-          System.cmd(tar, tar_args_with_excludes(tmp, doc_root, excluded_dirs, snapshot_path),
+          System.cmd(tar, tar_args_with_excludes(tmp, base_dir, excluded_dirs, snapshot_path),
             stderr_to_stdout: true
           )
 
@@ -1389,7 +1254,7 @@ defmodule Hostctl.Backup.Runner do
           upload_directory_raw_to_s3(
             settings,
             "#{prefix}/domains/#{name}",
-            doc_root,
+            base_dir,
             excluded_dirs
           )
         else
@@ -1398,7 +1263,7 @@ defmodule Hostctl.Backup.Runner do
           stream =
             command_to_stream(
               tar,
-              tar_args_with_excludes("-", doc_root, excluded_dirs, snapshot_path)
+              tar_args_with_excludes("-", base_dir, excluded_dirs, snapshot_path)
             )
 
           case S3.upload_stream(settings, s3_key, stream) do
@@ -1440,6 +1305,25 @@ defmodule Hostctl.Backup.Runner do
     |> Enum.map(&String.trim_leading(&1, "/"))
     |> Enum.reject(&String.contains?(&1, ".."))
     |> Enum.flat_map(fn dir -> ["--exclude", "./#{dir}"] end)
+  end
+
+  defp domain_base_dir(nil, name), do: "/var/www/#{name}"
+  defp domain_base_dir(doc_root, _name), do: Path.dirname(doc_root)
+
+  defp excluded_subdomain_rel_dirs(domain_id, base_dir) do
+    excluded_ids = Backup.file_backup_excluded_subdomain_ids()
+
+    Repo.all(
+      from s in Subdomain,
+        where: s.domain_id == ^domain_id and s.id in ^excluded_ids,
+        select: s.document_root
+    )
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(fn sub_doc_root ->
+      sub_base = Path.dirname(sub_doc_root)
+      Path.relative_to(sub_base, base_dir)
+    end)
+    |> Enum.reject(&(&1 == "." or String.starts_with?(&1, "/")))
   end
 
   defp upload_directory_raw_to_s3(settings, key_prefix, root_dir, excluded_dirs) do
