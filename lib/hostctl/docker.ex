@@ -2,8 +2,8 @@ defmodule Hostctl.Docker do
   @moduledoc """
   Helpers for interacting with the local Docker daemon.
 
-  This module is intentionally read-only for now and is used by the panel
-  to discover running containers and their published host ports.
+  Supports container discovery, management (start/stop), environment variable inspection,
+  registry search, and Docker Compose stack operations.
   """
 
   @type container :: %{
@@ -13,6 +13,15 @@ defmodule Hostctl.Docker do
           status: String.t(),
           ports: String.t(),
           published_ports: [integer()]
+        }
+
+  @type inspect_result :: %{
+          id: String.t(),
+          name: String.t(),
+          image: String.t(),
+          state: String.t(),
+          ports: map(),
+          env: map()
         }
 
   @doc "Returns true when the docker CLI is available and can talk to the daemon."
@@ -32,6 +41,136 @@ defmodule Hostctl.Docker do
     else
       {:error, :command_failed} -> {:error, docker_error_message()}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Lists all containers (running and stopped)."
+  def list_all_containers do
+    with {:ok, output} <- run(["ps", "-a", "--format", "{{json .}}"]),
+         {:ok, containers} <- parse_ps_output(output) do
+      {:ok, containers}
+    else
+      {:error, :command_failed} -> {:error, docker_error_message()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Starts a stopped container by name or ID."
+  def start_container(container_id) when is_binary(container_id) do
+    case run(["start", container_id]) do
+      {:ok, _} -> :ok
+      {:error, :command_failed} -> {:error, "Failed to start container"}
+      error -> error
+    end
+  end
+
+  @doc "Stops a running container by name or ID."
+  def stop_container(container_id) when is_binary(container_id) do
+    case run(["stop", container_id]) do
+      {:ok, _} -> :ok
+      {:error, :command_failed} -> {:error, "Failed to stop container"}
+      error -> error
+    end
+  end
+
+  @doc "Restarts a container by name or ID."
+  def restart_container(container_id) when is_binary(container_id) do
+    case run(["restart", container_id]) do
+      {:ok, _} -> :ok
+      {:error, :command_failed} -> {:error, "Failed to restart container"}
+      error -> error
+    end
+  end
+
+  @doc "Inspects a container and returns detailed metadata including environment variables."
+  @spec inspect_container(String.t()) :: {:ok, inspect_result()} | {:error, String.t()}
+  def inspect_container(container_id) when is_binary(container_id) do
+    with {:ok, output} <- run(["inspect", container_id]),
+         [json_obj | _] <- Jason.decode!(output),
+         name <- Map.get(json_obj, "Name", "") |> String.trim_leading("/"),
+         config <- Map.get(json_obj, "Config", %{}),
+         state <- Map.get(json_obj, "State", %{}),
+         network_settings <- Map.get(json_obj, "NetworkSettings", %{}) do
+      {:ok,
+       %{
+         id: Map.get(json_obj, "Id", ""),
+         name: name,
+         image: Map.get(config, "Image", ""),
+         state: Map.get(state, "Status", "unknown"),
+         ports: parse_port_bindings(Map.get(network_settings, "Ports", %{})),
+         env: parse_env_list(Map.get(config, "Env", []))
+       }}
+    else
+      {:error, _} -> {:error, "Failed to inspect container"}
+      _ -> {:error, "Invalid container response"}
+    end
+  rescue
+    _ -> {:error, "Failed to parse container details"}
+  end
+
+  @doc "Gets environment variables from a container."
+  def get_container_env(container_id) when is_binary(container_id) do
+    case inspect_container(container_id) do
+      {:ok, details} -> {:ok, details.env}
+      error -> error
+    end
+  end
+
+  @doc "Search Docker Hub registry for images matching a query."
+  def search_registry(query) when is_binary(query) do
+    with {:ok, output} <-
+           run([
+             "search",
+             "--format",
+             "table {{.Name}}\\t{{.StarCount}}\\t{{.Description}}",
+             query
+           ]) do
+      {:ok,
+       output
+       |> String.split("\n", trim: true)
+       |> Enum.drop(1)
+       |> Enum.map(&parse_search_result/1)
+       |> Enum.reject(&is_nil/1)}
+    else
+      {:error, :command_failed} -> {:error, "Search failed or registry unavailable"}
+      error -> error
+    end
+  end
+
+  @doc "Lists active Docker Compose stacks (requires docker compose command)."
+  def list_compose_stacks do
+    case run(["compose", "ls", "--format", "json"]) do
+      {:ok, output} ->
+        case Jason.decode(output) do
+          {:ok, stacks} ->
+            {:ok,
+             stacks
+             |> Enum.map(fn stack ->
+               %{
+                 name: Map.get(stack, "Name", ""),
+                 status: Map.get(stack, "Status", "unknown"),
+                 container_count: Map.get(stack, "Containers", 0)
+               }
+             end)}
+
+          {:error, _} ->
+            {:error, "Failed to parse compose stacks"}
+        end
+
+      {:error, :command_failed} ->
+        {:error, "Docker Compose not available or no stacks running"}
+
+      error ->
+        error
+    end
+  end
+
+  @doc "Pulls an image from registry."
+  def pull_image(image_name) when is_binary(image_name) do
+    case run(["pull", image_name]) do
+      {:ok, output} -> {:ok, String.trim(output)}
+      {:error, :command_failed} -> {:error, "Failed to pull image"}
+      error -> error
     end
   end
 
@@ -94,5 +233,57 @@ defmodule Hostctl.Docker do
 
   defp docker_error_message do
     "Docker is unavailable. Ensure the docker daemon is running and this service user can execute docker commands."
+  end
+
+  defp parse_port_bindings(ports) when is_map(ports) do
+    ports
+    |> Enum.reduce(%{}, fn {port_proto, bindings}, acc ->
+      case bindings do
+        nil ->
+          acc
+
+        bindings_list when is_list(bindings_list) ->
+          host_ports =
+            bindings_list
+            |> Enum.map(&Map.get(&1, "HostPort", ""))
+            |> Enum.reject(&(&1 == ""))
+
+          Map.put(acc, port_proto, host_ports)
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp parse_port_bindings(_), do: %{}
+
+  defp parse_env_list(env_list) when is_list(env_list) do
+    env_list
+    |> Enum.reduce(%{}, fn env_str, acc ->
+      case String.split(env_str, "=", parts: 2) do
+        [key, value] -> Map.put(acc, key, value)
+        _ -> acc
+      end
+    end)
+  end
+
+  defp parse_env_list(_), do: %{}
+
+  defp parse_search_result(line) do
+    case String.split(line, ~r/\s+/, parts: 3) do
+      [name, stars, description] ->
+        %{
+          name: name,
+          stars: String.to_integer(String.trim(stars)),
+          description: String.trim(description)
+        }
+
+      [name | _] ->
+        %{name: name, stars: 0, description: ""}
+
+      _ ->
+        nil
+    end
   end
 end
