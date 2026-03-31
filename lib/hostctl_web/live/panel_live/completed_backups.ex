@@ -500,12 +500,6 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   defp normalize_select(""), do: "all"
   defp normalize_select(value), do: value
 
-  defp restorable_log?(log) do
-    local_archive? = is_binary(log.local_path) and log.local_path != ""
-    s3_archive? = is_binary(log.s3_key) and archive_key?(log.s3_key)
-    local_archive? or s3_archive?
-  end
-
   defp archive_key?(value) when is_binary(value) do
     String.ends_with?(value, ".tar.gz") or String.ends_with?(value, ".tgz")
   end
@@ -885,7 +879,10 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                     <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Download
                   </.link>
                   <button
-                    :if={restorable_log?(log) and is_binary(log.s3_key) and log.s3_key != ""}
+                    :if={
+                      log_s3_mode(log) == "archive" and is_binary(log.s3_key) and
+                        archive_key?(log.s3_key)
+                    }
                     id={"restore-log-s3-#{log.id}"}
                     phx-click="restore_s3"
                     phx-value-key={log.s3_key}
@@ -894,13 +891,13 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                     <.icon name="hero-arrow-path-rounded-square" class="w-4 h-4" /> Restore
                   </button>
                   <button
-                    :if={log_s3_mode(log) == "raw" and log_first_domain(log)}
+                    :if={log_s3_mode(log) in ["raw", "stream"] and log_first_domain(log)}
                     id={"restore-raw-log-#{log.id}"}
                     phx-click="restore_raw_log"
                     phx-value-id={log.id}
                     class="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white hover:bg-amber-700"
                   >
-                    <.icon name="hero-folder-open" class="w-4 h-4" /> Restore Raw
+                    <.icon name="hero-folder-open" class="w-4 h-4" /> Restore Files
                   </button>
                   <button
                     :if={log_s3_mode(log) == "stream" and log_first_domain(log)}
@@ -909,7 +906,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                     phx-value-id={log.id}
                     class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700"
                   >
-                    <.icon name="hero-arrow-path-rounded-square" class="w-4 h-4" /> Restore
+                    <.icon name="hero-arrow-path-rounded-square" class="w-4 h-4" /> Restore Archive
                   </button>
                 </div>
               </div>
