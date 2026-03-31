@@ -15,7 +15,7 @@ defmodule HostctlWeb.PanelLive.Docker do
 
     form =
       %DomainProxy{}
-      |> Hosting.change_domain_proxy(default_proxy_params(domains, containers))
+      |> Hosting.change_domain_proxy(default_proxy_params(domains, all_containers))
       |> to_form(as: :domain_proxy)
 
     compose_stacks = load_compose_stacks()
@@ -27,6 +27,7 @@ defmodule HostctlWeb.PanelLive.Docker do
      |> assign(:tab, "containers")
      |> assign(:domains, domains)
      |> assign(:containers, containers)
+     |> assign(:all_containers_list, all_containers)
      |> assign(:docker_status, docker_status)
      |> assign(:proxy_form, form)
      |> assign(:proxies_empty?, proxies == [])
@@ -59,21 +60,25 @@ defmodule HostctlWeb.PanelLive.Docker do
   def handle_event("refresh_containers", _params, socket) do
     {docker_status, containers} = load_containers()
     all_containers = load_all_containers()
+    proxies = Hosting.list_domain_proxies_for_admin()
 
     proxy_form =
       %DomainProxy{}
-      |> Hosting.change_domain_proxy(default_proxy_params(socket.assigns.domains, containers))
+      |> Hosting.change_domain_proxy(default_proxy_params(socket.assigns.domains, all_containers))
       |> to_form(as: :domain_proxy)
 
     {:noreply,
      socket
      |> assign(:docker_status, docker_status)
      |> assign(:containers, containers)
+     |> assign(:all_containers_list, all_containers)
      |> assign(:proxy_form, proxy_form)
+     |> assign(:proxies_empty?, proxies == [])
      |> assign(:inspecting, nil)
      |> assign(:compose_stacks, load_compose_stacks())
      |> assign(:images, load_images())
-     |> stream(:all_containers, all_containers, reset: true)}
+     |> stream(:all_containers, all_containers, reset: true)
+     |> stream(:proxies, proxies, reset: true)}
   end
 
   @impl true
@@ -87,6 +92,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          socket
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
+         |> assign(:all_containers_list, all_containers)
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Container #{container_id} started.")}
 
@@ -106,6 +112,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          socket
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
+         |> assign(:all_containers_list, all_containers)
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Container #{container_id} stopped.")}
 
@@ -125,6 +132,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          socket
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
+         |> assign(:all_containers_list, all_containers)
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Container #{container_id} restarted.")}
 
@@ -221,6 +229,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
          |> assign(:editing, nil)
+         |> assign(:all_containers_list, all_containers)
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Container recreated with updated settings.")}
 
@@ -299,6 +308,7 @@ defmodule HostctlWeb.PanelLive.Docker do
            |> assign(:containers, containers)
            |> assign(:show_run_form, false)
            |> assign(:run_env_count, 1)
+           |> assign(:all_containers_list, all_containers)
            |> stream(:all_containers, all_containers, reset: true)
            |> put_flash(:info, "Container started from #{image}.")}
 
@@ -343,6 +353,7 @@ defmodule HostctlWeb.PanelLive.Docker do
            |> assign(:pulling, false)
            |> assign(:pull_image_name, "")
            |> assign(:images, load_images())
+           |> assign(:all_containers_list, all_containers)
            |> stream(:all_containers, all_containers, reset: true)
            |> put_flash(:info, "Image #{image_name} pulled successfully.")}
 
@@ -367,6 +378,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          socket
          |> assign(:pulling, false)
          |> assign(:images, load_images())
+         |> assign(:all_containers_list, all_containers)
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Image #{image_name} pulled successfully.")}
 
@@ -423,6 +435,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:deploy_image, nil)
          |> assign(:deploy_env_count, 1)
          |> assign(:tab, "containers")
+         |> assign(:all_containers_list, all_containers)
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Container started from #{image}.")}
 
@@ -456,6 +469,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          socket
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
+         |> assign(:all_containers_list, all_containers)
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Container #{container_id} removed.")}
 
@@ -475,6 +489,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          socket
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
+         |> assign(:all_containers_list, all_containers)
          |> assign(:compose_stacks, load_compose_stacks())
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Compose stack \"#{name}\" started.")}
@@ -495,6 +510,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          socket
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
+         |> assign(:all_containers_list, all_containers)
          |> assign(:compose_stacks, load_compose_stacks())
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Compose stack \"#{name}\" stopped.")}
@@ -520,7 +536,7 @@ defmodule HostctlWeb.PanelLive.Docker do
 
   @impl true
   def handle_event("validate_proxy", %{"domain_proxy" => params}, socket) do
-    params = maybe_autofill_port(params, socket.assigns.containers)
+    params = maybe_autofill_port(params, socket.assigns.all_containers_list)
 
     form =
       %DomainProxy{}
@@ -1301,7 +1317,7 @@ defmodule HostctlWeb.PanelLive.Docker do
                 field={@proxy_form[:container_name]}
                 type="select"
                 label="Container"
-                options={container_options(@containers)}
+                options={container_options(@all_containers_list)}
               />
 
               <.input
@@ -1844,24 +1860,27 @@ defmodule HostctlWeb.PanelLive.Docker do
     end)
   end
 
-  defp container_options([]), do: [{"No running containers detected", ""}]
+  defp container_options([]), do: [{"No containers detected", ""}]
 
   defp container_options(containers) do
     Enum.map(containers, fn container ->
+      status_hint = if running?(container), do: "running", else: "stopped"
+
       port_hint =
         case container.published_ports do
           [] -> "no published ports"
           ports -> Enum.join(ports, ",")
         end
 
-      {"#{container.name} (#{container.image}) [#{port_hint}]", container.name}
+      {"#{container.name} (#{container.image}) [#{port_hint}] — #{status_hint}", container.name}
     end)
   end
 
-  defp default_proxy_params(domains, containers) do
+  defp default_proxy_params(domains, all_containers) do
     domain_id = domains |> List.first() |> then(&if(&1, do: &1.id, else: nil))
 
-    container = List.first(containers)
+    container =
+      Enum.find(all_containers, &running?/1) || List.first(all_containers)
 
     port =
       case container do
@@ -1878,10 +1897,10 @@ defmodule HostctlWeb.PanelLive.Docker do
     }
   end
 
-  defp maybe_autofill_port(params, containers) do
+  defp maybe_autofill_port(params, all_containers) do
     container_name = params["container_name"] || ""
 
-    case Enum.find(containers, &(&1.name == container_name)) do
+    case Enum.find(all_containers, &(&1.name == container_name)) do
       %{published_ports: [first | _]} ->
         Map.put(params, "upstream_port", to_string(first))
 
