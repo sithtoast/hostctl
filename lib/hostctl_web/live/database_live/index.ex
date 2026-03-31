@@ -426,7 +426,7 @@ defmodule HostctlWeb.DatabaseLive.Index do
                     <p class="text-xs text-gray-500 dark:text-gray-400">
                       {if @expanded_db.db_type == "mysql",
                         do: "MySQL users are provisioned on the server automatically.",
-                        else: "Credential records for this PostgreSQL database."}
+                        else: "PostgreSQL users are provisioned on the server automatically."}
                     </p>
                   </div>
                 </div>

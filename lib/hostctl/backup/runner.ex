@@ -931,8 +931,7 @@ defmodule Hostctl.Backup.Runner do
             cert_type: ssl_cert.cert_type,
             certificate: ssl_cert.certificate,
             private_key: ssl_cert.private_key,
-            expires_at:
-              if(ssl_cert.expires_at, do: DateTime.to_iso8601(ssl_cert.expires_at)),
+            expires_at: if(ssl_cert.expires_at, do: DateTime.to_iso8601(ssl_cert.expires_at)),
             status: ssl_cert.status,
             email: ssl_cert.email
           }

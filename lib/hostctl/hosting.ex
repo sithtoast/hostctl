@@ -768,7 +768,10 @@ defmodule Hostctl.Hosting do
 
             changeset =
               Database.changeset(database, attrs)
-              |> Ecto.Changeset.add_error(:base, mysql_error_message(reason))
+              |> Ecto.Changeset.add_error(
+                :base,
+                db_server_error_message(reason, database.db_type)
+              )
 
             {:error, changeset}
         end
@@ -829,7 +832,10 @@ defmodule Hostctl.Hosting do
 
             changeset =
               DbUser.changeset(db_user, attrs)
-              |> Ecto.Changeset.add_error(:base, mysql_error_message(reason))
+              |> Ecto.Changeset.add_error(
+                :base,
+                db_server_error_message(reason, database.db_type)
+              )
 
             {:error, changeset}
         end
@@ -855,13 +861,22 @@ defmodule Hostctl.Hosting do
     DbUser.changeset(db_user, attrs)
   end
 
-  defp mysql_error_message({:connection_failed, reason}) do
+  defp db_server_error_message({:connection_failed, reason}, "mysql") do
     "Could not connect to MySQL server: #{Exception.message(reason)}. " <>
       "Ensure MySQL/MariaDB is running and MYSQL_ROOT_URL is configured correctly."
   end
 
-  defp mysql_error_message(reason) do
+  defp db_server_error_message({:connection_failed, reason}, "postgresql") do
+    "Could not connect to PostgreSQL server: #{Exception.message(reason)}. " <>
+      "Ensure PostgreSQL is running and POSTGRES_ROOT_URL is configured correctly."
+  end
+
+  defp db_server_error_message(reason, "mysql") do
     "MySQL error: #{Exception.message(reason)}"
+  end
+
+  defp db_server_error_message(reason, "postgresql") do
+    "PostgreSQL error: #{Exception.message(reason)}"
   end
 
   # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ DB_NAME="hostctl_prod"
 DB_USER="hostctl"
 DB_PASSWORD=""
 MYSQL_ROOT_PASSWORD=""
+POSTGRES_ROOT_PASSWORD=""
 DOMAIN=""
 REPO_URL="https://github.com/yourorg/hostctl.git"   # TODO: update when published
 REPO_BRANCH="main"
@@ -194,6 +195,15 @@ if [[ -z "$MYSQL_ROOT_PASSWORD" ]]; then
   fi
   if [[ -z "$MYSQL_ROOT_PASSWORD" ]]; then
     MYSQL_ROOT_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)"
+  fi
+fi
+
+if [[ -z "$POSTGRES_ROOT_PASSWORD" ]]; then
+  if [[ -f "$ENV_FILE" ]]; then
+    POSTGRES_ROOT_PASSWORD="$(grep '^POSTGRES_ROOT_URL=' "$ENV_FILE" | sed 's|.*://[^:]*:\([^@]*\)@.*|\1|')" || true
+  fi
+  if [[ -z "$POSTGRES_ROOT_PASSWORD" ]]; then
+    POSTGRES_ROOT_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)"
   fi
 fi
 
@@ -382,6 +392,10 @@ https://apt.postgresql.org/pub/repos/apt ${OS_CODENAME}-pgdg main" \
   fi
 
   step "Configuring PostgreSQL user and database"
+
+  # Set a password for the postgres superuser so the app can connect via Postgrex
+  sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '$POSTGRES_ROOT_PASSWORD';" >/dev/null 2>&1
+  info "PostgreSQL superuser password configured"
 
   if ! sudo -u postgres psql -tAc \
       "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
@@ -677,6 +691,7 @@ PHX_HOST=${DOMAIN:-localhost}
 PORT=4000
 DATABASE_URL=ecto://$DB_USER:$DB_PASSWORD@localhost/$DB_NAME
 MYSQL_ROOT_URL=mysql://root:$MYSQL_ROOT_PASSWORD@localhost:3306/mysql
+POSTGRES_ROOT_URL=postgres://postgres:$POSTGRES_ROOT_PASSWORD@localhost:5432/postgres
 SECRET_KEY_BASE=$SECRET_KEY_BASE
 INITIAL_SETUP_TOKEN=$INITIAL_SETUP_TOKEN
 POOL_SIZE=10
