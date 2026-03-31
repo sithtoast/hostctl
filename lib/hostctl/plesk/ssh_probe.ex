@@ -396,7 +396,11 @@ defmodule Hostctl.Plesk.SSHProbe do
   defp dns_loop_step do
     "      dns_info=$(run_plesk bin dns --info \"$d\" 2>&1)\n" <>
       "      if [ $? -ne 0 ]; then\n" <>
-      "        emit_warn dns_info_failed \"$d: $dns_info\"\n" <>
+      "        if printf '%s' \"$dns_info\" | grep -qi 'DNS zone for this domain is switched off'; then\n" <>
+      "          printf 'DNSOFF\\t%s\\n' \"$d\"\n" <>
+      "        else\n" <>
+      "          emit_warn dns_info_failed \"$d: $dns_info\"\n" <>
+      "        fi\n" <>
       "      else\n" <>
       "        dns_count=$(printf '%s\\n' \"$dns_info\" | awk 'NF {count++} END {print count+0}')\n" <>
       "        printf 'DNS\\t%s\\t%s\\n' \"$d\" \"$dns_count\"\n" <>
@@ -490,17 +494,24 @@ defmodule Hostctl.Plesk.SSHProbe do
     [
       "ftp_login_col=$(run_plesk db -Ne \"select column_name from information_schema.columns where table_schema = database() and table_name='ftp_users' and column_name in ('login','name','username','account') order by field(column_name,'login','name','username','account') limit 1\" 2>/dev/null)",
       "ftp_home_col=$(run_plesk db -Ne \"select column_name from information_schema.columns where table_schema = database() and table_name='ftp_users' and column_name in ('home','home_path','path') order by field(column_name,'home','home_path','path') limit 1\" 2>/dev/null)",
-      "if [ -z \"$ftp_login_col\" ]; then ftp_login_col=name; fi",
-      "if [ -z \"$ftp_home_col\" ]; then ftp_home_col=home; fi",
-      "ftp_rows=$(run_plesk db -Ne \"select ${ftp_login_col}, ${ftp_home_col} from ftp_users order by ${ftp_login_col}\" 2>&1)",
-      "if [ $? -ne 0 ]; then",
-      "  emit_warn ftp_accounts_query_failed \"$ftp_rows\"",
+      "if [ -z \"$ftp_login_col\" ]; then",
+      "  ftp_cols=$(run_plesk db -Ne \"select column_name from information_schema.columns where table_schema = database() and table_name='ftp_users' order by ordinal_position\" 2>/dev/null | paste -sd ',' -)",
+      "  emit_warn ftp_accounts_schema_unsupported \"ftp_users missing known login column (columns=$ftp_cols)\"",
       "else",
-      "  printf '%s\\n' \"$ftp_rows\" | while IFS=\"$TAB\" read -r login home; do",
-      "    [ -z \"$login\" ] && continue",
-      "    domain=$(printf '%s' \"$home\" | awk -F/ '/\/var\/www\/vhosts\// {print $5; exit}')",
-      "    printf 'FTP\\t%s\\t%s\\n' \"$login\" \"$domain\"",
-      "  done",
+      "  if [ -n \"$ftp_home_col\" ]; then",
+      "    ftp_rows=$(run_plesk db -Ne \"select ${ftp_login_col}, ${ftp_home_col} from ftp_users order by ${ftp_login_col}\" 2>&1)",
+      "  else",
+      "    ftp_rows=$(run_plesk db -Ne \"select ${ftp_login_col}, '' from ftp_users order by ${ftp_login_col}\" 2>&1)",
+      "  fi",
+      "  if [ $? -ne 0 ]; then",
+      "    emit_warn ftp_accounts_query_failed \"$ftp_rows\"",
+      "  else",
+      "    printf '%s\\n' \"$ftp_rows\" | while IFS=\"$TAB\" read -r login home; do",
+      "      [ -z \"$login\" ] && continue",
+      "      domain=$(printf '%s' \"$home\" | awk -F/ '/\/var\/www\/vhosts\// {print $5; exit}')",
+      "      printf 'FTP\\t%s\\t%s\\n' \"$login\" \"$domain\"",
+      "    done",
+      "  fi",
       "fi"
     ]
     |> Enum.join("\n")
@@ -560,6 +571,7 @@ defmodule Hostctl.Plesk.SSHProbe do
           {:ok,
            &put_inventory_item(&1, "dns", %{
              domain: String.trim(domain),
+             enabled: true,
              record_count: normalize_count(record_count)
            })}
         else
@@ -568,6 +580,21 @@ defmodule Hostctl.Plesk.SSHProbe do
 
       _ ->
         :ignore
+    end
+  end
+
+  defp parse_probe_line("DNSOFF\t" <> rest) do
+    domain = String.trim(rest)
+
+    if present_string?(domain) do
+      {:ok,
+       &put_inventory_item(&1, "dns", %{
+         domain: domain,
+         enabled: false,
+         record_count: 0
+       })}
+    else
+      :ignore
     end
   end
 

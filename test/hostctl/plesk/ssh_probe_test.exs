@@ -56,6 +56,7 @@ defmodule Hostctl.Plesk.SSHProbeTest do
     SUB\tnightgrease.net\tfrank\tnightgrease.net_diruri3oizr
     WEB\tnightgrease.net\tnightgrease.net_diruri3oizr\thttpdocs
     DNS\tnightgrease.net\t12
+    DNSOFF\tapi.zer0.tv
     MAIL\tadmin\tnightgrease.net
     MAILDIR\tadmin\tnightgrease.net\t/var/qmail/mailnames/nightgrease.net/admin/Maildir
     DB\tnightgrease_prod\tnightgrease.net
@@ -87,7 +88,8 @@ defmodule Hostctl.Plesk.SSHProbeTest do
            ]
 
     assert discovery.inventory["dns"] == [
-             %{domain: "nightgrease.net", record_count: 12}
+             %{domain: "api.zer0.tv", enabled: false, record_count: 0},
+             %{domain: "nightgrease.net", enabled: true, record_count: 12}
            ]
 
     assert discovery.inventory["mail_accounts"] == [

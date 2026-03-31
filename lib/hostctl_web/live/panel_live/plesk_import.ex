@@ -836,8 +836,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     |> Enum.reject(&is_nil/1)
   end
 
-  defp format_discovery_item("dns", item),
-    do: "#{item.domain} (#{item.record_count} records)"
+  defp format_discovery_item("dns", item) do
+    if Map.get(item, :enabled, true) do
+      "#{item.domain} (#{item.record_count} records)"
+    else
+      "#{item.domain} (DNS disabled in Plesk / external DNS)"
+    end
+  end
 
   defp format_discovery_item("web_files", item) do
     suffix =
