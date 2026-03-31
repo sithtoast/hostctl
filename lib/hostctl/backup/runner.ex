@@ -527,11 +527,9 @@ defmodule Hostctl.Backup.Runner do
 
     result =
       try do
-        if settings.backup_mysql do
-          broadcast_progress("Backing up databases for #{domain.name}…")
-          dump_domain_databases(tmp_dir, domain)
-          broadcast_progress("Domain database backup complete.")
-        end
+        broadcast_progress("Backing up databases for #{domain.name}…")
+        dump_domain_databases(tmp_dir, domain)
+        broadcast_progress("Domain database backup complete.")
 
         if settings.backup_files do
           broadcast_progress("Backing up domain files for #{domain.name}…")
@@ -539,7 +537,7 @@ defmodule Hostctl.Backup.Runner do
           broadcast_progress("Domain file backup complete.")
         end
 
-        if settings.backup_mail and domain_mail_included?(domain.id) do
+        if domain_mail_included?(domain.id) do
           broadcast_progress("Backing up mailboxes for #{domain.name}…")
           backup_domain_mail(tmp_dir, domain.name)
           broadcast_progress("Mailbox backup complete.")
@@ -639,11 +637,9 @@ defmodule Hostctl.Backup.Runner do
 
     result =
       try do
-        if settings.backup_mysql do
-          broadcast_progress("Streaming databases for #{domain.name} to S3…")
-          stream_domain_databases_to_s3(settings, prefix, domain)
-          broadcast_progress("Domain database streaming complete.")
-        end
+        broadcast_progress("Streaming databases for #{domain.name} to S3…")
+        stream_domain_databases_to_s3(settings, prefix, domain)
+        broadcast_progress("Domain database streaming complete.")
 
         if settings.backup_files do
           broadcast_progress("Streaming domain files for #{domain.name} to S3…")
@@ -651,7 +647,7 @@ defmodule Hostctl.Backup.Runner do
           broadcast_progress("Domain file streaming complete.")
         end
 
-        if settings.backup_mail and domain_mail_included?(domain.id) do
+        if domain_mail_included?(domain.id) do
           broadcast_progress("Streaming mailboxes for #{domain.name} to S3…")
           stream_domain_mail_to_s3(settings, prefix, tar, domain.name)
           broadcast_progress("Mailbox streaming complete.")
@@ -773,10 +769,10 @@ defmodule Hostctl.Backup.Runner do
       scope: "domain",
       includes: %{
         database: false,
-        mysql: settings.backup_mysql,
+        mysql: true,
         files: settings.backup_files,
         files_incremental: settings.backup_incremental,
-        mail: settings.backup_mail and domain_mail_included?(domain.id)
+        mail: domain_mail_included?(domain.id)
       },
       domain_names: [domain.name],
       subdomain_names: subdomain_names,

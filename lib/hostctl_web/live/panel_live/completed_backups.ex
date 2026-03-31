@@ -734,6 +734,15 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     length(mysql) + length(postgresql)
   end
 
+  defp mail_domain_count(log) do
+    details = log.details || %{}
+
+    names =
+      Map.get(details, :mail_domain_names) || Map.get(details, "mail_domain_names") || []
+
+    length(names)
+  end
+
   defp escaped_cmd(cmd, args) do
     systemd_args = ["systemd-run", "--pipe", "--wait", "--collect", "--quiet", cmd | args]
     System.cmd("sudo", systemd_args, stderr_to_stdout: true)
@@ -1063,9 +1072,10 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                     <% end %>
                   </div>
 
-                  <div class="grid grid-cols-1 gap-2 text-xs text-gray-500 dark:text-gray-400 md:grid-cols-3">
+                  <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
                     <div>Domains: {display_domain_count(log)}</div>
                     <div>Databases: {database_count(log)}</div>
+                    <div>Mailboxes: {mail_domain_count(log)}</div>
                     <div>Archive Size: {format_bytes(log.file_size_bytes)}</div>
                   </div>
 
