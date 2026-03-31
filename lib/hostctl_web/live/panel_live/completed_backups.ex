@@ -165,6 +165,35 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     {:noreply, assign(socket, :restore, %{restore | import_results: import_results})}
   end
 
+  def handle_event("restore_local", %{"id" => log_id}, socket) do
+    log = Backup.get_log(String.to_integer(log_id))
+
+    if log.local_path && File.exists?(log.local_path) do
+      case Archive.inspect_archive(log.local_path) do
+        {:ok, %{items: items}} ->
+          restore_state = %{
+            step: :select_items,
+            s3_key: nil,
+            local_path: log.local_path,
+            items: items,
+            selected_items: MapSet.new(Enum.map(items, & &1.id)),
+            extracted_dir: nil,
+            sql_dumps: [],
+            db_targets: nil,
+            import_results: [],
+            error: nil
+          }
+
+          {:noreply, assign(socket, :restore, restore_state)}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Failed to inspect archive: #{reason}")}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Local archive not found on disk.")}
+    end
+  end
+
   def handle_event("close_restore", _, socket) do
     cleanup_restore(socket.assigns.restore)
     {:noreply, assign(socket, :restore, nil)}
@@ -284,7 +313,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     log = Backup.get_log(String.to_integer(log_id))
     domain = log_first_domain(log)
     s3_key = "#{log.s3_key}/domains/#{domain}.tar.gz"
-    doc_root = Backup.domain_document_root(domain)
+    base_dir = Backup.domain_base_dir(domain)
 
     {:noreply,
      assign(socket, :raw_restore, %{
@@ -294,7 +323,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
        files: [],
        file_count: 0,
        total_size: 0,
-       target_dir: doc_root,
+       target_dir: base_dir,
        s3_prefix: nil,
        s3_archive_key: s3_key,
        progress: nil,
@@ -398,7 +427,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     case Backup.list_raw_s3_domain_files(domain_name) do
       {:ok, files} ->
         total_size = files |> Enum.map(& &1[:size]) |> Enum.filter(&is_integer/1) |> Enum.sum()
-        doc_root = Backup.domain_document_root(domain_name)
+        base_dir = Backup.domain_base_dir(domain_name)
 
         {:noreply,
          assign(socket, :raw_restore, %{
@@ -407,7 +436,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
              files: Enum.take(files, 100),
              file_count: length(files),
              total_size: total_size,
-             target_dir: doc_root
+             target_dir: base_dir
          })}
 
       {:error, reason} ->
@@ -421,18 +450,40 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   end
 
   def handle_info({:do_raw_restore, domain_name, target_dir}, socket) do
-    case Backup.restore_raw_s3_domain(domain_name, target_dir) do
+    temp_dir =
+      Path.join(System.tmp_dir!(), "hostctl-raw-restore-#{System.system_time(:millisecond)}")
+
+    case Backup.restore_raw_s3_domain(domain_name, temp_dir) do
       {:ok, count} ->
-        {:noreply,
-         socket
-         |> assign(:raw_restore, %{
-           socket.assigns.raw_restore
-           | step: :done,
-             progress: "Restored #{count} files to #{target_dir}"
-         })
-         |> put_flash(:info, "Raw restore complete: #{count} files restored to #{target_dir}")}
+        escaped_cmd("mkdir", ["-p", target_dir])
+
+        case escaped_cmd("cp", ["-a"] ++ copy_source_args(temp_dir) ++ [target_dir]) do
+          {_, 0} ->
+            File.rm_rf(temp_dir)
+
+            {:noreply,
+             socket
+             |> assign(:raw_restore, %{
+               socket.assigns.raw_restore
+               | step: :done,
+                 progress: "Restored #{count} files to #{target_dir}"
+             })
+             |> put_flash(:info, "Raw restore complete: #{count} files restored to #{target_dir}")}
+
+          {output, _code} ->
+            File.rm_rf(temp_dir)
+
+            {:noreply,
+             assign(socket, :raw_restore, %{
+               socket.assigns.raw_restore
+               | step: :error,
+                 error: "Copy failed: #{String.slice(output, 0, 500)}"
+             })}
+        end
 
       {:error, reason} ->
+        File.rm_rf(temp_dir)
+
         {:noreply,
          assign(socket, :raw_restore, %{
            socket.assigns.raw_restore
@@ -446,7 +497,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     case Backup.list_all_s3_prefix_files(prefix) do
       {:ok, files} ->
         total_size = files |> Enum.map(& &1[:size]) |> Enum.filter(&is_integer/1) |> Enum.sum()
-        doc_root = Backup.domain_document_root(domain_name)
+        base_dir = Backup.domain_base_dir(domain_name)
 
         {:noreply,
          assign(socket, :raw_restore, %{
@@ -455,7 +506,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
              files: Enum.take(files, 100),
              file_count: length(files),
              total_size: total_size,
-             target_dir: doc_root
+             target_dir: base_dir
          })}
 
       {:error, reason} ->
@@ -469,18 +520,40 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   end
 
   def handle_info({:do_prefix_restore, prefix, target_dir}, socket) do
-    case Backup.restore_all_s3_prefix_to_dir(prefix, target_dir) do
+    temp_dir =
+      Path.join(System.tmp_dir!(), "hostctl-raw-restore-#{System.system_time(:millisecond)}")
+
+    case Backup.restore_all_s3_prefix_to_dir(prefix, temp_dir) do
       {:ok, count} ->
-        {:noreply,
-         socket
-         |> assign(:raw_restore, %{
-           socket.assigns.raw_restore
-           | step: :done,
-             progress: "Restored #{count} files to #{target_dir}"
-         })
-         |> put_flash(:info, "Raw restore complete: #{count} files restored to #{target_dir}")}
+        escaped_cmd("mkdir", ["-p", target_dir])
+
+        case escaped_cmd("cp", ["-a"] ++ copy_source_args(temp_dir) ++ [target_dir]) do
+          {_, 0} ->
+            File.rm_rf(temp_dir)
+
+            {:noreply,
+             socket
+             |> assign(:raw_restore, %{
+               socket.assigns.raw_restore
+               | step: :done,
+                 progress: "Restored #{count} files to #{target_dir}"
+             })
+             |> put_flash(:info, "Raw restore complete: #{count} files restored to #{target_dir}")}
+
+          {output, _code} ->
+            File.rm_rf(temp_dir)
+
+            {:noreply,
+             assign(socket, :raw_restore, %{
+               socket.assigns.raw_restore
+               | step: :error,
+                 error: "Copy failed: #{String.slice(output, 0, 500)}"
+             })}
+        end
 
       {:error, reason} ->
+        File.rm_rf(temp_dir)
+
         {:noreply,
          assign(socket, :raw_restore, %{
            socket.assigns.raw_restore
@@ -496,11 +569,12 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
 
     case S3.download(settings, s3_key, temp_path) do
       {:ok, local_path} ->
-        File.mkdir_p!(target_dir)
+        case escaped_cmd("mkdir", ["-p", target_dir]) do
+          {_, 0} -> :ok
+          _ -> :ignore
+        end
 
-        case System.cmd("tar", ["-xzf", local_path, "-C", target_dir],
-               stderr_to_stdout: true
-             ) do
+        case escaped_cmd("tar", ["-xzf", local_path, "--no-same-owner", "-C", target_dir]) do
           {_, 0} ->
             File.rm(local_path)
 
@@ -619,6 +693,16 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     length(mysql) + length(postgresql)
   end
 
+  defp escaped_cmd(cmd, args) do
+    systemd_args = ["systemd-run", "--pipe", "--wait", "--collect", "--quiet", cmd | args]
+    System.cmd("sudo", systemd_args, stderr_to_stdout: true)
+  end
+
+  defp copy_source_args(temp_dir) do
+    # Use "/tmp/dir/." to copy contents of temp_dir into target_dir (not temp_dir itself)
+    [temp_dir <> "/."]
+  end
+
   defp format_bytes(nil), do: "—"
 
   defp format_bytes(bytes) when bytes >= 1_073_741_824,
@@ -651,8 +735,9 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
 
   defp cleanup_restore(nil), do: :ok
 
-  defp cleanup_restore(%{local_path: path}) when is_binary(path) do
-    File.rm(path)
+  defp cleanup_restore(%{local_path: path, s3_key: s3_key}) when is_binary(path) do
+    # Only remove temp files downloaded from S3, not local backup archives
+    if s3_key, do: File.rm(path)
     :ok
   end
 
@@ -960,6 +1045,15 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                   >
                     <.icon name="hero-arrow-path-rounded-square" class="w-4 h-4" /> Restore Archive
                   </button>
+                  <button
+                    :if={log.local_path && !archive_key?(log.s3_key || "")}
+                    id={"restore-local-#{log.id}"}
+                    phx-click="restore_local"
+                    phx-value-id={log.id}
+                    class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-700"
+                  >
+                    <.icon name="hero-arrow-path-rounded-square" class="w-4 h-4" /> Restore
+                  </button>
                 </div>
               </div>
             <% end %>
@@ -976,10 +1070,18 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between shrink-0">
               <div>
                 <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
-                  Restore from S3
+                  <%= if @restore.s3_key do %>
+                    Restore from S3
+                  <% else %>
+                    Restore from Local
+                  <% end %>
                 </h3>
                 <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate max-w-lg">
-                  {s3_archive_basename(@restore.s3_key)}
+                  <%= if @restore.s3_key do %>
+                    {s3_archive_basename(@restore.s3_key)}
+                  <% else %>
+                    {Path.basename(@restore.local_path || "")}
+                  <% end %>
                 </p>
               </div>
               <button
@@ -1378,7 +1480,9 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                   <div class="rounded-xl border border-gray-200 dark:border-gray-800 p-4 text-sm text-gray-600 dark:text-gray-400">
                     <p>
                       This will download the archive
-                      <span class="font-mono text-xs text-gray-500 break-all">{Path.basename(@raw_restore.s3_archive_key)}</span>
+                      <span class="font-mono text-xs text-gray-500 break-all">
+                        {Path.basename(@raw_restore.s3_archive_key)}
+                      </span>
                       and extract it to the target directory.
                     </p>
                   </div>
@@ -1387,7 +1491,11 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                     <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">
                       Extract destination
                     </label>
-                    <form id="stream-restore-form" phx-submit="stream_start_restore" class="flex gap-2">
+                    <form
+                      id="stream-restore-form"
+                      phx-submit="stream_start_restore"
+                      class="flex gap-2"
+                    >
                       <input
                         type="text"
                         name="target_dir"
