@@ -594,6 +594,75 @@ defmodule Hostctl.Backup do
     Repo.one(from d in Domain, where: d.name == ^domain_name, select: d.document_root)
   end
 
+  @doc """
+  Lists all non-archive S3 objects under a specific key prefix.
+  Returns `{:ok, [%{key, rel_path, size, last_modified}]}` or `{:error, reason}`.
+  """
+  def list_s3_prefix_files(prefix) when is_binary(prefix) do
+    settings = get_or_create_settings()
+
+    if settings.s3_enabled do
+      search_prefix = String.trim_trailing(prefix, "/") <> "/"
+
+      case S3.list_objects(settings, search_prefix) do
+        {:ok, objects} ->
+          files =
+            objects
+            |> Enum.reject(fn %{key: key} -> archive_file?(key) end)
+            |> Enum.map(fn obj ->
+              Map.put(obj, :rel_path, String.trim_leading(obj.key, search_prefix))
+            end)
+            |> Enum.reject(fn %{rel_path: rel} -> rel == "" end)
+            |> Enum.sort_by(& &1.rel_path)
+
+          {:ok, files}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  @doc """
+  Downloads all non-archive files under a specific S3 prefix to the given
+  target directory, preserving directory structure.
+  Returns `{:ok, count}` or `{:error, reason}`.
+  """
+  def restore_s3_prefix_to_dir(prefix, target_dir)
+      when is_binary(prefix) and is_binary(target_dir) do
+    settings = get_or_create_settings()
+
+    case list_s3_prefix_files(prefix) do
+      {:ok, []} ->
+        {:error, "No files found under prefix."}
+
+      {:ok, files} ->
+        results =
+          Enum.map(files, fn %{key: s3_key, rel_path: rel_path} ->
+            dest = Path.join(target_dir, rel_path)
+
+            case S3.download(settings, s3_key, dest) do
+              {:ok, _} -> :ok
+              {:error, reason} -> {:error, "#{rel_path}: #{reason}"}
+            end
+          end)
+
+        errors = Enum.filter(results, &match?({:error, _}, &1))
+
+        if errors == [] do
+          {:ok, length(files)}
+        else
+          error_msgs = Enum.map(errors, fn {:error, msg} -> msg end) |> Enum.join("; ")
+          {:error, "Some files failed to restore: #{error_msgs}"}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp archive_file?(name) when is_binary(name) do
     String.ends_with?(name, ".tar.gz") or String.ends_with?(name, ".tgz")
   end
