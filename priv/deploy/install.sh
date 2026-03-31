@@ -452,8 +452,27 @@ if [[ "$SKIP_NGINX" == false ]]; then
   fi
 fi
 
-# 2f. PHP-FPM ------------------------------------------------------------------
-# 2g. Certbot (always installed for hosted-domain SSL) -------------------------
+# 2g. Docker -------------------------------------------------------------------
+step "Installing Docker"
+
+if ! command -v docker &>/dev/null; then
+  # Add Docker's official GPG key and repository
+  apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/$(lsb_release -si | tr '[:upper:]' '[:lower:]')/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+  echo "deb [arch=$DEB_ARCH signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(lsb_release -si | tr '[:upper:]' '[:lower:]') $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list >/dev/null
+  apt-get update -qq
+  apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker
+  success "Docker installed and started"
+else
+  success "Docker already installed"
+  systemctl start docker 2>/dev/null || true
+fi
+
+# 2h. PHP-FPM ------------------------------------------------------------------
+# 2i. Certbot (always installed for hosted-domain SSL) -------------------------
 step "Installing Certbot for hosted-domain SSL"
 
 if ! command -v certbot &>/dev/null; then
@@ -510,6 +529,12 @@ if ! id -u "$SERVICE_USER" &>/dev/null; then
   success "Created user: $SERVICE_USER"
 else
   success "User $SERVICE_USER already exists"
+fi
+
+# Add hostctl user to docker group for container management
+if command -v docker &>/dev/null && getent group docker &>/dev/null; then
+  usermod -aG docker "$SERVICE_USER"
+  success "Added $SERVICE_USER to docker group"
 fi
 
 # 3b. Clone / update source ----------------------------------------------------

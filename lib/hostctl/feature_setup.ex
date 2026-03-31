@@ -59,7 +59,7 @@ defmodule Hostctl.FeatureSetup do
       icon: "hero-cube",
       packages: ["docker.io"],
       services: ["docker"],
-      setup_fn: nil
+      setup_fn: :setup_docker
     },
     %{
       key: "roundcube",
@@ -674,6 +674,47 @@ defmodule Hostctl.FeatureSetup do
          :ok <- update_mysql_env(key, password) do
       broadcast(key, :log, "MariaDB configuration complete.")
       broadcast(key, :log, "Root password has been written to the hostctl env file.")
+      :ok
+    end
+  end
+
+  @doc false
+  def setup_docker(key) do
+    broadcast(key, :log, "Configuring Docker for hostctl access...")
+
+    with :ok <- ensure_docker_group(key),
+         :ok <- add_user_to_docker_group(key),
+         :ok <- start_docker_service(key) do
+      broadcast(key, :log, "Docker configuration complete.")
+      broadcast(key, :log, "The hostctl service now has permission to manage containers.")
+      :ok
+    end
+  end
+
+  defp ensure_docker_group(key) do
+    broadcast(key, :log, "Ensuring docker group exists...")
+
+    case escaped_cmd("getent", ["group", "docker"], stderr_to_stdout: true) do
+      {_, 0} ->
+        broadcast(key, :log, "docker group already exists.")
+        :ok
+
+      {_, _} ->
+        run_cmd(key, "groupadd", ["docker"])
+    end
+  end
+
+  defp add_user_to_docker_group(key) do
+    broadcast(key, :log, "Adding hostctl user to docker group...")
+    run_cmd(key, "usermod", ["-aG", "docker", "hostctl"])
+  end
+
+  defp start_docker_service(key) do
+    broadcast(key, :log, "Starting Docker daemon...")
+
+    with :ok <- run_cmd(key, "systemctl", ["start", "docker"]),
+         :ok <- run_cmd(key, "systemctl", ["enable", "docker"]) do
+      broadcast(key, :log, "Docker daemon is running.")
       :ok
     end
   end
