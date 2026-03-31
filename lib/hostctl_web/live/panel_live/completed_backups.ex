@@ -261,7 +261,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   def handle_event("restore_raw_log", %{"id" => log_id}, socket) do
     log = Backup.get_log(String.to_integer(log_id))
     domain = log_first_domain(log)
-    prefix = log.s3_key
+    prefix = "#{log.s3_key}/domains/#{domain}"
 
     send(self(), {:load_prefix_files, prefix, domain})
 
@@ -284,33 +284,41 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     log = Backup.get_log(String.to_integer(log_id))
     domain = log_first_domain(log)
     s3_key = "#{log.s3_key}/domains/#{domain}.tar.gz"
+    doc_root = Backup.domain_document_root(domain)
 
-    settings = Backup.get_or_create_settings()
-    temp_path = restore_temp_path(s3_key)
+    {:noreply,
+     assign(socket, :raw_restore, %{
+       step: :preview_archive,
+       domains: [],
+       selected_domain: domain,
+       files: [],
+       file_count: 0,
+       total_size: 0,
+       target_dir: doc_root,
+       s3_prefix: nil,
+       s3_archive_key: s3_key,
+       progress: nil,
+       error: nil
+     })}
+  end
 
-    restore_state = %{
-      step: :downloading,
-      s3_key: s3_key,
-      local_path: nil,
-      items: [],
-      selected_items: MapSet.new(),
-      extracted_dir: nil,
-      sql_dumps: [],
-      db_targets: nil,
-      import_results: [],
-      error: nil
-    }
+  def handle_event("stream_start_restore", %{"target_dir" => target_dir}, socket) do
+    raw = socket.assigns.raw_restore
+    target_dir = String.trim(target_dir)
 
-    socket = assign(socket, :restore, restore_state)
+    if target_dir == "" do
+      {:noreply, put_flash(socket, :error, "Target directory is required.")}
+    else
+      send(self(), {:do_stream_archive_restore, raw.s3_archive_key, target_dir})
 
-    lv = self()
-
-    Task.start(fn ->
-      result = S3.download(settings, s3_key, temp_path)
-      send(lv, {:s3_download_complete, result, temp_path})
-    end)
-
-    {:noreply, socket}
+      {:noreply,
+       assign(socket, :raw_restore, %{
+         raw
+         | step: :restoring,
+           target_dir: target_dir,
+           progress: "Downloading and extracting archive…"
+       })}
+    end
   end
 
   @impl true
@@ -478,6 +486,50 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
            socket.assigns.raw_restore
            | step: :error,
              error: reason
+         })}
+    end
+  end
+
+  def handle_info({:do_stream_archive_restore, s3_key, target_dir}, socket) do
+    settings = Backup.get_or_create_settings()
+    temp_path = restore_temp_path(s3_key)
+
+    case S3.download(settings, s3_key, temp_path) do
+      {:ok, local_path} ->
+        File.mkdir_p!(target_dir)
+
+        case System.cmd("tar", ["-xzf", local_path, "-C", target_dir],
+               stderr_to_stdout: true
+             ) do
+          {_, 0} ->
+            File.rm(local_path)
+
+            {:noreply,
+             socket
+             |> assign(:raw_restore, %{
+               socket.assigns.raw_restore
+               | step: :done,
+                 progress: "Archive extracted to #{target_dir}"
+             })
+             |> put_flash(:info, "Stream archive restored to #{target_dir}")}
+
+          {output, _code} ->
+            File.rm(local_path)
+
+            {:noreply,
+             assign(socket, :raw_restore, %{
+               socket.assigns.raw_restore
+               | step: :error,
+                 error: "Extraction failed: #{String.slice(output, 0, 500)}"
+             })}
+        end
+
+      {:error, reason} ->
+        {:noreply,
+         assign(socket, :raw_restore, %{
+           socket.assigns.raw_restore
+           | step: :error,
+             error: "Download failed: #{inspect(reason)}"
          })}
     end
   end
@@ -1212,6 +1264,8 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                       Select a domain to restore
                     <% @raw_restore.step in [:loading_files, :preview_files] -> %>
                       {@raw_restore.selected_domain}
+                    <% @raw_restore.step == :preview_archive -> %>
+                      Restore archive for {@raw_restore.selected_domain}
                     <% @raw_restore.step == :restoring -> %>
                       Restoring {@raw_restore.selected_domain}…
                     <% @raw_restore.step == :done -> %>
@@ -1316,6 +1370,44 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                     <% end %>
                   </div>
                 <% end %>
+              <% end %>
+
+              <%!-- Stream archive restore --%>
+              <%= if @raw_restore.step == :preview_archive do %>
+                <div class="space-y-4">
+                  <div class="rounded-xl border border-gray-200 dark:border-gray-800 p-4 text-sm text-gray-600 dark:text-gray-400">
+                    <p>
+                      This will download the archive
+                      <span class="font-mono text-xs text-gray-500 break-all">{Path.basename(@raw_restore.s3_archive_key)}</span>
+                      and extract it to the target directory.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">
+                      Extract destination
+                    </label>
+                    <form id="stream-restore-form" phx-submit="stream_start_restore" class="flex gap-2">
+                      <input
+                        type="text"
+                        name="target_dir"
+                        value={@raw_restore.target_dir || ""}
+                        placeholder="/var/www/example.com/public"
+                        class="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-mono"
+                      />
+                      <button
+                        type="submit"
+                        data-confirm="This will download the archive and extract all files to the specified directory. Existing files will be overwritten. Continue?"
+                        class="shrink-0 inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 transition-colors"
+                      >
+                        <.icon name="hero-arrow-down-on-square" class="w-4 h-4" /> Extract
+                      </button>
+                    </form>
+                    <p class="mt-1.5 text-xs text-gray-400 dark:text-gray-500">
+                      Files from the archive will be extracted preserving their original directory structure.
+                    </p>
+                  </div>
+                </div>
               <% end %>
 
               <%!-- File preview & target dir --%>
