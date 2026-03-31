@@ -182,14 +182,9 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
       if target_dir == "" do
         %{archive: archive_path, status: :error, message: "Target directory is required."}
       else
-        # Use direct sudo (not escaped_cmd/systemd-run) because the archive lives
-        # in our PrivateTmp namespace which a transient systemd unit cannot see.
-        # A forked sudo process inherits our mount namespace and can access our /tmp.
-        System.cmd("sudo", ["mkdir", "-p", target_dir], stderr_to_stdout: true)
+        escaped_cmd("mkdir", ["-p", target_dir])
 
-        case System.cmd("sudo", ["tar", "-xzf", archive_path, "-C", target_dir],
-               stderr_to_stdout: true
-             ) do
+        case escaped_cmd("tar", ["-xzf", resolve_private_tmp(archive_path), "-C", target_dir]) do
           {_, 0} ->
             %{archive: archive_path, status: :ok, message: "Restored to #{target_dir}"}
 
@@ -503,7 +498,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
       {:ok, count} ->
         escaped_cmd("mkdir", ["-p", target_dir])
 
-        case escaped_cmd("cp", ["-a"] ++ copy_source_args(temp_dir) ++ [target_dir]) do
+        case escaped_cmd("cp", ["-a", resolve_private_tmp(temp_dir) <> "/.", target_dir]) do
           {_, 0} ->
             File.rm_rf(temp_dir)
 
@@ -571,12 +566,11 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
 
     case Backup.restore_all_s3_prefix_to_dir(prefix, temp_dir) do
       {:ok, count} ->
-        # Use direct sudo (not escaped_cmd/systemd-run) because temp_dir lives
-        # in our PrivateTmp namespace which a transient systemd unit cannot see.
-        System.cmd("sudo", ["mkdir", "-p", target_dir], stderr_to_stdout: true)
+        escaped_cmd("mkdir", ["-p", target_dir])
 
-        case System.cmd("sudo", ["cp", "-a"] ++ copy_source_args(temp_dir) ++ [target_dir],
-               stderr_to_stdout: true
+        case escaped_cmd(
+               "cp",
+               ["-a", resolve_private_tmp(temp_dir) <> "/.", target_dir]
              ) do
           {_, 0} ->
             File.rm_rf(temp_dir)
@@ -619,13 +613,9 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
 
     case S3.download(settings, s3_key, temp_path) do
       {:ok, local_path} ->
-        # Use direct sudo (not escaped_cmd/systemd-run) because local_path lives
-        # in our PrivateTmp namespace which a transient systemd unit cannot see.
-        System.cmd("sudo", ["mkdir", "-p", target_dir], stderr_to_stdout: true)
+        escaped_cmd("mkdir", ["-p", target_dir])
 
-        case System.cmd("sudo", ["tar", "-xzf", local_path, "-C", target_dir],
-               stderr_to_stdout: true
-             ) do
+        case escaped_cmd("tar", ["-xzf", resolve_private_tmp(local_path), "-C", target_dir]) do
           {_, 0} ->
             File.rm(local_path)
 
@@ -749,9 +739,40 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     System.cmd("sudo", systemd_args, stderr_to_stdout: true)
   end
 
-  defp copy_source_args(temp_dir) do
-    # Use "/tmp/dir/." to copy contents of temp_dir into target_dir (not temp_dir itself)
-    [temp_dir <> "/."]
+  # When the app runs with PrivateTmp=yes, our /tmp is a private mount.
+  # A systemd-run transient unit gets its OWN namespace and can't see our /tmp.
+  # However, the real on-disk path (e.g. /tmp/systemd-private-xxx-hostctl.service-yyy/tmp/)
+  # IS visible from the transient unit's namespace. Translate paths accordingly.
+  defp resolve_private_tmp(path) do
+    tmp_prefix = System.tmp_dir!()
+
+    if String.starts_with?(path, tmp_prefix <> "/") do
+      case find_tmp_mount_root() do
+        nil -> path
+        ^tmp_prefix -> path
+        real_root -> real_root <> String.trim_leading(path, tmp_prefix)
+      end
+    else
+      path
+    end
+  end
+
+  defp find_tmp_mount_root do
+    case File.read("/proc/self/mountinfo") do
+      {:ok, info} ->
+        info
+        |> String.split("\n")
+        |> Enum.find_value(fn line ->
+          parts = String.split(line)
+
+          if length(parts) >= 5 and Enum.at(parts, 4) == "/tmp" do
+            Enum.at(parts, 3)
+          end
+        end)
+
+      _ ->
+        nil
+    end
   end
 
   defp format_bytes(nil), do: "—"
