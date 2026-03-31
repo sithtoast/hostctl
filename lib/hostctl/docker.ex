@@ -401,6 +401,48 @@ defmodule Hostctl.Docker do
     end
   end
 
+  @doc "Returns the directory where compose files are stored."
+  def compose_dir do
+    Application.get_env(:hostctl, :docker, [])
+    |> Keyword.get(:compose_dir, "/var/lib/hostctl/compose")
+  end
+
+  @doc "Saves a compose file for the given project name and deploys it with `docker compose up -d`."
+  def deploy_compose_file(project_name, yaml_content)
+      when is_binary(project_name) and is_binary(yaml_content) do
+    project_dir = Path.join(compose_dir(), project_name)
+
+    with :ok <- File.mkdir_p(project_dir),
+         file_path = Path.join(project_dir, "docker-compose.yml"),
+         :ok <- File.write(file_path, yaml_content) do
+      case run(["compose", "-f", file_path, "-p", project_name, "up", "-d"]) do
+        {:ok, _} -> :ok
+        {:error, :command_failed} -> {:error, "Failed to deploy compose stack"}
+        error -> error
+      end
+    else
+      {:error, reason} -> {:error, "Failed to save compose file: #{inspect(reason)}"}
+    end
+  end
+
+  @doc "Reads the compose file content for the given project name, if it was deployed through the panel."
+  def read_compose_file(project_name) when is_binary(project_name) do
+    file_path = Path.join([compose_dir(), project_name, "docker-compose.yml"])
+
+    case File.read(file_path) do
+      {:ok, content} -> {:ok, content}
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Removes the saved compose files for the given project name."
+  def delete_compose_project(project_name) when is_binary(project_name) do
+    project_dir = Path.join(compose_dir(), project_name)
+    File.rm_rf(project_dir)
+    :ok
+  end
+
   defp parse_ps_output(output) do
     output
     |> String.split("\n", trim: true)
