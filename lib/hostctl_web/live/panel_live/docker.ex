@@ -10,45 +10,63 @@ defmodule HostctlWeb.PanelLive.Docker do
     domains = Hosting.list_all_domains_with_users()
     proxies = Hosting.list_domain_proxies_for_admin()
 
-    {docker_status, containers} = load_containers()
-    all_containers = load_all_containers()
+    socket =
+      socket
+      |> assign(:page_title, "Docker")
+      |> assign(:active_tab, :panel_docker)
+      |> assign(:tab, "containers")
+      |> assign(:domains, domains)
+      |> assign(:proxies_empty?, proxies == [])
+      |> assign(:inspecting, nil)
+      |> assign(:pull_image_name, "")
+      |> assign(:pulling, false)
+      |> assign(:search_query, "")
+      |> assign(:search_results, nil)
+      |> assign(:show_run_form, false)
+      |> assign(:run_env_count, 1)
+      |> assign(:deploy_image, nil)
+      |> assign(:deploy_env_count, 1)
+      |> assign(:editing, nil)
+      |> assign(:edit_env_count, 0)
+      |> assign(:edit_volume_count, 0)
+      |> assign(:viewing_logs, nil)
+      |> assign(:container_logs, nil)
+      |> stream(:proxies, proxies)
 
-    form =
-      %DomainProxy{}
-      |> Hosting.change_domain_proxy(default_proxy_params(domains, all_containers))
-      |> to_form(as: :domain_proxy)
+    if connected?(socket) do
+      {docker_status, containers} = load_containers()
+      all_containers = load_all_containers()
 
-    compose_stacks = load_compose_stacks()
+      form =
+        %DomainProxy{}
+        |> Hosting.change_domain_proxy(default_proxy_params(domains, all_containers))
+        |> to_form(as: :domain_proxy)
 
-    {:ok,
-     socket
-     |> assign(:page_title, "Docker")
-     |> assign(:active_tab, :panel_docker)
-     |> assign(:tab, "containers")
-     |> assign(:domains, domains)
-     |> assign(:containers, containers)
-     |> assign(:all_containers_list, all_containers)
-     |> assign(:docker_status, docker_status)
-     |> assign(:proxy_form, form)
-     |> assign(:proxies_empty?, proxies == [])
-     |> assign(:inspecting, nil)
-     |> assign(:pull_image_name, "")
-     |> assign(:pulling, false)
-     |> assign(:search_query, "")
-     |> assign(:search_results, nil)
-     |> assign(:compose_stacks, compose_stacks)
-     |> assign(:show_run_form, false)
-     |> assign(:run_env_count, 1)
-     |> assign(:images, load_images())
-     |> assign(:deploy_image, nil)
-     |> assign(:deploy_env_count, 1)
-     |> assign(:editing, nil)
-     |> assign(:edit_env_count, 0)
-     |> assign(:edit_volume_count, 0)
-     |> assign(:viewing_logs, nil)
-     |> assign(:container_logs, nil)
-     |> stream(:all_containers, all_containers)
-     |> stream(:proxies, proxies)}
+      {:ok,
+       socket
+       |> assign(:containers, containers)
+       |> assign(:all_containers_list, all_containers)
+       |> assign(:docker_status, docker_status)
+       |> assign(:proxy_form, form)
+       |> assign(:compose_stacks, load_compose_stacks())
+       |> assign(:images, load_images())
+       |> stream(:all_containers, all_containers)}
+    else
+      form =
+        %DomainProxy{}
+        |> Hosting.change_domain_proxy(default_proxy_params(domains, []))
+        |> to_form(as: :domain_proxy)
+
+      {:ok,
+       socket
+       |> assign(:containers, [])
+       |> assign(:all_containers_list, [])
+       |> assign(:docker_status, :ok)
+       |> assign(:proxy_form, form)
+       |> assign(:compose_stacks, [])
+       |> assign(:images, [])
+       |> stream(:all_containers, [])}
+    end
   end
 
   @impl true
