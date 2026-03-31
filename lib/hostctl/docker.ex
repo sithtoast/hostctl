@@ -22,7 +22,9 @@ defmodule Hostctl.Docker do
           state: String.t(),
           ports: map(),
           env: map(),
-          restart_policy: String.t()
+          restart_policy: String.t(),
+          ip_address: String.t(),
+          mounts: [map()]
         }
 
   @doc "Returns true when the docker CLI is available and can talk to the daemon."
@@ -98,6 +100,26 @@ defmodule Hostctl.Docker do
         |> Map.get("RestartPolicy", %{})
         |> Map.get("Name", "")
 
+      ip_address =
+        network_settings
+        |> Map.get("Networks", %{})
+        |> Enum.map(fn {_name, net} -> Map.get(net, "IPAddress", "") end)
+        |> Enum.reject(&(&1 == ""))
+        |> List.first(Map.get(network_settings, "IPAddress", ""))
+
+      mounts =
+        json_obj
+        |> Map.get("Mounts", [])
+        |> Enum.map(fn m ->
+          %{
+            type: Map.get(m, "Type", "bind"),
+            source: Map.get(m, "Source", ""),
+            destination: Map.get(m, "Destination", ""),
+            mode: Map.get(m, "Mode", ""),
+            rw: Map.get(m, "RW", true)
+          }
+        end)
+
       {:ok,
        %{
          id: Map.get(json_obj, "Id", ""),
@@ -106,7 +128,9 @@ defmodule Hostctl.Docker do
          state: Map.get(state, "Status", "unknown"),
          ports: parse_port_bindings(Map.get(network_settings, "Ports", %{})),
          env: parse_env_list(Map.get(config, "Env", [])),
-         restart_policy: restart_policy
+         restart_policy: restart_policy,
+         ip_address: ip_address,
+         mounts: mounts
        }}
     else
       {:error, _} -> {:error, "Failed to inspect container"}
@@ -114,6 +138,15 @@ defmodule Hostctl.Docker do
     end
   rescue
     _ -> {:error, "Failed to parse container details"}
+  end
+
+  @doc "Gets the last N lines of logs from a container."
+  def container_logs(container_id, lines \\ 200) when is_binary(container_id) do
+    case run(["logs", "--tail", to_string(lines), "--timestamps", container_id]) do
+      {:ok, output} -> {:ok, output}
+      {:error, :command_failed} -> {:error, "Failed to fetch container logs"}
+      error -> error
+    end
   end
 
   @doc "Gets environment variables from a container."
@@ -286,12 +319,14 @@ defmodule Hostctl.Docker do
     * `:ports` - list of port mapping strings, e.g. ["8080:80", "5432:5432"]
     * `:env` - list of {key, value} tuples or keyword list for environment variables
     * `:restart` - restart policy, e.g. "unless-stopped", "always"
+    * `:volumes` - list of volume mapping strings, e.g. ["/host/path:/container/path"]
   """
   def run_container(image, opts \\ []) when is_binary(image) do
     name = Keyword.get(opts, :name)
     ports = Keyword.get(opts, :ports, [])
     env = Keyword.get(opts, :env, [])
     restart = Keyword.get(opts, :restart)
+    volumes = Keyword.get(opts, :volumes, [])
 
     args =
       ["run", "-d"] ++
@@ -299,6 +334,7 @@ defmodule Hostctl.Docker do
         restart_args(restart) ++
         port_args(ports) ++
         env_args(env) ++
+        volume_args(volumes) ++
         [image]
 
     case run(args) do
@@ -328,6 +364,13 @@ defmodule Hostctl.Docker do
       {key, value} ->
         key = String.trim(to_string(key))
         if key == "", do: [], else: ["-e", "#{key}=#{value}"]
+    end)
+  end
+
+  defp volume_args(volumes) do
+    Enum.flat_map(volumes, fn vol ->
+      vol = String.trim(vol)
+      if vol == "", do: [], else: ["-v", vol]
     end)
   end
 

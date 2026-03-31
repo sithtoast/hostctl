@@ -43,6 +43,9 @@ defmodule HostctlWeb.PanelLive.Docker do
      |> assign(:deploy_env_count, 1)
      |> assign(:editing, nil)
      |> assign(:edit_env_count, 0)
+     |> assign(:edit_volume_count, 0)
+     |> assign(:viewing_logs, nil)
+     |> assign(:container_logs, nil)
      |> stream(:all_containers, all_containers)
      |> stream(:proxies, proxies)}
   end
@@ -151,11 +154,13 @@ defmodule HostctlWeb.PanelLive.Docker do
     case Docker.inspect_container(container_name) do
       {:ok, details} ->
         env_count = max(map_size(details.env), 1)
+        volume_count = max(length(details.mounts), 1)
 
         {:noreply,
          socket
          |> assign(:editing, details)
          |> assign(:edit_env_count, env_count)
+         |> assign(:edit_volume_count, volume_count)
          |> assign(:inspecting, nil)}
 
       {:error, msg} ->
@@ -187,8 +192,22 @@ defmodule HostctlWeb.PanelLive.Docker do
 
     env = parse_env_pairs(params, "edit_env_key_", "edit_env_val_")
 
+    volumes =
+      0..99
+      |> Enum.reduce_while([], fn i, acc ->
+        src = String.trim(params["edit_vol_src_#{i}"] || "")
+        dst = String.trim(params["edit_vol_dst_#{i}"] || "")
+
+        cond do
+          is_nil(params["edit_vol_src_#{i}"]) -> {:halt, acc}
+          src == "" or dst == "" -> {:cont, acc}
+          true -> {:cont, ["#{src}:#{dst}" | acc]}
+        end
+      end)
+      |> Enum.reverse()
+
     opts =
-      [ports: ports, env: env] ++
+      [ports: ports, env: env, volumes: volumes] ++
         if(new_name != "", do: [name: new_name], else: []) ++
         if(restart != "", do: [restart: restart], else: [])
 
@@ -208,6 +227,33 @@ defmodule HostctlWeb.PanelLive.Docker do
       {:error, msg} ->
         {:noreply, put_flash(socket, :error, msg)}
     end
+  end
+
+  @impl true
+  def handle_event("view_logs", %{"id" => container_name}, socket) do
+    case Docker.container_logs(container_name) do
+      {:ok, logs} ->
+        {:noreply,
+         socket
+         |> assign(:viewing_logs, container_name)
+         |> assign(:container_logs, logs)}
+
+      {:error, msg} ->
+        {:noreply, put_flash(socket, :error, msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("close_logs", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:viewing_logs, nil)
+     |> assign(:container_logs, nil)}
+  end
+
+  @impl true
+  def handle_event("add_edit_volume_row", _params, socket) do
+    {:noreply, assign(socket, :edit_volume_count, socket.assigns.edit_volume_count + 1)}
   end
 
   @impl true
@@ -474,6 +520,8 @@ defmodule HostctlWeb.PanelLive.Docker do
 
   @impl true
   def handle_event("validate_proxy", %{"domain_proxy" => params}, socket) do
+    params = maybe_autofill_port(params, socket.assigns.containers)
+
     form =
       %DomainProxy{}
       |> Hosting.change_domain_proxy(params)
@@ -868,6 +916,14 @@ defmodule HostctlWeb.PanelLive.Docker do
                   >
                     <.icon name="hero-pencil-square" class="w-3.5 h-3.5" /> Edit
                   </button>
+                  <button
+                    id={"logs-#{container.id}"}
+                    phx-click="view_logs"
+                    phx-value-id={container.name}
+                    class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 text-xs font-medium transition-colors"
+                  >
+                    <.icon name="hero-document-text" class="w-3.5 h-3.5" /> Logs
+                  </button>
                 </div>
               </div>
             </div>
@@ -890,7 +946,7 @@ defmodule HostctlWeb.PanelLive.Docker do
               </div>
 
               <div class="p-6 space-y-4">
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   <div>
                     <p class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-1">
                       Image
@@ -923,11 +979,74 @@ defmodule HostctlWeb.PanelLive.Docker do
                   </div>
                   <div>
                     <p class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-1">
+                      IP Address
+                    </p>
+                    <p class="text-sm text-gray-900 dark:text-white font-mono">
+                      {if @inspecting.ip_address != "", do: @inspecting.ip_address, else: "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-1">
                       Published Ports
                     </p>
                     <p class="text-sm text-gray-900 dark:text-white font-mono">
                       {format_ports(@inspecting.ports)}
                     </p>
+                  </div>
+                  <div>
+                    <p class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-1">
+                      Restart Policy
+                    </p>
+                    <p class="text-sm text-gray-900 dark:text-white font-mono">
+                      {if @inspecting.restart_policy != "",
+                        do: @inspecting.restart_policy,
+                        else: "none"}
+                    </p>
+                  </div>
+                </div>
+
+                <div :if={@inspecting.mounts != []}>
+                  <p class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-2">
+                    Volume Mounts
+                  </p>
+                  <div class="rounded-lg bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 overflow-auto max-h-48">
+                    <table class="min-w-full text-sm">
+                      <thead>
+                        <tr class="border-b border-gray-200 dark:border-gray-700">
+                          <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                            Type
+                          </th>
+                          <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                            Source
+                          </th>
+                          <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                            Destination
+                          </th>
+                          <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                            Mode
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr
+                          :for={mount <- @inspecting.mounts}
+                          class="border-b border-gray-200 dark:border-gray-700 last:border-b-0"
+                        >
+                          <td class="px-4 py-2 font-mono text-xs text-gray-700 dark:text-gray-300">
+                            {mount.type}
+                          </td>
+                          <td class="px-4 py-2 font-mono text-xs text-gray-700 dark:text-gray-300 break-all">
+                            {mount.source}
+                          </td>
+                          <td class="px-4 py-2 font-mono text-xs text-gray-700 dark:text-gray-300 break-all">
+                            {mount.destination}
+                          </td>
+                          <td class="px-4 py-2 font-mono text-xs text-gray-700 dark:text-gray-300">
+                            {if mount.rw, do: "rw", else: "ro"}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
                   </div>
                 </div>
 
@@ -1083,6 +1202,42 @@ defmodule HostctlWeb.PanelLive.Docker do
                   </div>
                 </div>
 
+                <div>
+                  <div class="flex items-center justify-between mb-2">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Volume Mounts
+                    </label>
+                    <button
+                      type="button"
+                      phx-click="add_edit_volume_row"
+                      class="inline-flex items-center gap-1 text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 font-medium"
+                    >
+                      <.icon name="hero-plus" class="w-3.5 h-3.5" /> Add Mount
+                    </button>
+                  </div>
+                  <div class="space-y-2">
+                    <%= for i <- 0..(@edit_volume_count - 1) do %>
+                      <% mount = Enum.at(@editing.mounts, i) %>
+                      <div class="flex gap-2">
+                        <input
+                          type="text"
+                          name={"edit_vol_src_#{i}"}
+                          value={if(mount, do: mount.source, else: "")}
+                          placeholder="/host/path"
+                          class="flex-1 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm font-mono text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                        />
+                        <input
+                          type="text"
+                          name={"edit_vol_dst_#{i}"}
+                          value={if(mount, do: mount.destination, else: "")}
+                          placeholder="/container/path"
+                          class="flex-1 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm font-mono text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                        />
+                      </div>
+                    <% end %>
+                  </div>
+                </div>
+
                 <div class="flex justify-end pt-2">
                   <button
                     type="submit"
@@ -1093,6 +1248,30 @@ defmodule HostctlWeb.PanelLive.Docker do
                   </button>
                 </div>
               </form>
+            </div>
+          <% end %>
+
+          <%!-- Logs panel --%>
+          <%= if @viewing_logs do %>
+            <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+              <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-800">
+                <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+                  Logs: {@viewing_logs}
+                </h2>
+                <button
+                  id="close-logs-btn"
+                  phx-click="close_logs"
+                  class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                >
+                  <.icon name="hero-x-mark" class="w-5 h-5" />
+                </button>
+              </div>
+              <div class="p-4">
+                <pre
+                  id="container-logs-output"
+                  class="rounded-lg bg-gray-950 text-gray-300 text-xs font-mono p-4 overflow-auto max-h-[32rem] whitespace-pre-wrap leading-relaxed"
+                >{@container_logs}</pre>
+              </div>
             </div>
           <% end %>
         </div>
@@ -1697,5 +1876,17 @@ defmodule HostctlWeb.PanelLive.Docker do
       "upstream_port" => port,
       "enabled" => true
     }
+  end
+
+  defp maybe_autofill_port(params, containers) do
+    container_name = params["container_name"] || ""
+
+    case Enum.find(containers, &(&1.name == container_name)) do
+      %{published_ports: [first | _]} ->
+        Map.put(params, "upstream_port", to_string(first))
+
+      _ ->
+        params
+    end
   end
 end
