@@ -114,7 +114,7 @@ defmodule Hostctl.Backup.S3 do
 
     url = endpoint_url(cfg.s3_endpoint) <> path <> "?" <> query
 
-    case Req.get(url, headers: headers) do
+    case Req.get(url, headers: headers, decode_body: false) do
       {:ok, %Req.Response{status: 200, body: body}} ->
         {:ok, parse_list_response(body)}
 
@@ -153,7 +153,7 @@ defmodule Hostctl.Backup.S3 do
 
     url = endpoint_url(cfg.s3_endpoint) <> path
 
-    case Req.delete(url, headers: headers) do
+    case Req.delete(url, headers: headers, decode_body: false) do
       {:ok, %Req.Response{status: s}} when s in [200, 204] ->
         :ok
 
@@ -249,7 +249,7 @@ defmodule Hostctl.Backup.S3 do
 
     url = endpoint_url(cfg.s3_endpoint) <> path
 
-    case Req.put(url, headers: headers, body: body) do
+    case Req.put(url, headers: headers, body: body, decode_body: false) do
       {:ok, %Req.Response{status: s}} when s in 200..299 ->
         {:ok, s3_key}
 
@@ -284,7 +284,7 @@ defmodule Hostctl.Backup.S3 do
       )
 
     url = endpoint_url(cfg.s3_endpoint) <> path <> "?" <> query
-    Req.delete(url, headers: headers)
+    Req.delete(url, headers: headers, decode_body: false)
     :ok
   end
 
@@ -361,7 +361,7 @@ defmodule Hostctl.Backup.S3 do
 
     url = endpoint_url(cfg.s3_endpoint) <> path <> "?uploads"
 
-    case Req.post(url, headers: headers, body: "") do
+    case Req.post(url, headers: headers, body: "", decode_body: false) do
       {:ok, %Req.Response{status: 200, body: body}} ->
         {:ok, extract_upload_id(body)}
 
@@ -418,7 +418,7 @@ defmodule Hostctl.Backup.S3 do
 
     url = endpoint_url(cfg.s3_endpoint) <> path <> "?" <> query
 
-    case Req.put(url, headers: headers, body: body) do
+    case Req.put(url, headers: headers, body: body, decode_body: false) do
       {:ok, %Req.Response{status: s, headers: resp_headers}} when s in 200..299 ->
         etag = get_response_header(resp_headers, "etag") || ""
         {:ok, String.trim(etag, "\"")}
@@ -458,7 +458,7 @@ defmodule Hostctl.Backup.S3 do
 
     url = endpoint_url(cfg.s3_endpoint) <> path <> "?" <> query
 
-    case Req.post(url, headers: headers, body: xml_body) do
+    case Req.post(url, headers: headers, body: xml_body, decode_body: false) do
       {:ok, %Req.Response{status: s}} when s in 200..299 ->
         :ok
 
