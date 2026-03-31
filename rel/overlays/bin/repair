@@ -521,6 +521,62 @@ else
 fi
 
 # =============================================================================
+# 7.7. vsftpd virtual user delete permissions
+# =============================================================================
+section "7.7. vsftpd config"
+
+if dpkg -l vsftpd &>/dev/null 2>&1; then
+  VSFTPD_CONF="/etc/vsftpd.conf"
+  if [[ -f "$VSFTPD_CONF" ]]; then
+    vsftpd_changed=false
+
+    for directive in anon_other_write_enable anon_mkdir_write_enable; do
+      if grep -q "^${directive}=YES" "$VSFTPD_CONF"; then
+        ok "$directive already set"
+      else
+        # Remove any existing (possibly =NO) line, then append =YES
+        sed -i "/^${directive}=/d" "$VSFTPD_CONF"
+        echo "${directive}=YES" >> "$VSFTPD_CONF"
+        fix "$directive → YES"
+        FIXED=$((FIXED + 1))
+        vsftpd_changed=true
+      fi
+    done
+
+    # Patch per-user config files under vsftpd_user_conf
+    VSFTPD_USER_CONF_DIR="/etc/vsftpd/vsftpd_user_conf"
+    if [[ -d "$VSFTPD_USER_CONF_DIR" ]]; then
+      for uconf in "$VSFTPD_USER_CONF_DIR"/*; do
+        [[ -f "$uconf" ]] || continue
+        uname="$(basename "$uconf")"
+        per_user_changed=false
+
+        for directive in anon_other_write_enable anon_mkdir_write_enable; do
+          if ! grep -q "^${directive}=YES" "$uconf"; then
+            sed -i "/^${directive}=/d" "$uconf"
+            echo "${directive}=YES" >> "$uconf"
+            per_user_changed=true
+          fi
+        done
+
+        if $per_user_changed; then
+          fix "Patched per-user config for $uname"
+          FIXED=$((FIXED + 1))
+        fi
+      done
+    fi
+
+    if $vsftpd_changed && systemctl is-active --quiet vsftpd 2>/dev/null; then
+      systemctl reload vsftpd 2>/dev/null && fix "vsftpd reloaded" || warn "vsftpd reload failed"
+    fi
+  else
+    ok "vsftpd.conf not found — skipping"
+  fi
+else
+  ok "vsftpd not installed — skipping"
+fi
+
+# =============================================================================
 # 8. Docker group membership
 # =============================================================================
 section "8. Docker group membership"
@@ -556,7 +612,7 @@ else
 fi
 
 
-section "9. Apply changes"
+section "10. Apply changes"
 
 if [[ $FIXED -gt 0 ]]; then
   systemctl daemon-reload
