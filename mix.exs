@@ -21,7 +21,7 @@ defmodule Hostctl.MixProject do
   def application do
     [
       mod: {Hostctl.Application, []},
-      extra_applications: [:logger, :runtime_tools]
+      extra_applications: [:logger, :runtime_tools, :ssh]
     ]
   end
 

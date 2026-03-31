@@ -4,6 +4,23 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   alias Hostctl.Accounts
   alias Hostctl.Accounts.Scope
   alias Hostctl.Plesk.Importer
+  alias Hostctl.Plesk.SSHProbe
+
+  @data_type_options [
+    {"domains", "Domains and subscriptions"},
+    {"dns", "DNS zones and records"},
+    {"web_files", "Web files and document roots"},
+    {"mail_accounts", "Mail accounts and aliases"},
+    {"mail_content", "Mailboxes and stored mail"},
+    {"databases", "Databases"},
+    {"db_users", "Database users and grants"},
+    {"cron_jobs", "Cron jobs"},
+    {"ftp_accounts", "FTP accounts"},
+    {"ssl_certificates", "SSL certificates"},
+    {"system_users", "Plesk system users"}
+  ]
+
+  @default_data_types Enum.map(@data_type_options, fn {key, _label} -> key end)
 
   @default_params %{
     "source" => "backup",
@@ -14,9 +31,16 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     "api_key" => "",
     "api_username" => "",
     "api_password" => "",
+    "ssh_host" => "",
+    "ssh_port" => "22",
+    "ssh_username" => "",
+    "ssh_auth_method" => "key",
+    "ssh_private_key_path" => "",
+    "ssh_password" => "",
     "target_user_email" => "",
     "apply_dns_template" => "false",
-    "selected_domains" => []
+    "selected_domains" => [],
+    "selected_data_types" => @default_data_types
   }
 
   @impl true
@@ -28,9 +52,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:form_params, @default_params)
      |> assign(:form, to_form(@default_params, as: :import))
      |> assign(:preview, nil)
+     |> assign(:ssh_discovery, nil)
      |> assign(:owner_groups, [])
      |> assign(:available_domains, [])
-     |> assign(:selected_domains, [])}
+     |> assign(:selected_domains, [])
+     |> assign(:data_type_options, @data_type_options)}
   end
 
   @impl true
@@ -73,10 +99,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
       _ ->
         case build_preview(params) do
-          {:ok, preview, owner_groups, available_domains, selected_domains} ->
+          {:ok, preview, owner_groups, available_domains, selected_domains, ssh_discovery} ->
             {:noreply,
              socket
              |> assign(:preview, preview)
+             |> assign(:ssh_discovery, ssh_discovery)
              |> assign(:owner_groups, owner_groups)
              |> assign(:available_domains, available_domains)
              |> assign(:selected_domains, selected_domains)
@@ -91,6 +118,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             {:noreply,
              socket
              |> assign(:preview, nil)
+             |> assign(:ssh_discovery, nil)
              |> assign(:owner_groups, [])
              |> assign(:available_domains, [])
              |> assign(:selected_domains, [])
@@ -107,7 +135,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         <div>
           <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Plesk Import</h1>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Preview and import domains from an extracted Plesk backup folder or directly from the Plesk API.
+            Preview and import domains from an extracted Plesk backup, the Plesk API, or a live Plesk server over SSH.
           </p>
         </div>
 
@@ -118,7 +146,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                 field={@form[:source]}
                 type="select"
                 label="Source"
-                options={[{"Extracted backup folder", "backup"}, {"Plesk API", "api"}]}
+                options={[
+                  {"Extracted backup folder", "backup"},
+                  {"Plesk API", "api"},
+                  {"Direct SSH", "ssh"}
+                ]}
               />
 
               <.input
@@ -150,33 +182,83 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                   placeholder="example_site_abc123"
                 />
               <% else %>
-                <.input
-                  field={@form[:api_url]}
-                  type="url"
-                  label="Plesk API URL"
-                  placeholder="https://plesk.example.com:8443"
-                />
+                <%= if @form[:source].value == "api" do %>
+                  <.input
+                    field={@form[:api_url]}
+                    type="url"
+                    label="Plesk API URL"
+                    placeholder="https://plesk.example.com:8443"
+                  />
 
-                <.input
-                  field={@form[:api_key]}
-                  type="text"
-                  label="Plesk API Key"
-                  placeholder="Optional if using username/password"
-                />
+                  <.input
+                    field={@form[:api_key]}
+                    type="text"
+                    label="Plesk API Key"
+                    placeholder="Optional if using username/password"
+                  />
 
-                <.input
-                  field={@form[:api_username]}
-                  type="text"
-                  label="API Username"
-                  placeholder="Optional if using API key"
-                />
+                  <.input
+                    field={@form[:api_username]}
+                    type="text"
+                    label="API Username"
+                    placeholder="Optional if using API key"
+                  />
 
-                <.input
-                  field={@form[:api_password]}
-                  type="password"
-                  label="API Password"
-                  placeholder="Optional if using API key"
-                />
+                  <.input
+                    field={@form[:api_password]}
+                    type="password"
+                    label="API Password"
+                    placeholder="Optional if using API key"
+                  />
+                <% else %>
+                  <div class="md:col-span-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
+                    SSH discovery preview is enabled for domain inventory using key or password auth. Sudo is assumed.
+                  </div>
+
+                  <.input
+                    field={@form[:ssh_host]}
+                    type="text"
+                    label="SSH Host"
+                    placeholder="plesk.example.com"
+                  />
+
+                  <.input
+                    field={@form[:ssh_port]}
+                    type="number"
+                    label="SSH Port"
+                    placeholder="22"
+                  />
+
+                  <.input
+                    field={@form[:ssh_username]}
+                    type="text"
+                    label="SSH Username"
+                    placeholder="root"
+                  />
+
+                  <.input
+                    field={@form[:ssh_auth_method]}
+                    type="select"
+                    label="SSH Auth Method"
+                    options={[{"Private key", "key"}, {"Password", "password"}]}
+                  />
+
+                  <%= if @form[:ssh_auth_method].value == "password" do %>
+                    <.input
+                      field={@form[:ssh_password]}
+                      type="password"
+                      label="SSH Password"
+                      placeholder="Password or sudo-capable login password"
+                    />
+                  <% else %>
+                    <.input
+                      field={@form[:ssh_private_key_path]}
+                      type="text"
+                      label="SSH Private Key Path"
+                      placeholder="~/.ssh/id_ed25519"
+                    />
+                  <% end %>
+                <% end %>
               <% end %>
 
               <.input
@@ -187,6 +269,36 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
               <input type="hidden" name="import[submit_action]" value="preview" />
             </div>
+
+            <%= if @form[:source].value == "ssh" do %>
+              <div class="mt-6 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
+                <div>
+                  <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Import Scope</h2>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    Choose the data categories to discover and offer for import from the Plesk server.
+                  </p>
+                </div>
+
+                <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <label
+                    :for={{key, label} <- @data_type_options}
+                    class="flex items-start gap-3 rounded-lg border border-gray-100 dark:border-gray-800 px-3 py-3 hover:bg-gray-50 dark:hover:bg-gray-800/50"
+                  >
+                    <input
+                      type="checkbox"
+                      name="import[selected_data_types][]"
+                      value={key}
+                      checked={key in @form_params["selected_data_types"]}
+                      class="checkbox checkbox-sm mt-0.5"
+                    />
+                    <div>
+                      <p class="text-sm font-medium text-gray-900 dark:text-white">{label}</p>
+                      <p class="text-xs text-gray-500 dark:text-gray-400">{key}</p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            <% end %>
 
             <div class="mt-4 flex flex-wrap items-center gap-3">
               <button
@@ -270,6 +382,63 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           </div>
         <% end %>
 
+        <%= if @ssh_discovery do %>
+          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 space-y-4">
+            <div>
+              <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+                SSH Discovery Summary
+              </h2>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                These categories are preview-only right now. Apply still creates missing Hostctl domains.
+              </p>
+            </div>
+
+            <%= if @ssh_discovery.warnings != [] do %>
+              <div class="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                <h3 class="font-semibold">Discovery Warnings</h3>
+                <ul class="mt-2 space-y-1 text-xs">
+                  <li :for={warning <- @ssh_discovery.warnings}>{warning}</li>
+                </ul>
+              </div>
+            <% end %>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              <div
+                :for={section <- discovery_sections(@ssh_discovery, @data_type_options)}
+                class="rounded-xl border border-gray-200 dark:border-gray-700 p-4"
+              >
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+                      {section.label}
+                    </h3>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">{section.key}</p>
+                  </div>
+                  <span class="inline-flex items-center rounded-full bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700 dark:bg-sky-900/30 dark:text-sky-300">
+                    {section.count}
+                  </span>
+                </div>
+
+                <div class="mt-3 space-y-1">
+                  <p
+                    :for={item <- section.samples}
+                    class="text-xs text-gray-600 dark:text-gray-300 break-all"
+                  >
+                    {format_discovery_item(section.key, item)}
+                  </p>
+                </div>
+
+                <p
+                  :if={section.remaining_count > 0}
+                  class="mt-3 text-xs font-medium text-indigo-600 dark:text-indigo-400"
+                >
+                  +{section.remaining_count} more
+                </p>
+              </div>
+            </div>
+          </div>
+        <% end %>
+
         <%= if @preview do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 space-y-3">
             <h2 class="text-base font-semibold text-gray-900 dark:text-white">Preview Result</h2>
@@ -346,18 +515,20 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   defp build_preview(params) do
     source = normalize_string(params["source"])
 
-    with {:ok, names, owner_groups} <- source_domain_names_with_groups(source, params),
+    with {:ok, names, owner_groups, ssh_discovery} <-
+           source_domain_names_with_groups(source, params),
          {:ok, target_scope} <- maybe_target_scope(params["target_user_email"]) do
       selected_names = resolve_selected_domains(names, params)
+      ssh_discovery = filter_discovery(ssh_discovery, selected_names)
 
       case target_scope do
         nil ->
-          {:ok, dry_preview(selected_names), owner_groups, names, selected_names}
+          {:ok, dry_preview(selected_names), owner_groups, names, selected_names, ssh_discovery}
 
         %Scope{} = scope ->
           Importer.import_domains(scope, selected_names, dry_run: true)
           |> case do
-            {:ok, preview} -> {:ok, preview, owner_groups, names, selected_names}
+            {:ok, preview} -> {:ok, preview, owner_groups, names, selected_names, ssh_discovery}
           end
       end
     end
@@ -408,7 +579,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           end)
           |> Enum.sort_by(&{&1.owner_login || "", &1.system_user || ""})
 
-        {:ok, names, owner_groups}
+        {:ok, names, owner_groups, nil}
       end
     end
   end
@@ -426,14 +597,51 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       ]
 
       case Importer.api_domain_names(api_url, auth_opts) do
-        {:ok, names} -> {:ok, names, []}
+        {:ok, names} -> {:ok, names, [], nil}
         {:error, reason} -> {:error, reason}
       end
     end
   end
 
+  defp source_domain_names_with_groups("ssh", params) do
+    ssh_opts = %{
+      host: normalize_string(params["ssh_host"]),
+      port: normalize_string(params["ssh_port"]),
+      username: normalize_string(params["ssh_username"]),
+      auth_method: normalize_string(params["ssh_auth_method"]),
+      private_key_path: normalize_string(params["ssh_private_key_path"]),
+      password: normalize_string(params["ssh_password"])
+    }
+
+    cond do
+      params["selected_data_types"] == [] ->
+        {:error, "Select at least one data type for SSH discovery."}
+
+      true ->
+        with {:ok, %{subscriptions: subscriptions} = ssh_discovery} <-
+               SSHProbe.discover(ssh_opts, selected_data_types_from_params(params)) do
+          names = subscriptions |> Enum.map(& &1.domain) |> Enum.uniq() |> Enum.sort()
+
+          owner_groups =
+            subscriptions
+            |> Enum.group_by(fn sub -> {sub.owner_login, sub.owner_type, sub.system_user} end)
+            |> Enum.map(fn {{owner_login, owner_type, system_user}, subs} ->
+              %{
+                owner_login: owner_login,
+                owner_type: owner_type,
+                system_user: system_user,
+                count: length(subs)
+              }
+            end)
+            |> Enum.sort_by(&{&1.owner_login || "", &1.system_user || ""})
+
+          {:ok, names, owner_groups, ssh_discovery}
+        end
+    end
+  end
+
   defp source_domain_names_with_groups(_other, _params),
-    do: {:error, "Unsupported source. Choose backup or api."}
+    do: {:error, "Unsupported source. Choose backup, api, or ssh."}
 
   defp maybe_target_scope(nil), do: {:ok, nil}
 
@@ -477,9 +685,10 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   defp normalize_string(_), do: ""
 
   defp normalize_form_params(params) when is_map(params) do
-    params
-    |> Map.merge(@default_params)
+    @default_params
+    |> Map.merge(params)
     |> Map.put("selected_domains", selected_domains_from_params(params))
+    |> Map.put("selected_data_types", selected_data_types_from_params(params))
   end
 
   defp selected_domains_from_params(params) do
@@ -500,6 +709,27 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
       _ ->
         []
+    end
+  end
+
+  defp selected_data_types_from_params(params) do
+    case Map.get(params, "selected_data_types") do
+      list when is_list(list) ->
+        list
+        |> Enum.map(&normalize_string/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.uniq()
+
+      value when is_binary(value) ->
+        value
+        |> normalize_string()
+        |> case do
+          "" -> @default_data_types
+          item -> [item]
+        end
+
+      _ ->
+        @default_data_types
     end
   end
 
@@ -548,4 +778,104 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   end
 
   defp normalize_filter_value(_), do: nil
+
+  defp filter_discovery(nil, _selected_domains), do: nil
+
+  defp filter_discovery(discovery, []) do
+    %{
+      discovery
+      | inventory:
+          Map.new(discovery.inventory, fn {key, items} ->
+            {key, filter_discovery_items(items, nil)}
+          end)
+    }
+  end
+
+  defp filter_discovery(discovery, selected_domains) do
+    selected_domains = MapSet.new(selected_domains)
+
+    %{
+      discovery
+      | inventory:
+          Map.new(discovery.inventory, fn {key, items} ->
+            {key, filter_discovery_items(items, selected_domains)}
+          end)
+    }
+  end
+
+  defp filter_discovery_items(items, nil), do: items
+
+  defp filter_discovery_items(items, selected_domains) do
+    Enum.filter(items, fn item ->
+      case Map.get(item, :domain) do
+        nil -> true
+        domain -> MapSet.member?(selected_domains, domain)
+      end
+    end)
+  end
+
+  defp discovery_sections(nil, _options), do: []
+
+  defp discovery_sections(discovery, options) do
+    options
+    |> Enum.map(fn {key, label} ->
+      items = Map.get(discovery.inventory, key, [])
+
+      if items == [] do
+        nil
+      else
+        %{
+          key: key,
+          label: label,
+          count: length(items),
+          samples: Enum.take(items, 5),
+          remaining_count: max(length(items) - 5, 0)
+        }
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp format_discovery_item("dns", item),
+    do: "#{item.domain} (#{item.record_count} records)"
+
+  defp format_discovery_item("web_files", item) do
+    suffix =
+      case item.system_user do
+        nil -> ""
+        login -> " [#{login}]"
+      end
+
+    "#{item.domain} -> #{item.document_root || "unknown"}#{suffix}"
+  end
+
+  defp format_discovery_item("mail_accounts", item), do: item.address
+
+  defp format_discovery_item("mail_content", item), do: "#{item.address} -> #{item.path}"
+
+  defp format_discovery_item("databases", item), do: "#{item.name} (#{item.domain})"
+
+  defp format_discovery_item("db_users", item),
+    do: "#{item.login} on #{item.database} (#{item.domain})"
+
+  defp format_discovery_item("cron_jobs", item),
+    do: "#{item.domain} / #{item.system_user || "unknown"}: #{item.count} jobs"
+
+  defp format_discovery_item("ftp_accounts", item) do
+    case item.domain do
+      nil -> item.login
+      domain -> "#{item.login} (#{domain})"
+    end
+  end
+
+  defp format_discovery_item("ssl_certificates", item), do: "#{item.domain}: #{item.name}"
+
+  defp format_discovery_item("system_users", item) do
+    case item.domain do
+      nil -> item.login
+      domain -> "#{item.login} (#{domain})"
+    end
+  end
+
+  defp format_discovery_item(_key, item), do: inspect(item)
 end
