@@ -588,8 +588,6 @@ defmodule Hostctl.FeatureSetup do
     local_root=/var/www
     user_config_dir=/etc/vsftpd/vsftpd_user_conf
     virtual_use_local_privs=YES
-    anon_other_write_enable=YES
-    anon_mkdir_write_enable=YES
     hide_ids=YES
     pasv_min_port=30000
     pasv_max_port=31000

@@ -197,6 +197,8 @@ defmodule Hostctl.WebServer do
   # Creates a webroot directory and writes a default index.html if neither the
   # dir nor any index file already exists. This ensures nginx can serve the site
   # immediately after a domain is added, rather than returning 403/404.
+  # Files are chowned to www-data so FTP virtual users (who run as www-data)
+  # can manage them.
   defp provision_webroot(path) do
     case File.mkdir_p(path) do
       :ok ->
@@ -206,8 +208,40 @@ defmodule Hostctl.WebServer do
           File.write(index, default_index_html())
         end
 
+        # Chown the entire domain directory tree to www-data so FTP users
+        # (mapped to www-data via vsftpd guest_username) can read/write/delete.
+        # Walk up to /var/www/<domain> so the chown covers all content.
+        domain_root = domain_root_from_webroot(path)
+        chown_to_www_data(domain_root)
+
       {:error, reason} ->
         Logger.warning("[WebServer] Could not create webroot #{path}: #{inspect(reason)}")
+    end
+  end
+
+  # Given a webroot like /var/www/example.com/public or
+  # /var/www/example.com/subdomains/sub/public, returns /var/www/example.com.
+  defp domain_root_from_webroot(path) do
+    parts = Path.split(path)
+
+    case parts do
+      ["/" | ["var", "www", _domain | _rest]] ->
+        Path.join(["/", "var", "www", Enum.at(parts, 3)])
+
+      _ ->
+        path
+    end
+  end
+
+  defp chown_to_www_data(path) do
+    case System.cmd("chown", ["-R", "www-data:www-data", path], stderr_to_stdout: true) do
+      {_, 0} ->
+        :ok
+
+      {output, code} ->
+        Logger.warning(
+          "[WebServer] Could not chown #{path} to www-data (exit #{code}): #{output}"
+        )
     end
   end
 
