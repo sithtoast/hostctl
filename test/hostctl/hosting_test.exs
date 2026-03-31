@@ -98,4 +98,61 @@ defmodule Hostctl.HostingTest do
       assert record.ttl == 600
     end
   end
+
+  describe "domain proxies" do
+    test "creates a domain proxy and normalizes path" do
+      scope = user_scope_fixture()
+
+      assert {:ok, domain} =
+               Hosting.create_domain(scope, %{
+                 name: "proxy-example.com",
+                 apply_dns_template: false
+               })
+
+      assert {:ok, proxy} =
+               Hosting.create_domain_proxy(%{
+                 domain_id: domain.id,
+                 path: "/app/",
+                 container_name: "web-app",
+                 upstream_port: 3000,
+                 enabled: true
+               })
+
+      assert proxy.path == "/app"
+
+      proxies = Hosting.list_domain_proxies(domain)
+      assert length(proxies) == 1
+      assert hd(proxies).container_name == "web-app"
+    end
+
+    test "rejects duplicate path for the same domain" do
+      scope = user_scope_fixture()
+
+      assert {:ok, domain} =
+               Hosting.create_domain(scope, %{
+                 name: "proxy-duplicate.com",
+                 apply_dns_template: false
+               })
+
+      assert {:ok, _proxy} =
+               Hosting.create_domain_proxy(%{
+                 domain_id: domain.id,
+                 path: "/api",
+                 container_name: "api-1",
+                 upstream_port: 4000,
+                 enabled: true
+               })
+
+      assert {:error, changeset} =
+               Hosting.create_domain_proxy(%{
+                 domain_id: domain.id,
+                 path: "/api",
+                 container_name: "api-2",
+                 upstream_port: 4001,
+                 enabled: true
+               })
+
+      assert %{path: ["has already been taken"]} = errors_on(changeset)
+    end
+  end
 end
