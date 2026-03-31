@@ -261,7 +261,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   def handle_event("restore_raw_log", %{"id" => log_id}, socket) do
     log = Backup.get_log(String.to_integer(log_id))
     domain = log_first_domain(log)
-    prefix = "#{log.s3_key}/domains/#{domain}"
+    prefix = log.s3_key
 
     send(self(), {:load_prefix_files, prefix, domain})
 
@@ -435,7 +435,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   end
 
   def handle_info({:load_prefix_files, prefix, domain_name}, socket) do
-    case Backup.list_s3_prefix_files(prefix) do
+    case Backup.list_all_s3_prefix_files(prefix) do
       {:ok, files} ->
         total_size = files |> Enum.map(& &1[:size]) |> Enum.filter(&is_integer/1) |> Enum.sum()
         doc_root = Backup.domain_document_root(domain_name)
@@ -461,7 +461,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   end
 
   def handle_info({:do_prefix_restore, prefix, target_dir}, socket) do
-    case Backup.restore_s3_prefix_to_dir(prefix, target_dir) do
+    case Backup.restore_all_s3_prefix_to_dir(prefix, target_dir) do
       {:ok, count} ->
         {:noreply,
          socket
