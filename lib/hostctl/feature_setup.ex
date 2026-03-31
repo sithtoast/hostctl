@@ -52,6 +52,16 @@ defmodule Hostctl.FeatureSetup do
       setup_fn: nil
     },
     %{
+      key: "docker",
+      label: "Docker",
+      description:
+        "Container platform for running isolated applications. Enables proxy mapping of containers to domain paths and compose stack management.",
+      icon: "hero-cube",
+      packages: ["docker.io"],
+      services: ["docker"],
+      setup_fn: nil
+    },
+    %{
       key: "roundcube",
       label: "Roundcube Webmail",
       description:
