@@ -41,6 +41,8 @@ defmodule HostctlWeb.PanelLive.Docker do
      |> assign(:images, load_images())
      |> assign(:deploy_image, nil)
      |> assign(:deploy_env_count, 1)
+     |> assign(:editing, nil)
+     |> assign(:edit_env_count, 0)
      |> stream(:all_containers, all_containers)
      |> stream(:proxies, proxies)}
   end
@@ -142,6 +144,70 @@ defmodule HostctlWeb.PanelLive.Docker do
   @impl true
   def handle_event("close_inspect", _params, socket) do
     {:noreply, assign(socket, :inspecting, nil)}
+  end
+
+  @impl true
+  def handle_event("edit_container", %{"id" => container_name}, socket) do
+    case Docker.inspect_container(container_name) do
+      {:ok, details} ->
+        env_count = max(map_size(details.env), 1)
+
+        {:noreply,
+         socket
+         |> assign(:editing, details)
+         |> assign(:edit_env_count, env_count)
+         |> assign(:inspecting, nil)}
+
+      {:error, msg} ->
+        {:noreply, put_flash(socket, :error, msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("cancel_edit", _params, socket) do
+    {:noreply, assign(socket, :editing, nil)}
+  end
+
+  @impl true
+  def handle_event("add_edit_env_row", _params, socket) do
+    {:noreply, assign(socket, :edit_env_count, socket.assigns.edit_env_count + 1)}
+  end
+
+  @impl true
+  def handle_event("save_container_edit", params, socket) do
+    editing = socket.assigns.editing
+    new_name = String.trim(params["name"] || "")
+    restart = String.trim(params["restart"] || "")
+
+    ports =
+      (params["ports"] || "")
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    env = parse_env_pairs(params, "edit_env_key_", "edit_env_val_")
+
+    opts =
+      [ports: ports, env: env] ++
+        if(new_name != "", do: [name: new_name], else: []) ++
+        if(restart != "", do: [restart: restart], else: [])
+
+    case Docker.recreate_container(editing.name, opts) do
+      {:ok, _new_id} ->
+        {docker_status, containers} = load_containers()
+        all_containers = load_all_containers()
+
+        {:noreply,
+         socket
+         |> assign(:docker_status, docker_status)
+         |> assign(:containers, containers)
+         |> assign(:editing, nil)
+         |> stream(:all_containers, all_containers, reset: true)
+         |> put_flash(:info, "Container recreated with updated settings.")}
+
+      {:error, msg} ->
+        {:noreply, put_flash(socket, :error, msg)}
+    end
   end
 
   @impl true
@@ -794,6 +860,14 @@ defmodule HostctlWeb.PanelLive.Docker do
                   >
                     <.icon name="hero-eye" class="w-3.5 h-3.5" /> Inspect
                   </button>
+                  <button
+                    id={"edit-#{container.id}"}
+                    phx-click="edit_container"
+                    phx-value-id={container.name}
+                    class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 text-xs font-medium transition-colors"
+                  >
+                    <.icon name="hero-pencil-square" class="w-3.5 h-3.5" /> Edit
+                  </button>
                 </div>
               </div>
             </div>
@@ -880,6 +954,145 @@ defmodule HostctlWeb.PanelLive.Docker do
                   </div>
                 </div>
               </div>
+            </div>
+          <% end %>
+
+          <%!-- Edit panel --%>
+          <%= if @editing do %>
+            <div class="rounded-xl border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-gray-900 overflow-hidden">
+              <div class="flex items-center justify-between px-6 py-4 border-b border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20">
+                <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+                  Edit: {@editing.name}
+                </h2>
+                <button
+                  id="cancel-edit-btn"
+                  phx-click="cancel_edit"
+                  class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                >
+                  <.icon name="hero-x-mark" class="w-5 h-5" />
+                </button>
+              </div>
+
+              <form id="edit-container-form" phx-submit="save_container_edit" class="p-6 space-y-5">
+                <div class="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-4 py-3">
+                  <p class="text-xs text-amber-800 dark:text-amber-300">
+                    <.icon name="hero-exclamation-triangle" class="w-4 h-4 inline -mt-0.5 mr-1" />
+                    Saving will recreate the container with the updated settings. The container will be briefly stopped during this process.
+                  </p>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label
+                      for="edit-container-name"
+                      class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                    >
+                      Container Name
+                    </label>
+                    <input
+                      type="text"
+                      id="edit-container-name"
+                      name="name"
+                      value={@editing.name}
+                      class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      for="edit-restart-policy"
+                      class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                    >
+                      Restart Policy
+                    </label>
+                    <select
+                      id="edit-restart-policy"
+                      name="restart"
+                      class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                    >
+                      <option value="no" selected={@editing.restart_policy == "no"}>no</option>
+                      <option value="always" selected={@editing.restart_policy == "always"}>
+                        always
+                      </option>
+                      <option
+                        value="unless-stopped"
+                        selected={@editing.restart_policy == "unless-stopped"}
+                      >
+                        unless-stopped
+                      </option>
+                      <option
+                        value="on-failure"
+                        selected={@editing.restart_policy == "on-failure"}
+                      >
+                        on-failure
+                      </option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    for="edit-container-ports"
+                    class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                  >
+                    Port Mappings
+                    <span class="text-gray-400 font-normal">(one per line, e.g. 8080:80)</span>
+                  </label>
+                  <textarea
+                    id="edit-container-ports"
+                    name="ports"
+                    rows="3"
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm font-mono text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                    placeholder="8080:80"
+                  >{format_port_lines(@editing.ports)}</textarea>
+                </div>
+
+                <div>
+                  <div class="flex items-center justify-between mb-2">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Environment Variables
+                    </label>
+                    <button
+                      type="button"
+                      phx-click="add_edit_env_row"
+                      class="inline-flex items-center gap-1 text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 font-medium"
+                    >
+                      <.icon name="hero-plus" class="w-3.5 h-3.5" /> Add Variable
+                    </button>
+                  </div>
+                  <div class="space-y-2">
+                    <%= for i <- 0..(@edit_env_count - 1) do %>
+                      <% env_list = Enum.sort(@editing.env)
+                      {default_key, default_val} = Enum.at(env_list, i, {"", ""}) %>
+                      <div class="flex gap-2">
+                        <input
+                          type="text"
+                          name={"edit_env_key_#{i}"}
+                          value={default_key}
+                          placeholder="KEY"
+                          class="flex-1 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm font-mono text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                        />
+                        <input
+                          type="text"
+                          name={"edit_env_val_#{i}"}
+                          value={default_val}
+                          placeholder="value"
+                          class="flex-1 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm font-mono text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                        />
+                      </div>
+                    <% end %>
+                  </div>
+                </div>
+
+                <div class="flex justify-end pt-2">
+                  <button
+                    type="submit"
+                    id="save-container-edit-btn"
+                    class="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium shadow-sm transition-colors focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  >
+                    <.icon name="hero-check" class="w-4 h-4" /> Save Changes
+                  </button>
+                </div>
+              </form>
             </div>
           <% end %>
         </div>
@@ -1407,6 +1620,20 @@ defmodule HostctlWeb.PanelLive.Docker do
       "#{Enum.join(host_ports, ",")}->#{port_proto}"
     end)
     |> Enum.join(", ")
+  end
+
+  defp format_port_lines(ports) when ports == %{}, do: ""
+
+  defp format_port_lines(ports) when is_map(ports) do
+    ports
+    |> Enum.flat_map(fn {port_proto, host_ports} ->
+      container_port = port_proto |> String.split("/") |> List.first()
+
+      Enum.map(host_ports, fn host_port ->
+        "#{host_port}:#{container_port}"
+      end)
+    end)
+    |> Enum.join("\n")
   end
 
   defp compose_running?(stack) do
