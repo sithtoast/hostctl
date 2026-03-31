@@ -21,7 +21,8 @@ defmodule Hostctl.Docker do
           image: String.t(),
           state: String.t(),
           ports: map(),
-          env: map()
+          env: map(),
+          restart_policy: String.t()
         }
 
   @doc "Returns true when the docker CLI is available and can talk to the daemon."
@@ -90,7 +91,13 @@ defmodule Hostctl.Docker do
          name <- Map.get(json_obj, "Name", "") |> String.trim_leading("/"),
          config <- Map.get(json_obj, "Config", %{}),
          state <- Map.get(json_obj, "State", %{}),
+         host_config <- Map.get(json_obj, "HostConfig", %{}),
          network_settings <- Map.get(json_obj, "NetworkSettings", %{}) do
+      restart_policy =
+        host_config
+        |> Map.get("RestartPolicy", %{})
+        |> Map.get("Name", "")
+
       {:ok,
        %{
          id: Map.get(json_obj, "Id", ""),
@@ -98,7 +105,8 @@ defmodule Hostctl.Docker do
          image: Map.get(config, "Image", ""),
          state: Map.get(state, "Status", "unknown"),
          ports: parse_port_bindings(Map.get(network_settings, "Ports", %{})),
-         env: parse_env_list(Map.get(config, "Env", []))
+         env: parse_env_list(Map.get(config, "Env", [])),
+         restart_policy: restart_policy
        }}
     else
       {:error, _} -> {:error, "Failed to inspect container"}
@@ -236,6 +244,39 @@ defmodule Hostctl.Docker do
       error -> error
     end
   end
+
+  @doc """
+  Renames a container.
+  """
+  def rename_container(container_id, new_name)
+      when is_binary(container_id) and is_binary(new_name) do
+    case run(["rename", container_id, new_name]) do
+      {:ok, _} -> :ok
+      {:error, :command_failed} -> {:error, "Failed to rename container"}
+      error -> error
+    end
+  end
+
+  @doc """
+  Recreates a container with new settings.
+
+  Stops and removes the old container, then runs a new one from the same image
+  with the provided options. Returns `{:ok, new_container_id}` on success.
+  """
+  def recreate_container(container_name, opts \\ []) when is_binary(container_name) do
+    with {:ok, details} <- inspect_container(container_name),
+         :ok <- stop_container_if_running(details),
+         :ok <- remove_container(container_name) do
+      image = details.image
+      run_container(image, opts)
+    end
+  end
+
+  defp stop_container_if_running(%{state: "running", name: name}) do
+    stop_container(name)
+  end
+
+  defp stop_container_if_running(_), do: :ok
 
   @doc """
   Runs a new container from an image with optional name, port mappings, env vars, and detach mode.
