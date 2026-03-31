@@ -96,6 +96,16 @@ config :hostctl, :database_server,
   username: "root",
   password: ""
 
+# PostgreSQL server integration
+# Hostctl connects to the PostgreSQL server with superuser credentials to
+# create/drop databases and manage users for hosted applications.
+config :hostctl, :postgres_server,
+  enabled: true,
+  hostname: "localhost",
+  port: 5432,
+  username: "postgres",
+  password: "postgres"
+
 # Configure the endpoint
 config :hostctl, HostctlWeb.Endpoint,
   url: [host: "localhost"],

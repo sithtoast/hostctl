@@ -155,4 +155,18 @@ if config_env() == :prod do
       username: uri.userinfo && String.split(uri.userinfo, ":") |> List.first(),
       password: uri.userinfo && String.split(uri.userinfo, ":", parts: 2) |> List.last()
   end
+
+  # PostgreSQL database server for hosted applications
+  # POSTGRES_ROOT_URL format: postgres://user:password@host:port/database
+  # e.g. postgres://postgres:secret@localhost:5432/postgres
+  if pg_url = System.get_env("POSTGRES_ROOT_URL") do
+    uri = URI.parse(pg_url)
+
+    config :hostctl, :postgres_server,
+      enabled: true,
+      hostname: uri.host || "localhost",
+      port: uri.port || 5432,
+      username: uri.userinfo && String.split(uri.userinfo, ":") |> List.first(),
+      password: uri.userinfo && String.split(uri.userinfo, ":", parts: 2) |> List.last()
+  end
 end

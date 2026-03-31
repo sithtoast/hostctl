@@ -74,6 +74,9 @@ config :hostctl, :ftp_server, enabled: false
 # Disable MySQL database server integration in development
 config :hostctl, :database_server, enabled: false
 
+# Disable PostgreSQL database server integration in development
+config :hostctl, :postgres_server, enabled: false
+
 # Enable dev routes for dashboard and mailbox
 config :hostctl, dev_routes: true
 

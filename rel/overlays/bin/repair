@@ -237,6 +237,21 @@ if [[ -f "$ENV_FILE" ]]; then
     FIXED=$((FIXED + 1))
   fi
   ok "Env file ($ENV_FILE)"
+
+  # Ensure POSTGRES_ROOT_URL is present (added after initial install.sh versions)
+  if ! grep -q '^POSTGRES_ROOT_URL=' "$ENV_FILE"; then
+    # Try to extract the postgres superuser password, or generate a new one
+    PG_ROOT_PW="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)"
+    # Set the postgres superuser password so the app can connect
+    if command -v psql &>/dev/null; then
+      sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '$PG_ROOT_PW';" >/dev/null 2>&1 || true
+    fi
+    echo "POSTGRES_ROOT_URL=postgres://postgres:$PG_ROOT_PW@localhost:5432/postgres" >> "$ENV_FILE"
+    fix "Added POSTGRES_ROOT_URL to env file"
+    FIXED=$((FIXED + 1))
+  else
+    ok "POSTGRES_ROOT_URL present in env file"
+  fi
 else
   err "Env file not found at $ENV_FILE"
 fi

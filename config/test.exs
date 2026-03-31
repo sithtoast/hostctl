@@ -41,6 +41,9 @@ config :hostctl, :ftp_server, enabled: false
 # Disable MySQL database server integration during tests
 config :hostctl, :database_server, enabled: false
 
+# Disable PostgreSQL database server integration during tests
+config :hostctl, :postgres_server, enabled: false
+
 # Disable mail server integration during tests
 config :hostctl, :mail_server, enabled: false
 
