@@ -31,6 +31,10 @@ defmodule HostctlWeb.PanelLive.Docker do
       |> assign(:edit_volume_count, 0)
       |> assign(:viewing_logs, nil)
       |> assign(:container_logs, nil)
+      |> assign(:show_compose_form, false)
+      |> assign(:compose_project_name, "")
+      |> assign(:compose_yaml, "")
+      |> assign(:deploying_compose, false)
       |> stream(:proxies, proxies)
 
     if connected?(socket) do
@@ -44,6 +48,11 @@ defmodule HostctlWeb.PanelLive.Docker do
 
       {:ok,
        socket
+       |> allow_upload(:compose_file,
+         accept: ~w(.yml .yaml),
+         max_entries: 1,
+         max_file_size: 1_000_000
+       )
        |> assign(:containers, containers)
        |> assign(:all_containers_list, all_containers)
        |> assign(:docker_status, docker_status)
@@ -549,6 +558,116 @@ defmodule HostctlWeb.PanelLive.Docker do
 
       {:error, msg} ->
         {:noreply, put_flash(socket, :error, msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("show_compose_form", _params, socket) do
+    {:noreply, assign(socket, :show_compose_form, true)}
+  end
+
+  @impl true
+  def handle_event("cancel_compose_form", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:show_compose_form, false)
+     |> assign(:compose_project_name, "")
+     |> assign(:compose_yaml, "")
+     |> assign(:deploying_compose, false)}
+  end
+
+  @impl true
+  def handle_event("validate_compose", %{"project_name" => name, "yaml" => yaml}, socket) do
+    {:noreply,
+     socket
+     |> assign(:compose_project_name, name)
+     |> assign(:compose_yaml, yaml)}
+  end
+
+  @impl true
+  def handle_event("deploy_compose", %{"project_name" => name, "yaml" => yaml}, socket) do
+    name = String.trim(name)
+    yaml = String.trim(yaml)
+
+    # Read uploaded file content if present, otherwise use pasted YAML
+    uploaded_yaml =
+      consume_uploaded_entries(socket, :compose_file, fn %{path: path}, _entry ->
+        {:ok, File.read!(path)}
+      end)
+
+    final_yaml = if uploaded_yaml != [], do: hd(uploaded_yaml), else: yaml
+
+    cond do
+      name == "" ->
+        {:noreply, put_flash(socket, :error, "Project name is required.")}
+
+      not Regex.match?(~r/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/, name) ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Project name must start with a letter or number and contain only letters, numbers, hyphens, dots, and underscores."
+         )}
+
+      final_yaml == "" ->
+        {:noreply,
+         put_flash(socket, :error, "Compose YAML content is required. Paste it or upload a file.")}
+
+      true ->
+        socket = assign(socket, :deploying_compose, true)
+
+        case Docker.deploy_compose_file(name, final_yaml) do
+          :ok ->
+            {docker_status, containers} = load_containers()
+            all_containers = load_all_containers()
+
+            {:noreply,
+             socket
+             |> assign(:docker_status, docker_status)
+             |> assign(:containers, containers)
+             |> assign(:all_containers_list, all_containers)
+             |> assign(:compose_stacks, load_compose_stacks())
+             |> assign(:show_compose_form, false)
+             |> assign(:compose_project_name, "")
+             |> assign(:compose_yaml, "")
+             |> assign(:deploying_compose, false)
+             |> stream(:all_containers, all_containers, reset: true)
+             |> put_flash(:info, "Compose stack \"#{name}\" deployed successfully.")}
+
+          {:error, msg} ->
+            {:noreply,
+             socket
+             |> assign(:deploying_compose, false)
+             |> put_flash(:error, msg)}
+        end
+    end
+  end
+
+  @impl true
+  def handle_event("cancel_compose_upload", %{"ref" => ref}, socket) do
+    {:noreply, cancel_upload(socket, :compose_file, ref)}
+  end
+
+  @impl true
+  def handle_event("view_compose_file", %{"name" => name}, socket) do
+    case Docker.read_compose_file(name) do
+      {:ok, content} ->
+        {:noreply,
+         socket
+         |> assign(:show_compose_form, true)
+         |> assign(:compose_project_name, name)
+         |> assign(:compose_yaml, content)}
+
+      {:error, :not_found} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :info,
+           "No saved compose file found for \"#{name}\". It may have been deployed externally."
+         )}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Failed to read compose file.")}
     end
   end
 
@@ -1712,6 +1831,171 @@ defmodule HostctlWeb.PanelLive.Docker do
 
         <%!-- ============= Compose tab ============= --%>
         <div :if={@tab == "compose"} class="space-y-4">
+          <%!-- Deploy Stack button --%>
+          <div class="flex justify-end">
+            <button
+              :if={!@show_compose_form}
+              id="show-compose-form-btn"
+              phx-click="show_compose_form"
+              class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors shadow-sm"
+            >
+              <.icon name="hero-plus" class="w-4 h-4" /> Deploy Stack
+            </button>
+          </div>
+
+          <%!-- Deploy compose form --%>
+          <%= if @show_compose_form do %>
+            <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+              <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+                <div>
+                  <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+                    Deploy Compose Stack
+                  </h2>
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Paste a docker-compose.yml or upload a file to deploy a new stack.
+                  </p>
+                </div>
+                <button
+                  id="cancel-compose-form-btn"
+                  phx-click="cancel_compose_form"
+                  class="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                >
+                  <.icon name="hero-x-mark" class="w-5 h-5" />
+                </button>
+              </div>
+
+              <form
+                id="deploy-compose-form"
+                phx-submit="deploy_compose"
+                phx-change="validate_compose"
+                class="p-6 space-y-5"
+              >
+                <div>
+                  <label
+                    for="compose-project-name"
+                    class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5"
+                  >
+                    Project Name
+                  </label>
+                  <input
+                    type="text"
+                    id="compose-project-name"
+                    name="project_name"
+                    value={@compose_project_name}
+                    placeholder="my-stack"
+                    required
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-4 py-2.5 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                  />
+                  <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+                    Used as the Docker Compose project name. Letters, numbers, hyphens, dots, and underscores only.
+                  </p>
+                </div>
+
+                <div>
+                  <label
+                    for="compose-yaml-input"
+                    class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5"
+                  >
+                    Compose YAML
+                  </label>
+                  <textarea
+                    id="compose-yaml-input"
+                    name="yaml"
+                    rows="14"
+                    placeholder={"services:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\""}
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-4 py-3 font-mono leading-relaxed focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500 resize-y"
+                  >{@compose_yaml}</textarea>
+                </div>
+
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                    Or Upload File
+                  </label>
+                  <div
+                    class="border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-lg p-6 text-center hover:border-indigo-400 dark:hover:border-indigo-600 transition-colors"
+                    phx-drop-target={@uploads.compose_file.ref}
+                  >
+                    <.icon
+                      name="hero-arrow-up-tray"
+                      class="w-8 h-8 mx-auto text-gray-400 dark:text-gray-500 mb-2"
+                    />
+                    <p class="text-sm text-gray-500 dark:text-gray-400">
+                      Drag & drop a
+                      <code class="px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">
+                        .yml
+                      </code>
+                      /
+                      <code class="px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">
+                        .yaml
+                      </code>
+                      file here, or
+                    </p>
+                    <label class="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 text-xs font-medium cursor-pointer transition-colors">
+                      <.icon name="hero-folder-open" class="w-3.5 h-3.5" /> Browse
+                      <.live_file_input upload={@uploads.compose_file} class="sr-only" />
+                    </label>
+                  </div>
+
+                  <%= for entry <- @uploads.compose_file.entries do %>
+                    <div class="mt-3 flex items-center gap-3 p-3 rounded-lg bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700">
+                      <.icon name="hero-document-text" class="w-5 h-5 text-indigo-500 shrink-0" />
+                      <span class="flex-1 text-sm text-gray-700 dark:text-gray-300 font-mono truncate">
+                        {entry.client_name}
+                      </span>
+                      <span class="text-xs text-gray-400">
+                        {Float.round(entry.client_size / 1024, 1)} KB
+                      </span>
+                      <button
+                        type="button"
+                        phx-click="cancel_compose_upload"
+                        phx-value-ref={entry.ref}
+                        class="p-1 rounded text-gray-400 hover:text-red-500 transition-colors"
+                      >
+                        <.icon name="hero-x-mark" class="w-4 h-4" />
+                      </button>
+                    </div>
+                    <%= for err <- upload_errors(@uploads.compose_file, entry) do %>
+                      <p class="mt-1 text-xs text-red-500">{upload_error_to_string(err)}</p>
+                    <% end %>
+                  <% end %>
+
+                  <p class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+                    If a file is uploaded, it will be used instead of pasted YAML. Max 1 MB.
+                  </p>
+                </div>
+
+                <div class="flex items-center gap-3 pt-1">
+                  <button
+                    id="deploy-compose-btn"
+                    type="submit"
+                    disabled={@deploying_compose}
+                    class={[
+                      "inline-flex items-center gap-2 px-4 py-2 rounded-lg text-white text-sm font-medium transition-colors shadow-sm",
+                      if(@deploying_compose,
+                        do: "bg-indigo-400 cursor-wait",
+                        else: "bg-indigo-600 hover:bg-indigo-500"
+                      )
+                    ]}
+                  >
+                    <%= if @deploying_compose do %>
+                      <.icon name="hero-arrow-path" class="w-4 h-4 animate-spin" /> Deploying…
+                    <% else %>
+                      <.icon name="hero-rocket-launch" class="w-4 h-4" /> Deploy
+                    <% end %>
+                  </button>
+                  <button
+                    id="cancel-compose-btn"
+                    type="button"
+                    phx-click="cancel_compose_form"
+                    class="px-4 py-2 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 text-sm font-medium transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </div>
+          <% end %>
+
           <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
               <h2 class="text-base font-semibold text-gray-900 dark:text-white">Compose Stacks</h2>
@@ -1722,11 +2006,7 @@ defmodule HostctlWeb.PanelLive.Docker do
 
             <%= if @compose_stacks == [] do %>
               <div class="py-16 text-center text-gray-400 dark:text-gray-500 text-sm">
-                No compose stacks found. Deploy a stack with
-                <code class="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs">
-                  docker compose up -d
-                </code>
-                to see it here.
+                No compose stacks found. Click <strong>Deploy Stack</strong> above to get started.
               </div>
             <% else %>
               <div class="divide-y divide-gray-100 dark:divide-gray-800">
@@ -1754,6 +2034,14 @@ defmodule HostctlWeb.PanelLive.Docker do
                   </div>
 
                   <div class="flex items-center gap-1.5 shrink-0">
+                    <button
+                      id={"compose-view-#{stack.name}"}
+                      phx-click="view_compose_file"
+                      phx-value-name={stack.name}
+                      class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 text-xs font-medium transition-colors"
+                    >
+                      <.icon name="hero-document-text" class="w-3.5 h-3.5" /> View
+                    </button>
                     <%= if compose_running?(stack) do %>
                       <button
                         id={"compose-restart-#{stack.name}"}
@@ -1852,6 +2140,14 @@ defmodule HostctlWeb.PanelLive.Docker do
   defp compose_running?(stack) do
     String.contains?(String.downcase(stack.status), "running")
   end
+
+  defp upload_error_to_string(:too_large), do: "File is too large (max 1 MB)."
+  defp upload_error_to_string(:too_many_files), do: "Only one file can be uploaded at a time."
+
+  defp upload_error_to_string(:not_accepted),
+    do: "Invalid file type. Only .yml and .yaml files are accepted."
+
+  defp upload_error_to_string(_), do: "Upload error."
 
   defp parse_env_pairs(params) do
     parse_env_pairs(params, "env_key_", "env_val_")
