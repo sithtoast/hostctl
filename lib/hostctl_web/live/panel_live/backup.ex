@@ -155,7 +155,8 @@ defmodule HostctlWeb.PanelLive.Backup do
         socket
       ) do
     domain_id = String.to_integer(id_str)
-    effective_mode = if mode == "global", do: nil, else: mode
+    global_mode = socket.assigns.setting.s3_mode || "archive"
+    effective_mode = if mode == global_mode, do: nil, else: mode
 
     case Backup.set_domain_s3_mode(domain_id, effective_mode) do
       {:ok, _} ->
@@ -173,7 +174,8 @@ defmodule HostctlWeb.PanelLive.Backup do
         socket
       ) do
     subdomain_id = String.to_integer(id_str)
-    effective_mode = if mode == "global", do: nil, else: mode
+    global_mode = socket.assigns.setting.s3_mode || "archive"
+    effective_mode = if mode == global_mode, do: nil, else: mode
 
     case Backup.set_subdomain_s3_mode(subdomain_id, effective_mode) do
       {:ok, _} ->
@@ -979,14 +981,8 @@ defmodule HostctlWeb.PanelLive.Backup do
                 <span class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-20 text-center">
                   Include mail
                 </span>
-                <span
-                  class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-52 text-center"
-                  title={"Global default: #{@setting.s3_mode || "archive"}"}
-                >
+                <span class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 w-44 text-center">
                   S3 mode
-                  <span class="normal-case font-normal text-gray-400 dark:text-gray-500">
-                    (global: {@setting.s3_mode || "archive"})
-                  </span>
                 </span>
               </div>
 
@@ -1112,9 +1108,9 @@ defmodule HostctlWeb.PanelLive.Backup do
                     </button>
                   </div>
                   <%!-- S3 mode selector for domain --%>
-                  <div class="w-52 flex justify-center">
+                  <div class="w-44 flex justify-center">
                     <div class="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden text-xs">
-                      <%= for {label, val} <- [{"Global", "global"}, {"Archive", "archive"}, {"Stream", "stream"}, {"Raw", "raw"}] do %>
+                      <%= for {label, val} <- [{"Archive", "archive"}, {"Stream", "stream"}, {"Raw", "raw"}] do %>
                         <button
                           id={"domain-s3mode-#{group.id}-#{val}"}
                           phx-click="set_domain_s3_mode"
@@ -1123,8 +1119,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                           class={[
                             "px-3 py-1.5 font-medium transition-colors",
                             if(
-                              (val == "global" and is_nil(group.s3_mode)) or
-                                group.s3_mode == val,
+                              (group.s3_mode || @setting.s3_mode || "archive") == val,
                               do: "bg-indigo-600 text-white",
                               else:
                                 "bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800"
@@ -1205,9 +1200,9 @@ defmodule HostctlWeb.PanelLive.Backup do
                     <%!-- Empty mail column for subdomains (mail is per-domain only) --%>
                     <div class="w-20"></div>
                     <%!-- S3 mode selector for subdomain --%>
-                    <div class="w-52 flex justify-center">
+                    <div class="w-44 flex justify-center">
                       <div class="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden text-xs">
-                        <%= for {label, val} <- [{"Global", "global"}, {"Archive", "archive"}, {"Stream", "stream"}, {"Raw", "raw"}] do %>
+                        <%= for {label, val} <- [{"Archive", "archive"}, {"Stream", "stream"}, {"Raw", "raw"}] do %>
                           <button
                             id={"subdomain-s3mode-#{sub.id}-#{val}"}
                             phx-click="set_subdomain_s3_mode"
@@ -1216,8 +1211,7 @@ defmodule HostctlWeb.PanelLive.Backup do
                             class={[
                               "px-3 py-1.5 font-medium transition-colors",
                               if(
-                                (val == "global" and is_nil(sub.s3_mode)) or
-                                  sub.s3_mode == val,
+                                (sub.s3_mode || @setting.s3_mode || "archive") == val,
                                 do: "bg-indigo-600 text-white",
                                 else:
                                   "bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800"

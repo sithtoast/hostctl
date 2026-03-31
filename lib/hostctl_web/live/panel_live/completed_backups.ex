@@ -197,6 +197,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
        file_count: 0,
        total_size: 0,
        target_dir: nil,
+       s3_prefix: nil,
        progress: nil,
        error: nil
      })}
@@ -241,7 +242,11 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     if target_dir == "" do
       {:noreply, put_flash(socket, :error, "Target directory is required.")}
     else
-      send(self(), {:do_raw_restore, raw.selected_domain, target_dir})
+      if raw[:s3_prefix] do
+        send(self(), {:do_prefix_restore, raw.s3_prefix, target_dir})
+      else
+        send(self(), {:do_raw_restore, raw.selected_domain, target_dir})
+      end
 
       {:noreply,
        assign(socket, :raw_restore, %{
@@ -251,6 +256,61 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
            progress: "Downloading files from S3…"
        })}
     end
+  end
+
+  def handle_event("restore_raw_log", %{"id" => log_id}, socket) do
+    log = Backup.get_log(String.to_integer(log_id))
+    domain = log_first_domain(log)
+    prefix = "#{log.s3_key}/domains/#{domain}"
+
+    send(self(), {:load_prefix_files, prefix, domain})
+
+    {:noreply,
+     assign(socket, :raw_restore, %{
+       step: :loading_files,
+       domains: [],
+       selected_domain: domain,
+       files: [],
+       file_count: 0,
+       total_size: 0,
+       target_dir: nil,
+       s3_prefix: prefix,
+       progress: nil,
+       error: nil
+     })}
+  end
+
+  def handle_event("restore_stream_log", %{"id" => log_id}, socket) do
+    log = Backup.get_log(String.to_integer(log_id))
+    domain = log_first_domain(log)
+    s3_key = "#{log.s3_key}/domains/#{domain}.tar.gz"
+
+    settings = Backup.get_or_create_settings()
+    temp_path = restore_temp_path(s3_key)
+
+    restore_state = %{
+      step: :downloading,
+      s3_key: s3_key,
+      local_path: nil,
+      items: [],
+      selected_items: MapSet.new(),
+      extracted_dir: nil,
+      sql_dumps: [],
+      db_targets: nil,
+      import_results: [],
+      error: nil
+    }
+
+    socket = assign(socket, :restore, restore_state)
+
+    lv = self()
+
+    Task.start(fn ->
+      result = S3.download(settings, s3_key, temp_path)
+      send(lv, {:s3_download_complete, result, temp_path})
+    end)
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -374,6 +434,54 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     end
   end
 
+  def handle_info({:load_prefix_files, prefix, domain_name}, socket) do
+    case Backup.list_s3_prefix_files(prefix) do
+      {:ok, files} ->
+        total_size = files |> Enum.map(& &1[:size]) |> Enum.filter(&is_integer/1) |> Enum.sum()
+        doc_root = Backup.domain_document_root(domain_name)
+
+        {:noreply,
+         assign(socket, :raw_restore, %{
+           socket.assigns.raw_restore
+           | step: :preview_files,
+             files: Enum.take(files, 100),
+             file_count: length(files),
+             total_size: total_size,
+             target_dir: doc_root
+         })}
+
+      {:error, reason} ->
+        {:noreply,
+         assign(socket, :raw_restore, %{
+           socket.assigns.raw_restore
+           | step: :error,
+             error: "Failed to list files: #{reason}"
+         })}
+    end
+  end
+
+  def handle_info({:do_prefix_restore, prefix, target_dir}, socket) do
+    case Backup.restore_s3_prefix_to_dir(prefix, target_dir) do
+      {:ok, count} ->
+        {:noreply,
+         socket
+         |> assign(:raw_restore, %{
+           socket.assigns.raw_restore
+           | step: :done,
+             progress: "Restored #{count} files to #{target_dir}"
+         })
+         |> put_flash(:info, "Raw restore complete: #{count} files restored to #{target_dir}")}
+
+      {:error, reason} ->
+        {:noreply,
+         assign(socket, :raw_restore, %{
+           socket.assigns.raw_restore
+           | step: :error,
+             error: reason
+         })}
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
@@ -403,6 +511,35 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   end
 
   defp archive_key?(_), do: false
+
+  defp log_s3_mode(log) do
+    details = log.details || %{}
+
+    cond do
+      # Explicit s3_mode recorded by runner
+      (mode = Map.get(details, :s3_mode) || Map.get(details, "s3_mode")) != nil ->
+        mode
+
+      # mode == "archive" means traditional single-file archive
+      (Map.get(details, :mode) || Map.get(details, "mode")) == "archive" ->
+        "archive"
+
+      # s3_key ending in .tar.gz is an archive
+      is_binary(log.s3_key) and archive_key?(log.s3_key) ->
+        "archive"
+
+      # s3_key without .tar.gz suffix is a stream/raw prefix
+      is_binary(log.s3_key) and log.s3_key != "" ->
+        "stream"
+
+      true ->
+        nil
+    end
+  end
+
+  defp log_first_domain(log) do
+    log |> domain_names_from_log() |> List.first()
+  end
 
   defp display_domain_count(log) do
     log
@@ -450,6 +587,11 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   defp trigger_label("manual_domain"), do: "Manual Domain"
   defp trigger_label(nil), do: "Manual"
   defp trigger_label(other), do: String.capitalize(other)
+
+  defp s3_mode_label("archive"), do: "S3 Archive"
+  defp s3_mode_label("stream"), do: "S3 Stream"
+  defp s3_mode_label("raw"), do: "S3 Raw"
+  defp s3_mode_label(_), do: "S3"
 
   defp restore_temp_path(s3_key) do
     basename = s3_key |> Path.basename() |> String.replace(~r/[^a-zA-Z0-9._-]/, "_")
@@ -701,6 +843,17 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                     <span :if={log.destination} class="text-xs text-gray-500 dark:text-gray-400">
                       {log.destination}
                     </span>
+                    <%= if log_s3_mode(log) do %>
+                      <span class={[
+                        "rounded-full px-2 py-0.5 text-xs font-medium",
+                        if(log_s3_mode(log) == "raw",
+                          do: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
+                          else: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400"
+                        )
+                      ]}>
+                        {s3_mode_label(log_s3_mode(log))}
+                      </span>
+                    <% end %>
                   </div>
 
                   <div class="grid grid-cols-1 gap-2 text-xs text-gray-500 dark:text-gray-400 md:grid-cols-3">
@@ -740,12 +893,24 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                   >
                     <.icon name="hero-arrow-path-rounded-square" class="w-4 h-4" /> Restore
                   </button>
-                  <span
-                    :if={not restorable_log?(log)}
-                    class="text-xs text-gray-400 dark:text-gray-500"
+                  <button
+                    :if={log_s3_mode(log) == "raw" and log_first_domain(log)}
+                    id={"restore-raw-log-#{log.id}"}
+                    phx-click="restore_raw_log"
+                    phx-value-id={log.id}
+                    class="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white hover:bg-amber-700"
                   >
-                    Restore unavailable
-                  </span>
+                    <.icon name="hero-folder-open" class="w-4 h-4" /> Restore Raw
+                  </button>
+                  <button
+                    :if={log_s3_mode(log) == "stream" and log_first_domain(log)}
+                    id={"restore-stream-log-#{log.id}"}
+                    phx-click="restore_stream_log"
+                    phx-value-id={log.id}
+                    class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700"
+                  >
+                    <.icon name="hero-arrow-path-rounded-square" class="w-4 h-4" /> Restore
+                  </button>
                 </div>
               </div>
             <% end %>

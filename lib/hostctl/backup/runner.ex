@@ -599,6 +599,12 @@ defmodule Hostctl.Backup.Runner do
     tar = System.find_executable("tar") || "tar"
     details = build_domain_backup_details(settings, domain)
 
+    effective_s3_mode =
+      case Repo.get_by(DomainSetting, domain_id: domain.id) do
+        %DomainSetting{s3_mode: mode} when mode in ["raw", "stream"] -> mode
+        _ -> "stream"
+      end
+
     result =
       try do
         if settings.backup_files do
@@ -620,7 +626,7 @@ defmodule Hostctl.Backup.Runner do
           completed_at: DateTime.utc_now(),
           destination: "s3",
           s3_key: prefix,
-          details: Map.put(details, :mode, "stream")
+          details: details |> Map.put(:mode, "stream") |> Map.put(:s3_mode, effective_s3_mode)
         }
 
         {:ok, updated_log} = Backup.update_log(log, updates)
