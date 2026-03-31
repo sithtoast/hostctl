@@ -174,6 +174,60 @@ defmodule Hostctl.Docker do
     end
   end
 
+  @doc "Lists locally available images with repository, tag, ID, and size."
+  def list_images do
+    case run(["images", "--format", "{{json .}}"]) do
+      {:ok, ""} ->
+        {:ok, []}
+
+      {:ok, output} ->
+        images =
+          output
+          |> String.split("\n", trim: true)
+          |> Enum.reduce([], fn line, acc ->
+            case Jason.decode(line) do
+              {:ok, row} ->
+                [
+                  %{
+                    id: Map.get(row, "ID", ""),
+                    repository: Map.get(row, "Repository", "<none>"),
+                    tag: Map.get(row, "Tag", "<none>"),
+                    size: Map.get(row, "Size", ""),
+                    created: Map.get(row, "CreatedSince", "")
+                  }
+                  | acc
+                ]
+
+              _ ->
+                acc
+            end
+          end)
+          |> Enum.reverse()
+
+        {:ok, images}
+
+      {:error, :command_failed} ->
+        {:error, docker_error_message()}
+
+      error ->
+        error
+    end
+  end
+
+  @doc "Removes a local image by ID or name:tag."
+  def remove_image(image_id) when is_binary(image_id) do
+    case run(["rmi", image_id]) do
+      {:ok, _} ->
+        :ok
+
+      {:error, :command_failed} ->
+        {:error, "Failed to remove image. Is it in use by a container?"}
+
+      error ->
+        error
+    end
+  end
+
   @doc "Removes a stopped container by name or ID."
   def remove_container(container_id) when is_binary(container_id) do
     case run(["rm", container_id]) do

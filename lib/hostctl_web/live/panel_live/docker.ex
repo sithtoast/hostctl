@@ -38,6 +38,9 @@ defmodule HostctlWeb.PanelLive.Docker do
      |> assign(:compose_stacks, compose_stacks)
      |> assign(:show_run_form, false)
      |> assign(:run_env_count, 1)
+     |> assign(:images, load_images())
+     |> assign(:deploy_image, nil)
+     |> assign(:deploy_env_count, 1)
      |> stream(:all_containers, all_containers)
      |> stream(:proxies, proxies)}
   end
@@ -64,6 +67,7 @@ defmodule HostctlWeb.PanelLive.Docker do
      |> assign(:proxy_form, proxy_form)
      |> assign(:inspecting, nil)
      |> assign(:compose_stacks, load_compose_stacks())
+     |> assign(:images, load_images())
      |> stream(:all_containers, all_containers, reset: true)}
   end
 
@@ -226,6 +230,7 @@ defmodule HostctlWeb.PanelLive.Docker do
            socket
            |> assign(:pulling, false)
            |> assign(:pull_image_name, "")
+           |> assign(:images, load_images())
            |> stream(:all_containers, all_containers, reset: true)
            |> put_flash(:info, "Image #{image_name} pulled successfully.")}
 
@@ -249,6 +254,7 @@ defmodule HostctlWeb.PanelLive.Docker do
         {:noreply,
          socket
          |> assign(:pulling, false)
+         |> assign(:images, load_images())
          |> stream(:all_containers, all_containers, reset: true)
          |> put_flash(:info, "Image #{image_name} pulled successfully.")}
 
@@ -257,6 +263,73 @@ defmodule HostctlWeb.PanelLive.Docker do
          socket
          |> assign(:pulling, false)
          |> put_flash(:error, msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("deploy_image", %{"image" => image_ref}, socket) do
+    {:noreply, assign(socket, deploy_image: image_ref, deploy_env_count: 1)}
+  end
+
+  @impl true
+  def handle_event("cancel_deploy", _params, socket) do
+    {:noreply, assign(socket, :deploy_image, nil)}
+  end
+
+  @impl true
+  def handle_event("add_deploy_env_row", _params, socket) do
+    {:noreply, assign(socket, :deploy_env_count, socket.assigns.deploy_env_count + 1)}
+  end
+
+  @impl true
+  def handle_event("run_from_image", params, socket) do
+    image = socket.assigns.deploy_image
+    name = String.trim(params["name"] || "")
+    restart = String.trim(params["restart"] || "")
+
+    ports =
+      (params["ports"] || "")
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    env = parse_env_pairs(params, "deploy_env_key_", "deploy_env_val_")
+
+    opts =
+      [name: name, ports: ports, env: env, restart: restart]
+      |> Enum.reject(fn {_k, v} -> v == "" or v == [] end)
+
+    case Docker.run_container(image, opts) do
+      {:ok, _container_id} ->
+        {docker_status, containers} = load_containers()
+        all_containers = load_all_containers()
+
+        {:noreply,
+         socket
+         |> assign(:docker_status, docker_status)
+         |> assign(:containers, containers)
+         |> assign(:deploy_image, nil)
+         |> assign(:deploy_env_count, 1)
+         |> assign(:tab, "containers")
+         |> stream(:all_containers, all_containers, reset: true)
+         |> put_flash(:info, "Container started from #{image}.")}
+
+      {:error, msg} ->
+        {:noreply, put_flash(socket, :error, msg)}
+    end
+  end
+
+  @impl true
+  def handle_event("remove_image", %{"id" => image_id}, socket) do
+    case Docker.remove_image(image_id) do
+      :ok ->
+        {:noreply,
+         socket
+         |> assign(:images, load_images())
+         |> put_flash(:info, "Image removed.")}
+
+      {:error, msg} ->
+        {:noreply, put_flash(socket, :error, msg)}
     end
   end
 
@@ -969,6 +1042,173 @@ defmodule HostctlWeb.PanelLive.Docker do
             </form>
           </div>
 
+          <%!-- Local images --%>
+          <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
+              <h2 class="text-base font-semibold text-gray-900 dark:text-white">Local Images</h2>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Images available on this server. Deploy to run a new container.
+              </p>
+            </div>
+
+            <%= if @images == [] do %>
+              <div class="py-16 text-center text-gray-400 dark:text-gray-500 text-sm">
+                No images found. Pull an image above or search Docker Hub.
+              </div>
+            <% else %>
+              <div class="divide-y divide-gray-100 dark:divide-gray-800">
+                <div :for={image <- @images} class="flex items-center gap-4 px-6 py-4">
+                  <div class="flex items-center justify-center w-9 h-9 rounded-lg bg-violet-100 dark:bg-violet-900/40 text-violet-600 dark:text-violet-400 shrink-0">
+                    <.icon name="hero-cube-transparent" class="w-4 h-4" />
+                  </div>
+
+                  <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-gray-900 dark:text-white truncate">
+                      {image.repository}<span class="text-gray-400 dark:text-gray-500">:{image.tag}</span>
+                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      {image.size}
+                      <span class="text-gray-400 dark:text-gray-600">&bull;</span>
+                      {image.created}
+                      <span class="text-gray-400 dark:text-gray-600">&bull;</span>
+                      <span class="font-mono">{String.slice(image.id, 0..15)}</span>
+                    </p>
+                  </div>
+
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <button
+                      id={"deploy-#{image.id}"}
+                      phx-click="deploy_image"
+                      phx-value-image={"#{image.repository}:#{image.tag}"}
+                      class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 text-xs font-medium transition-colors"
+                    >
+                      <.icon name="hero-rocket-launch" class="w-3.5 h-3.5" /> Deploy
+                    </button>
+                    <button
+                      id={"remove-image-#{image.id}"}
+                      phx-click="remove_image"
+                      phx-value-id={image.id}
+                      data-confirm={"Remove image #{image.repository}:#{image.tag}?"}
+                      class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/50 text-xs font-medium transition-colors"
+                    >
+                      <.icon name="hero-trash" class="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            <% end %>
+          </div>
+
+          <%!-- Deploy from image panel --%>
+          <%= if @deploy_image do %>
+            <div class="rounded-xl border-2 border-indigo-200 dark:border-indigo-800 bg-indigo-50/50 dark:bg-indigo-950/30 p-6">
+              <div class="flex items-center justify-between mb-4">
+                <div>
+                  <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+                    Deploy: {@deploy_image}
+                  </h2>
+                  <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                    Configure and run a new container from this image.
+                  </p>
+                </div>
+                <button
+                  id="cancel-deploy-btn"
+                  phx-click="cancel_deploy"
+                  class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                >
+                  <.icon name="hero-x-mark" class="w-5 h-5" />
+                </button>
+              </div>
+
+              <form id="run-from-image-form" phx-submit="run_from_image" class="space-y-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Container Name
+                    </label>
+                    <input
+                      type="text"
+                      name="name"
+                      placeholder="e.g. my-app"
+                      class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Restart Policy
+                    </label>
+                    <select
+                      name="restart"
+                      class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                    >
+                      <option value="">None (default)</option>
+                      <option value="always">Always</option>
+                      <option value="unless-stopped">Unless Stopped</option>
+                      <option value="on-failure">On Failure</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    Ports
+                  </label>
+                  <textarea
+                    name="ports"
+                    rows="2"
+                    placeholder="One per line, e.g.\n8080:80\n5432:5432"
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                  />
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    host:container format, one per line
+                  </p>
+                </div>
+
+                <div>
+                  <div class="flex items-center justify-between mb-2">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Environment Variables
+                    </label>
+                    <button
+                      type="button"
+                      id="add-deploy-env-row-btn"
+                      phx-click="add_deploy_env_row"
+                      class="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
+                    >
+                      <.icon name="hero-plus" class="w-3 h-3" /> Add Row
+                    </button>
+                  </div>
+                  <div class="space-y-2">
+                    <div :for={i <- 0..(@deploy_env_count - 1)} class="flex gap-2">
+                      <input
+                        type="text"
+                        name={"deploy_env_key_#{i}"}
+                        placeholder="KEY"
+                        class="w-1/3 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                      />
+                      <input
+                        type="text"
+                        name={"deploy_env_val_#{i}"}
+                        placeholder="value"
+                        class="flex-1 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm px-3 py-2 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <button
+                    id="run-from-image-btn"
+                    type="submit"
+                    class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+                  >
+                    <.icon name="hero-rocket-launch" class="w-4 h-4" /> Deploy Container
+                  </button>
+                </div>
+              </form>
+            </div>
+          <% end %>
+
           <%!-- Search registry --%>
           <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6">
             <h2 class="text-base font-semibold text-gray-900 dark:text-white mb-4">
@@ -1148,6 +1388,13 @@ defmodule HostctlWeb.PanelLive.Docker do
     end
   end
 
+  defp load_images do
+    case Docker.list_images() do
+      {:ok, images} -> images
+      {:error, _} -> []
+    end
+  end
+
   defp running?(container) do
     String.starts_with?(String.downcase(container.status), "up")
   end
@@ -1167,13 +1414,17 @@ defmodule HostctlWeb.PanelLive.Docker do
   end
 
   defp parse_env_pairs(params) do
+    parse_env_pairs(params, "env_key_", "env_val_")
+  end
+
+  defp parse_env_pairs(params, key_prefix, val_prefix) do
     0..99
     |> Enum.reduce_while([], fn i, acc ->
-      key = String.trim(params["env_key_#{i}"] || "")
-      val = params["env_val_#{i}"] || ""
+      key = String.trim(params["#{key_prefix}#{i}"] || "")
+      val = params["#{val_prefix}#{i}"] || ""
 
       cond do
-        is_nil(params["env_key_#{i}"]) -> {:halt, acc}
+        is_nil(params["#{key_prefix}#{i}"]) -> {:halt, acc}
         key == "" -> {:cont, acc}
         true -> {:cont, [{key, val} | acc]}
       end
