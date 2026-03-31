@@ -479,6 +479,121 @@ defmodule Hostctl.Backup do
     %{panel_postgresql: panel_db, mysql: mysql, postgresql: postgresql}
   end
 
+  # ---------------------------------------------------------------------------
+  # Raw S3 restore helpers
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Lists domain names that have raw (non-archive) files in S3 under the
+  configured `domains/` prefix. Returns `{:ok, [domain_name]}` or `{:error, reason}`.
+  """
+  def list_raw_s3_domains do
+    settings = get_or_create_settings()
+
+    if settings.s3_enabled do
+      prefix = (settings.s3_path_prefix || "hostctl-backups") <> "/domains/"
+
+      case S3.list_objects(settings, prefix) do
+        {:ok, objects} ->
+          domains =
+            objects
+            |> Enum.map(fn %{key: key} -> key |> String.trim_leading(prefix) end)
+            |> Enum.map(fn rel ->
+              # Raw files look like: domains/example.com/path/to/file
+              # Archives look like: domains/example.com.tar.gz
+              rel |> String.split("/", parts: 2) |> List.first()
+            end)
+            |> Enum.reject(fn name ->
+              is_nil(name) or name == "" or archive_file?(name)
+            end)
+            |> Enum.uniq()
+            |> Enum.sort()
+
+          {:ok, domains}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  @doc """
+  Lists all raw (non-archive) S3 objects under a specific domain prefix.
+  Returns `{:ok, [%{key, rel_path, size, last_modified}]}` or `{:error, reason}`.
+  """
+  def list_raw_s3_domain_files(domain_name) when is_binary(domain_name) do
+    settings = get_or_create_settings()
+
+    if settings.s3_enabled do
+      prefix = (settings.s3_path_prefix || "hostctl-backups") <> "/domains/#{domain_name}/"
+
+      case S3.list_objects(settings, prefix) do
+        {:ok, objects} ->
+          files =
+            objects
+            |> Enum.reject(fn %{key: key} -> archive_file?(key) end)
+            |> Enum.map(fn obj ->
+              Map.put(obj, :rel_path, String.trim_leading(obj.key, prefix))
+            end)
+            |> Enum.reject(fn %{rel_path: rel} -> rel == "" end)
+            |> Enum.sort_by(& &1.rel_path)
+
+          {:ok, files}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  @doc """
+  Downloads all raw S3 files for a domain into the given target directory,
+  preserving the directory structure. Returns `{:ok, count}` or `{:error, reason}`.
+  """
+  def restore_raw_s3_domain(domain_name, target_dir)
+      when is_binary(domain_name) and is_binary(target_dir) do
+    settings = get_or_create_settings()
+
+    case list_raw_s3_domain_files(domain_name) do
+      {:ok, []} ->
+        {:error, "No raw files found for #{domain_name}."}
+
+      {:ok, files} ->
+        results =
+          Enum.map(files, fn %{key: s3_key, rel_path: rel_path} ->
+            dest = Path.join(target_dir, rel_path)
+
+            case S3.download(settings, s3_key, dest) do
+              {:ok, _} -> :ok
+              {:error, reason} -> {:error, "#{rel_path}: #{reason}"}
+            end
+          end)
+
+        errors = Enum.filter(results, &match?({:error, _}, &1))
+
+        if errors == [] do
+          {:ok, length(files)}
+        else
+          error_msgs = Enum.map(errors, fn {:error, msg} -> msg end) |> Enum.join("; ")
+          {:error, "Some files failed to restore: #{error_msgs}"}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns the document root for a domain by name, or nil if not found.
+  """
+  def domain_document_root(domain_name) when is_binary(domain_name) do
+    Repo.one(from d in Domain, where: d.name == ^domain_name, select: d.document_root)
+  end
+
   defp archive_file?(name) when is_binary(name) do
     String.ends_with?(name, ".tar.gz") or String.ends_with?(name, ".tgz")
   end
