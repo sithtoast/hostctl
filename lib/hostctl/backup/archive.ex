@@ -117,6 +117,34 @@ defmodule Hostctl.Backup.Archive do
     |> Enum.sort_by(& &1.rel_path)
   end
 
+  @doc "Lists domain/mail archive files (.tar.gz) from an extracted restore staging directory."
+  def list_file_archives(extracted_dir) when is_binary(extracted_dir) do
+    extracted_dir
+    |> list_files_recursive()
+    |> Enum.filter(fn rel_path ->
+      String.ends_with?(rel_path, ".tar.gz") and
+        (String.starts_with?(rel_path, "domains/") or String.starts_with?(rel_path, "mail/"))
+    end)
+    |> Enum.map(fn rel_path ->
+      full_path = Path.join(extracted_dir, rel_path)
+
+      name =
+        rel_path
+        |> Path.basename()
+        |> String.trim_trailing(".tar.gz")
+
+      %{
+        id: rel_path,
+        rel_path: rel_path,
+        full_path: full_path,
+        kind: kind_for_path(normalize_member(rel_path)),
+        label: label_for_path(normalize_member(rel_path)),
+        name: name
+      }
+    end)
+    |> Enum.sort_by(& &1.rel_path)
+  end
+
   def index_file, do: @index_file
 
   defp list_members(archive_path) do
