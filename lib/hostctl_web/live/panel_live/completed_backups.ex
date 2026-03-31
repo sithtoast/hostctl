@@ -75,8 +75,10 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
       selected_items: MapSet.new(),
       extracted_dir: nil,
       sql_dumps: [],
+      file_archives: [],
       db_targets: nil,
       import_results: [],
+      file_restore_results: [],
       error: nil
     }
 
@@ -120,6 +122,7 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
       case Archive.extract_selected(restore.local_path, tar_members, staging_root) do
         {:ok, extracted_dir} ->
           sql_dumps = Archive.list_sql_dumps(extracted_dir)
+          file_archives = Archive.list_file_archives(extracted_dir)
           db_targets = Backup.restore_database_targets()
 
           {:noreply,
@@ -128,8 +131,10 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
              | step: :review_dumps,
                extracted_dir: extracted_dir,
                sql_dumps: sql_dumps,
+               file_archives: file_archives,
                db_targets: db_targets,
-               import_results: []
+               import_results: [],
+               file_restore_results: []
            })}
 
         {:error, :nothing_selected} ->
@@ -165,6 +170,56 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     {:noreply, assign(socket, :restore, %{restore | import_results: import_results})}
   end
 
+  def handle_event(
+        "restore_file_archive",
+        %{"archive_path" => archive_path, "target_dir" => target_dir},
+        socket
+      ) do
+    restore = socket.assigns.restore
+    target_dir = String.trim(target_dir)
+
+    result =
+      if target_dir == "" do
+        %{archive: archive_path, status: :error, message: "Target directory is required."}
+      else
+        temp_extract = archive_path <> "-extracted"
+        File.mkdir_p!(temp_extract)
+
+        case System.cmd("tar", ["-xzf", archive_path, "-C", temp_extract], stderr_to_stdout: true) do
+          {_, 0} ->
+            escaped_cmd("mkdir", ["-p", target_dir])
+
+            case escaped_cmd("cp", ["-a", temp_extract <> "/.", target_dir]) do
+              {_, 0} ->
+                File.rm_rf(temp_extract)
+                %{archive: archive_path, status: :ok, message: "Restored to #{target_dir}"}
+
+              {output, _} ->
+                File.rm_rf(temp_extract)
+
+                %{
+                  archive: archive_path,
+                  status: :error,
+                  message: "Copy failed: #{String.slice(output, 0, 300)}"
+                }
+            end
+
+          {output, _} ->
+            File.rm_rf(temp_extract)
+
+            %{
+              archive: archive_path,
+              status: :error,
+              message: "Extraction failed: #{String.slice(output, 0, 300)}"
+            }
+        end
+      end
+
+    file_restore_results = [result | restore.file_restore_results]
+
+    {:noreply, assign(socket, :restore, %{restore | file_restore_results: file_restore_results})}
+  end
+
   def handle_event("restore_local", %{"id" => log_id}, socket) do
     log = Backup.get_log(String.to_integer(log_id))
 
@@ -179,8 +234,10 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
             selected_items: MapSet.new(Enum.map(items, & &1.id)),
             extracted_dir: nil,
             sql_dumps: [],
+            file_archives: [],
             db_targets: nil,
             import_results: [],
+            file_restore_results: [],
             error: nil
           }
 
@@ -208,7 +265,9 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
        | step: :select_items,
          extracted_dir: nil,
          sql_dumps: [],
-         import_results: []
+         file_archives: [],
+         import_results: [],
+         file_restore_results: []
      })}
   end
 
@@ -566,29 +625,44 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
   def handle_info({:do_stream_archive_restore, s3_key, target_dir}, socket) do
     settings = Backup.get_or_create_settings()
     temp_path = restore_temp_path(s3_key)
+    temp_extract = temp_path <> "-extracted"
 
     case S3.download(settings, s3_key, temp_path) do
       {:ok, local_path} ->
-        case escaped_cmd("mkdir", ["-p", target_dir]) do
-          {_, 0} -> :ok
-          _ -> :ignore
-        end
+        File.mkdir_p!(temp_extract)
 
-        case escaped_cmd("tar", ["-xzf", local_path, "--no-same-owner", "-C", target_dir]) do
+        case System.cmd("tar", ["-xzf", local_path, "-C", temp_extract], stderr_to_stdout: true) do
           {_, 0} ->
             File.rm(local_path)
+            escaped_cmd("mkdir", ["-p", target_dir])
 
-            {:noreply,
-             socket
-             |> assign(:raw_restore, %{
-               socket.assigns.raw_restore
-               | step: :done,
-                 progress: "Archive extracted to #{target_dir}"
-             })
-             |> put_flash(:info, "Stream archive restored to #{target_dir}")}
+            case escaped_cmd("cp", ["-a", temp_extract <> "/.", target_dir]) do
+              {_, 0} ->
+                File.rm_rf(temp_extract)
+
+                {:noreply,
+                 socket
+                 |> assign(:raw_restore, %{
+                   socket.assigns.raw_restore
+                   | step: :done,
+                     progress: "Archive extracted to #{target_dir}"
+                 })
+                 |> put_flash(:info, "Stream archive restored to #{target_dir}")}
+
+              {output, _code} ->
+                File.rm_rf(temp_extract)
+
+                {:noreply,
+                 assign(socket, :raw_restore, %{
+                   socket.assigns.raw_restore
+                   | step: :error,
+                     error: "Copy failed: #{String.slice(output, 0, 500)}"
+                 })}
+            end
 
           {output, _code} ->
             File.rm(local_path)
+            File.rm_rf(temp_extract)
 
             {:noreply,
              assign(socket, :raw_restore, %{
@@ -757,6 +831,10 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
 
   defp import_result_for(import_results, dump_path) do
     Enum.find(import_results, fn r -> r.dump == dump_path end)
+  end
+
+  defp file_restore_result_for(file_restore_results, archive_path) do
+    Enum.find(file_restore_results, fn r -> r.archive == archive_path end)
   end
 
   @impl true
@@ -1187,43 +1265,38 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
 
               <%!-- Step: review & import SQL dumps --%>
               <%= if @restore.step == :review_dumps do %>
-                <div>
-                  <%= if @restore.sql_dumps == [] do %>
-                    <div class="text-center py-8">
-                      <p class="text-sm text-gray-500 dark:text-gray-400">
-                        No SQL dumps found in the extracted archive. File-based items have been
-                        extracted to:
+                <div class="space-y-6">
+                  <%!-- File archives section --%>
+                  <%= if @restore.file_archives != [] do %>
+                    <div>
+                      <p class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+                        File Archives
                       </p>
-                      <p class="mt-2 text-xs text-gray-400 dark:text-gray-500 font-mono">
-                        {@restore.extracted_dir}
-                      </p>
-                    </div>
-                  <% else %>
-                    <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                      Select a target database and import each SQL dump:
-                    </p>
-                    <div class="space-y-3">
-                      <%= for dump <- @restore.sql_dumps do %>
-                        <div
-                          id={"sql-dump-#{Base.encode16(:crypto.hash(:md5, dump.full_path), case: :lower) |> binary_part(0, 8)}"}
-                          class="rounded-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3"
-                        >
-                          <div class="flex items-center gap-3">
-                            <div class="flex-1 min-w-0">
-                              <p class="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
-                                {dump.label}
-                              </p>
-                              <p class="text-xs text-gray-400 dark:text-gray-500 font-mono truncate">
-                                {dump.rel_path}
-                              </p>
+                      <div class="space-y-3">
+                        <%= for archive <- @restore.file_archives do %>
+                          <div
+                            id={"file-archive-#{Base.encode16(:crypto.hash(:md5, archive.full_path), case: :lower) |> binary_part(0, 8)}"}
+                            class="rounded-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3"
+                          >
+                            <div class="flex items-center gap-3">
+                              <div class="flex-1 min-w-0">
+                                <p class="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
+                                  {archive.label}
+                                </p>
+                                <p class="text-xs text-gray-400 dark:text-gray-500 font-mono truncate">
+                                  {archive.rel_path}
+                                </p>
+                              </div>
+                              <span class="rounded-full px-2 py-0.5 text-xs font-medium bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">
+                                {kind_label(archive.kind)}
+                              </span>
                             </div>
-                            <span class="rounded-full px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
-                              {kind_label(dump.kind)}
-                            </span>
-                          </div>
 
-                          <%= if sql_kind?(dump.kind) do %>
-                            <% result = import_result_for(@restore.import_results, dump.full_path) %>
+                            <% result =
+                              file_restore_result_for(
+                                @restore.file_restore_results,
+                                archive.full_path
+                              ) %>
                             <%= if result do %>
                               <div class={[
                                 "rounded-lg px-3 py-2 text-xs font-medium",
@@ -1234,76 +1307,183 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
                                 )
                               ]}>
                                 <%= if result.status == :ok do %>
-                                  <.icon name="hero-check-circle" class="w-3.5 h-3.5 inline -mt-0.5" />
+                                  <.icon
+                                    name="hero-check-circle"
+                                    class="w-3.5 h-3.5 inline -mt-0.5"
+                                  />
                                 <% else %>
-                                  <.icon name="hero-x-circle" class="w-3.5 h-3.5 inline -mt-0.5" />
+                                  <.icon
+                                    name="hero-x-circle"
+                                    class="w-3.5 h-3.5 inline -mt-0.5"
+                                  />
                                 <% end %>
                                 {result.message}
                               </div>
                             <% else %>
                               <form
-                                id={"import-form-#{Base.encode16(:crypto.hash(:md5, dump.full_path), case: :lower) |> binary_part(0, 8)}"}
-                                phx-submit="import_sql"
+                                id={"file-restore-form-#{Base.encode16(:crypto.hash(:md5, archive.full_path), case: :lower) |> binary_part(0, 8)}"}
+                                phx-submit="restore_file_archive"
                                 class="flex items-end gap-3"
                               >
-                                <input type="hidden" name="dump_path" value={dump.full_path} />
-                                <input type="hidden" name="kind" value={dump.kind} />
-                                <%= if dump.kind == "panel_postgresql" do %>
-                                  <input type="hidden" name="target_db" value="" />
-                                  <p class="text-xs text-gray-500 dark:text-gray-400 flex-1">
-                                    Imports into the panel PostgreSQL database.
-                                  </p>
-                                <% else %>
-                                  <div class="flex-1">
-                                    <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                                      Target database
-                                    </label>
-                                    <select
-                                      name="target_db"
-                                      class="w-full rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                                    >
-                                      <option value="">Select…</option>
-                                      <%= if dump.kind == "mysql" do %>
-                                        <%= for db <- @restore.db_targets.mysql do %>
-                                          <option value={db}>{db}</option>
-                                        <% end %>
-                                      <% else %>
-                                        <%= for db <- @restore.db_targets.postgresql do %>
-                                          <option value={db}>{db}</option>
-                                        <% end %>
-                                      <% end %>
-                                    </select>
-                                  </div>
-                                <% end %>
+                                <input
+                                  type="hidden"
+                                  name="archive_path"
+                                  value={archive.full_path}
+                                />
+                                <div class="flex-1">
+                                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                                    Target directory
+                                  </label>
+                                  <input
+                                    type="text"
+                                    name="target_dir"
+                                    value={Backup.domain_base_dir(archive.name)}
+                                    class="w-full rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-mono"
+                                  />
+                                </div>
                                 <button
                                   type="submit"
-                                  data-confirm="This will import the SQL dump into the selected database. Are you sure?"
+                                  data-confirm="This will overwrite files in the target directory. Are you sure?"
                                   class="shrink-0 inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
                                 >
-                                  <.icon name="hero-arrow-down-on-square" class="w-3.5 h-3.5" />
-                                  Import
+                                  <.icon
+                                    name="hero-arrow-down-on-square"
+                                    class="w-3.5 h-3.5"
+                                  /> Restore
                                 </button>
                               </form>
                             <% end %>
-                          <% else %>
-                            <p class="text-xs text-gray-400 dark:text-gray-500">
-                              Non-SQL item extracted to: {dump.full_path}
-                            </p>
-                          <% end %>
-                        </div>
-                      <% end %>
+                          </div>
+                        <% end %>
+                      </div>
                     </div>
+                  <% end %>
+                  <%!-- SQL dumps section --%>
+                  <%= if @restore.sql_dumps != [] do %>
+                    <div>
+                      <p class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+                        SQL Dumps
+                      </p>
+                      <div class="space-y-3">
+                        <%= for dump <- @restore.sql_dumps do %>
+                          <div
+                            id={"sql-dump-#{Base.encode16(:crypto.hash(:md5, dump.full_path), case: :lower) |> binary_part(0, 8)}"}
+                            class="rounded-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3"
+                          >
+                            <div class="flex items-center gap-3">
+                              <div class="flex-1 min-w-0">
+                                <p class="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
+                                  {dump.label}
+                                </p>
+                                <p class="text-xs text-gray-400 dark:text-gray-500 font-mono truncate">
+                                  {dump.rel_path}
+                                </p>
+                              </div>
+                              <span class="rounded-full px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
+                                {kind_label(dump.kind)}
+                              </span>
+                            </div>
 
-                    <div
-                      :if={@restore.extracted_dir}
-                      class="mt-4 rounded-lg bg-gray-50 dark:bg-gray-800/50 px-4 py-3"
-                    >
-                      <p class="text-xs text-gray-500 dark:text-gray-400">
-                        Extracted files staged at:
-                        <code class="font-mono">{@restore.extracted_dir}</code>
+                            <%= if sql_kind?(dump.kind) do %>
+                              <% result =
+                                import_result_for(@restore.import_results, dump.full_path) %>
+                              <%= if result do %>
+                                <div class={[
+                                  "rounded-lg px-3 py-2 text-xs font-medium",
+                                  if(result.status == :ok,
+                                    do:
+                                      "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+                                    else:
+                                      "bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                                  )
+                                ]}>
+                                  <%= if result.status == :ok do %>
+                                    <.icon
+                                      name="hero-check-circle"
+                                      class="w-3.5 h-3.5 inline -mt-0.5"
+                                    />
+                                  <% else %>
+                                    <.icon
+                                      name="hero-x-circle"
+                                      class="w-3.5 h-3.5 inline -mt-0.5"
+                                    />
+                                  <% end %>
+                                  {result.message}
+                                </div>
+                              <% else %>
+                                <form
+                                  id={"import-form-#{Base.encode16(:crypto.hash(:md5, dump.full_path), case: :lower) |> binary_part(0, 8)}"}
+                                  phx-submit="import_sql"
+                                  class="flex items-end gap-3"
+                                >
+                                  <input type="hidden" name="dump_path" value={dump.full_path} />
+                                  <input type="hidden" name="kind" value={dump.kind} />
+                                  <%= if dump.kind == "panel_postgresql" do %>
+                                    <input type="hidden" name="target_db" value="" />
+                                    <p class="text-xs text-gray-500 dark:text-gray-400 flex-1">
+                                      Imports into the panel PostgreSQL database.
+                                    </p>
+                                  <% else %>
+                                    <div class="flex-1">
+                                      <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                                        Target database
+                                      </label>
+                                      <select
+                                        name="target_db"
+                                        class="w-full rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                                      >
+                                        <option value="">Select…</option>
+                                        <%= if dump.kind == "mysql" do %>
+                                          <%= for db <- @restore.db_targets.mysql do %>
+                                            <option value={db}>{db}</option>
+                                          <% end %>
+                                        <% else %>
+                                          <%= for db <- @restore.db_targets.postgresql do %>
+                                            <option value={db}>{db}</option>
+                                          <% end %>
+                                        <% end %>
+                                      </select>
+                                    </div>
+                                  <% end %>
+                                  <button
+                                    type="submit"
+                                    data-confirm="This will import the SQL dump into the selected database. Are you sure?"
+                                    class="shrink-0 inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+                                  >
+                                    <.icon
+                                      name="hero-arrow-down-on-square"
+                                      class="w-3.5 h-3.5"
+                                    /> Import
+                                  </button>
+                                </form>
+                              <% end %>
+                            <% else %>
+                              <p class="text-xs text-gray-400 dark:text-gray-500">
+                                Non-SQL item extracted to: {dump.full_path}
+                              </p>
+                            <% end %>
+                          </div>
+                        <% end %>
+                      </div>
+                    </div>
+                  <% end %>
+                  <%!-- Empty state: no SQL dumps and no file archives --%>
+                  <%= if @restore.sql_dumps == [] and @restore.file_archives == [] do %>
+                    <div class="text-center py-8">
+                      <p class="text-sm text-gray-500 dark:text-gray-400">
+                        No restorable items found in the extracted archive.
                       </p>
                     </div>
                   <% end %>
+                  <div
+                    :if={@restore.extracted_dir}
+                    class="rounded-lg bg-gray-50 dark:bg-gray-800/50 px-4 py-3"
+                  >
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      Extracted files staged at:
+                      <code class="font-mono">{@restore.extracted_dir}</code>
+                    </p>
+                  </div>
                 </div>
               <% end %>
             </div>
