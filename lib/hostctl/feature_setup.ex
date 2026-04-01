@@ -140,12 +140,27 @@ defmodule Hostctl.FeatureSetup do
   systemd services are all currently active, this marks them as `installed`.
   This handles features that were installed outside the panel (e.g. via
   `install.sh`) without a prior panel interaction.
+
+  Conflict detection: if a feature lists a conflicting feature and that
+  conflict's packages are actually installed on disk, the feature is skipped
+  to avoid false-positives (e.g. MariaDB registers a `mysql.service` alias).
   """
   def reconcile_installed_features do
     for feature <- @features, feature.services != [] do
       setting = Settings.get_feature_setting(feature.key)
 
-      if setting.status == "not_installed" and services_active?(feature.services) do
+      conflicts = Map.get(feature, :conflicts, [])
+
+      conflict_installed? =
+        Enum.any?(conflicts, fn conflict_key ->
+          case Enum.find(@features, &(&1.key == conflict_key)) do
+            nil -> false
+            conflict_feature -> packages_installed?(conflict_feature.packages)
+          end
+        end)
+
+      if setting.status == "not_installed" and services_active?(feature.services) and
+           not conflict_installed? do
         Settings.save_feature_setting(feature.key, %{
           enabled: true,
           status: "installed",
@@ -155,6 +170,15 @@ defmodule Hostctl.FeatureSetup do
     end
 
     :ok
+  end
+
+  defp packages_installed?(packages) do
+    Enum.any?(packages, fn pkg ->
+      case System.cmd("dpkg-query", ["-W", "-f=${Status}", pkg], stderr_to_stdout: true) do
+        {"install ok installed", 0} -> true
+        _ -> false
+      end
+    end)
   end
 
   defp services_active?(services) do
