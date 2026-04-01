@@ -19,6 +19,10 @@ config :hostctl, :scopes,
     test_setup_helper: :register_and_log_in_user
   ]
 
+config :mime, :types, %{
+  "text/yaml" => ["yml"]
+}
+
 config :hostctl,
   ecto_repos: [Hostctl.Repo],
   generators: [timestamp_type: :utc_datetime]
