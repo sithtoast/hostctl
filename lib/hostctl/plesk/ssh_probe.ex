@@ -19,11 +19,18 @@ defmodule Hostctl.Plesk.SSHProbe do
     "system_users"
   ]
 
+  @type subdomain_entry :: %{
+          name: String.t(),
+          full_name: String.t(),
+          system_user: String.t() | nil
+        }
+
   @type subscription :: %{
           domain: String.t(),
           owner_login: String.t() | nil,
           owner_type: String.t() | nil,
-          system_user: String.t() | nil
+          system_user: String.t() | nil,
+          subdomains: [subdomain_entry()]
         }
 
   @type discovery :: %{
@@ -85,6 +92,7 @@ defmodule Hostctl.Plesk.SSHProbe do
         subscriptions
         |> Enum.uniq_by(& &1.domain)
         |> Enum.sort_by(& &1.domain)
+        |> merge_subdomains()
 
       discovery = %{
         discovery
@@ -891,6 +899,70 @@ defmodule Hostctl.Plesk.SSHProbe do
     case reason do
       {:error, nested} -> format_ssh_reason(nested)
       _ -> inspect(reason)
+    end
+  end
+
+  @doc """
+  Merges subdomains into their parent domain subscriptions.
+
+  Plesk lists subdomains as separate entries in its domains table. This function
+  identifies subdomains by checking if a domain name is a child of another
+  discovered domain and nests them under the parent subscription.
+
+  ## Example
+
+      iex> merge_subdomains([
+      ...>   %{domain: "example.com", owner_login: "admin", owner_type: "admin", system_user: "ex"},
+      ...>   %{domain: "blog.example.com", owner_login: "admin", owner_type: "admin", system_user: "ex"}
+      ...> ])
+      [%{domain: "example.com", ..., subdomains: [%{name: "blog", full_name: "blog.example.com", system_user: "ex"}]}]
+  """
+  def merge_subdomains(subscriptions) when is_list(subscriptions) do
+    all_domains = MapSet.new(subscriptions, & &1.domain)
+
+    root_parents =
+      Map.new(subscriptions, fn sub ->
+        {sub.domain, find_root_parent(sub.domain, all_domains)}
+      end)
+
+    root_subs = Enum.filter(subscriptions, fn sub -> is_nil(root_parents[sub.domain]) end)
+
+    Enum.map(root_subs, fn root ->
+      children =
+        subscriptions
+        |> Enum.filter(fn sub -> root_parents[sub.domain] == root.domain end)
+        |> Enum.map(fn sub ->
+          prefix = String.replace_suffix(sub.domain, "." <> root.domain, "")
+          %{name: prefix, full_name: sub.domain, system_user: sub.system_user}
+        end)
+        |> Enum.sort_by(& &1.name)
+
+      Map.put(root, :subdomains, children)
+    end)
+  end
+
+  defp find_root_parent(domain, all_domains) do
+    case find_direct_parent(domain, all_domains) do
+      nil ->
+        nil
+
+      parent ->
+        case find_root_parent(parent, all_domains) do
+          nil -> parent
+          root -> root
+        end
+    end
+  end
+
+  defp find_direct_parent(domain, all_domains) do
+    case String.split(domain, ".", parts: 2) do
+      [_prefix, rest] ->
+        if MapSet.member?(all_domains, rest),
+          do: rest,
+          else: find_direct_parent(rest, all_domains)
+
+      _ ->
+        nil
     end
   end
 

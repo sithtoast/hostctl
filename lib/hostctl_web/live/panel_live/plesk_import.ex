@@ -53,6 +53,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:form, to_form(@default_params, as: :import))
      |> assign(:preview, nil)
      |> assign(:ssh_discovery, nil)
+     |> assign(:subscriptions, [])
      |> assign(:owner_groups, [])
      |> assign(:available_domains, [])
      |> assign(:selected_domains, [])
@@ -81,10 +82,21 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
     case action do
       "apply" ->
-        case apply_import(params) do
+        case apply_import(params, socket.assigns.subscriptions) do
           {:ok, result, selected_domains} ->
-            summary =
-              "Import complete. Created #{result.created_count}, skipped #{result.skipped_existing_count}, failed #{result.failed_count}."
+            subdomain_result = Map.get(result, :subdomain_result)
+
+            domain_summary =
+              "Created #{result.created_count} domains, skipped #{result.skipped_existing_count}."
+
+            subdomain_summary =
+              if subdomain_result do
+                " Subdomains: #{subdomain_result.created_count} created, #{subdomain_result.skipped_count} skipped, #{subdomain_result.failed_count} failed."
+              else
+                ""
+              end
+
+            summary = "Import complete. " <> domain_summary <> subdomain_summary
 
             {:noreply,
              socket
@@ -99,11 +111,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
       _ ->
         case build_preview(params) do
-          {:ok, preview, owner_groups, available_domains, selected_domains, ssh_discovery} ->
+          {:ok, preview, owner_groups, available_domains, selected_domains, ssh_discovery,
+           subscriptions} ->
             {:noreply,
              socket
              |> assign(:preview, preview)
              |> assign(:ssh_discovery, ssh_discovery)
+             |> assign(:subscriptions, subscriptions)
              |> assign(:owner_groups, owner_groups)
              |> assign(:available_domains, available_domains)
              |> assign(:selected_domains, selected_domains)
@@ -119,6 +133,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
              socket
              |> assign(:preview, nil)
              |> assign(:ssh_discovery, nil)
+             |> assign(:subscriptions, [])
              |> assign(:owner_groups, [])
              |> assign(:available_domains, [])
              |> assign(:selected_domains, [])
@@ -336,20 +351,28 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                   </div>
                 </div>
 
-                <div class="mt-3 max-h-64 overflow-y-auto rounded-lg border border-gray-100 dark:border-gray-800">
-                  <label
-                    :for={domain <- @available_domains}
-                    class="flex items-center gap-2 px-3 py-2 border-b border-gray-100 dark:border-gray-800 last:border-b-0 hover:bg-gray-50 dark:hover:bg-gray-800/50"
-                  >
-                    <input
-                      type="checkbox"
-                      name="import[selected_domains][]"
-                      value={domain}
-                      checked={domain in @selected_domains}
-                      class="checkbox checkbox-sm"
-                    />
-                    <span class="text-sm text-gray-800 dark:text-gray-200">{domain}</span>
-                  </label>
+                <div class="mt-3 max-h-80 overflow-y-auto rounded-lg border border-gray-100 dark:border-gray-800">
+                  <%= for domain <- @available_domains do %>
+                    <% sub = Enum.find(@subscriptions, &(&1.domain == domain)) %>
+                    <label class="flex items-center gap-2 px-3 py-2 border-b border-gray-100 dark:border-gray-800 last:border-b-0 hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                      <input
+                        type="checkbox"
+                        name="import[selected_domains][]"
+                        value={domain}
+                        checked={domain in @selected_domains}
+                        class="checkbox checkbox-sm"
+                      />
+                      <div>
+                        <span class="text-sm text-gray-800 dark:text-gray-200">{domain}</span>
+                        <%= if sub && Map.get(sub, :subdomains, []) != [] do %>
+                          <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                            <.icon name="hero-arrow-turn-down-right" class="w-3 h-3 inline" />
+                            {sub.subdomains |> Enum.map(& &1.name) |> Enum.join(", ")}
+                          </p>
+                        <% end %>
+                      </div>
+                    </label>
+                  <% end %>
                 </div>
               </div>
             <% end %>
@@ -389,7 +412,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                 SSH Discovery Summary
               </h2>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                These categories are preview-only right now. Apply still creates missing Hostctl domains.
+                Subdomains are automatically grouped under their parent domain. Apply creates domains and subdomains.
               </p>
             </div>
 
@@ -469,6 +492,44 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               </div>
             </div>
 
+            <%= if @preview[:subdomain_result] && @preview.subdomain_result.planned_count > 0 do %>
+              <div class="rounded-lg border border-indigo-100 dark:border-indigo-900/40 bg-indigo-50/50 dark:bg-indigo-950/20 px-4 py-3">
+                <h3 class="text-sm font-semibold text-indigo-900 dark:text-indigo-200">
+                  Subdomains: {@preview.subdomain_result.planned_count} planned
+                </h3>
+                <div class="mt-2 flex flex-wrap gap-2">
+                  <span
+                    :for={name <- Enum.take(@preview.subdomain_result.planned, 30)}
+                    class="inline-flex items-center px-2 py-1 rounded-md bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 text-xs"
+                  >
+                    {name}
+                  </span>
+                  <span
+                    :if={length(@preview.subdomain_result.planned) > 30}
+                    class="inline-flex items-center px-2 py-1 text-xs text-indigo-500"
+                  >
+                    +{length(@preview.subdomain_result.planned) - 30} more
+                  </span>
+                </div>
+              </div>
+            <% end %>
+
+            <%= if @preview[:subdomain_result] && @preview.subdomain_result.created_count > 0 do %>
+              <div class="rounded-lg border border-emerald-100 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/20 px-4 py-3">
+                <h3 class="text-sm font-semibold text-emerald-900 dark:text-emerald-200">
+                  Subdomains created: {@preview.subdomain_result.created_count}
+                </h3>
+                <div class="mt-2 flex flex-wrap gap-2">
+                  <span
+                    :for={name <- Enum.take(@preview.subdomain_result.created, 30)}
+                    class="inline-flex items-center px-2 py-1 rounded-md bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 text-xs"
+                  >
+                    {name}
+                  </span>
+                </div>
+              </div>
+            <% end %>
+
             <%= if @preview.planned != [] do %>
               <div>
                 <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Would be created</h3>
@@ -505,6 +566,17 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                 </ul>
               </div>
             <% end %>
+
+            <%= if @preview[:subdomain_result] && @preview.subdomain_result.failed != [] do %>
+              <div>
+                <h3 class="text-sm font-semibold text-red-700 dark:text-red-300">
+                  Subdomain Failures
+                </h3>
+                <ul class="mt-2 space-y-1 text-xs text-red-600 dark:text-red-300">
+                  <li :for={err <- @preview.subdomain_result.failed}>{err}</li>
+                </ul>
+              </div>
+            <% end %>
           </div>
         <% end %>
       </div>
@@ -515,33 +587,65 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   defp build_preview(params) do
     source = normalize_string(params["source"])
 
-    with {:ok, names, owner_groups, ssh_discovery} <-
+    with {:ok, names, owner_groups, ssh_discovery, subscriptions} <-
            source_domain_names_with_groups(source, params),
          {:ok, target_scope} <- maybe_target_scope(params["target_user_email"]) do
       selected_names = resolve_selected_domains(names, params)
       ssh_discovery = filter_discovery(ssh_discovery, selected_names)
 
+      # Filter subscriptions to only selected domains
+      selected_subscriptions =
+        if subscriptions != [] do
+          selected_set = MapSet.new(selected_names)
+          Enum.filter(subscriptions, &MapSet.member?(selected_set, &1.domain))
+        else
+          []
+        end
+
       case target_scope do
         nil ->
-          {:ok, dry_preview(selected_names), owner_groups, names, selected_names, ssh_discovery}
+          preview = dry_preview(selected_names, selected_subscriptions)
+
+          {:ok, preview, owner_groups, names, selected_names, ssh_discovery,
+           selected_subscriptions}
 
         %Scope{} = scope ->
-          Importer.import_domains(scope, selected_names, dry_run: true)
+          Importer.import_subscriptions(scope, selected_subscriptions, dry_run: true)
           |> case do
-            {:ok, preview} -> {:ok, preview, owner_groups, names, selected_names, ssh_discovery}
+            {:ok, preview} ->
+              {:ok, preview, owner_groups, names, selected_names, ssh_discovery,
+               selected_subscriptions}
           end
       end
     end
   end
 
-  defp apply_import(params) do
+  defp apply_import(params, stored_subscriptions) do
     source = normalize_string(params["source"])
 
-    with {:ok, names, _owner_groups} <- source_domain_names_with_groups(source, params),
+    with {:ok, names, _owner_groups, _ssh_discovery, subscriptions} <-
+           source_domain_names_with_groups(source, params),
          selected_names <- resolve_selected_domains(names, params),
          :ok <- validate_selected_domains(selected_names),
          {:ok, %Scope{} = target_scope} <- required_target_scope(params["target_user_email"]) do
-      case Importer.import_domains(target_scope, selected_names,
+      # Use stored subscriptions if available, otherwise build from discovered names
+      selected_set = MapSet.new(selected_names)
+
+      import_subs =
+        cond do
+          stored_subscriptions != [] ->
+            Enum.filter(stored_subscriptions, &MapSet.member?(selected_set, &1.domain))
+
+          subscriptions != [] ->
+            Enum.filter(subscriptions, &MapSet.member?(selected_set, &1.domain))
+
+          true ->
+            Enum.map(selected_names, fn name ->
+              %{domain: name, owner_login: nil, owner_type: nil, system_user: nil, subdomains: []}
+            end)
+        end
+
+      case Importer.import_subscriptions(target_scope, import_subs,
              dry_run: false,
              apply_dns_template: normalize_boolean(params["apply_dns_template"])
            ) do
@@ -564,7 +668,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             normalize_string(params["system_user"])
           )
 
-        names = subscriptions |> Enum.map(& &1.domain) |> Enum.uniq() |> Enum.sort()
+        # Merge subdomains under parent domains
+        merged = SSHProbe.merge_subdomains(subscriptions)
+        names = merged |> Enum.map(& &1.domain) |> Enum.uniq() |> Enum.sort()
 
         owner_groups =
           subscriptions
@@ -579,7 +685,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           end)
           |> Enum.sort_by(&{&1.owner_login || "", &1.system_user || ""})
 
-        {:ok, names, owner_groups, nil}
+        {:ok, names, owner_groups, nil, merged}
       end
     end
   end
@@ -597,8 +703,23 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       ]
 
       case Importer.api_domain_names(api_url, auth_opts) do
-        {:ok, names} -> {:ok, names, [], nil}
-        {:error, reason} -> {:error, reason}
+        {:ok, names} ->
+          # API only returns domain names, no subdomain info
+          subscriptions =
+            Enum.map(names, fn name ->
+              %{
+                domain: name,
+                owner_login: nil,
+                owner_type: nil,
+                system_user: nil,
+                subdomains: []
+              }
+            end)
+
+          {:ok, names, [], nil, subscriptions}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -620,6 +741,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       true ->
         with {:ok, %{subscriptions: subscriptions} = ssh_discovery} <-
                SSHProbe.discover(ssh_opts, selected_data_types_from_params(params)) do
+          # subscriptions already have subdomains merged by SSHProbe
           names = subscriptions |> Enum.map(& &1.domain) |> Enum.uniq() |> Enum.sort()
 
           owner_groups =
@@ -635,7 +757,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             end)
             |> Enum.sort_by(&{&1.owner_login || "", &1.system_user || ""})
 
-          {:ok, names, owner_groups, ssh_discovery}
+          {:ok, names, owner_groups, ssh_discovery, subscriptions}
         end
     end
   end
@@ -666,7 +788,12 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     end
   end
 
-  defp dry_preview(names) do
+  defp dry_preview(names, subscriptions) do
+    all_subdomains =
+      Enum.flat_map(subscriptions, fn sub ->
+        Map.get(sub, :subdomains, []) |> Enum.map(& &1.full_name)
+      end)
+
     %{
       dry_run: true,
       total_input: length(names),
@@ -677,7 +804,17 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       planned: names,
       created: [],
       skipped_existing: [],
-      failed: []
+      failed: [],
+      subdomain_result: %{
+        planned: all_subdomains,
+        planned_count: length(all_subdomains),
+        created: [],
+        created_count: 0,
+        skipped: [],
+        skipped_count: 0,
+        failed: [],
+        failed_count: 0
+      }
     }
   end
 

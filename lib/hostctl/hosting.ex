@@ -51,6 +51,10 @@ defmodule Hostctl.Hosting do
     Repo.get_by!(Domain, id: id, user_id: scope.user.id)
   end
 
+  def get_domain_by_name(%Scope{} = scope, name) when is_binary(name) do
+    Repo.get_by(Domain, name: name, user_id: scope.user.id)
+  end
+
   def get_domain_for_admin!(id) do
     Repo.get!(Domain, id) |> Repo.preload(:user)
   end

@@ -16,13 +16,15 @@ defmodule Hostctl.Plesk.SSHProbeTest do
                domain: "nightgrease.net",
                owner_login: "frank",
                owner_type: "reseller",
-               system_user: "nightgrease.net_diruri3oizr"
+               system_user: "nightgrease.net_diruri3oizr",
+               subdomains: []
              },
              %{
                domain: "toasted.network",
                owner_login: "admin",
                owner_type: "customer",
-               system_user: "toasted.network_a5d2uy51xgc"
+               system_user: "toasted.network_a5d2uy51xgc",
+               subdomains: []
              }
            ]
   end
@@ -41,7 +43,8 @@ defmodule Hostctl.Plesk.SSHProbeTest do
                domain: "sithtoast.com",
                owner_login: "admin",
                owner_type: nil,
-               system_user: "sithtoast"
+               system_user: "sithtoast",
+               subdomains: []
              }
            ]
   end
@@ -75,7 +78,8 @@ defmodule Hostctl.Plesk.SSHProbeTest do
                domain: "nightgrease.net",
                owner_login: "frank",
                owner_type: nil,
-               system_user: "nightgrease.net_diruri3oizr"
+               system_user: "nightgrease.net_diruri3oizr",
+               subdomains: []
              }
            ]
 
@@ -136,5 +140,93 @@ defmodule Hostctl.Plesk.SSHProbeTest do
   test "parse_probe_output returns remote probe errors" do
     assert {:error, "SSH discovery failed: subscription_list_failed: must run as root"} =
              SSHProbe.parse_probe_output("ERR\tsubscription_list_failed\tmust run as root\n")
+  end
+
+  describe "merge_subdomains/1" do
+    test "groups subdomains under their parent domain" do
+      subscriptions = [
+        %{domain: "example.com", owner_login: "admin", owner_type: "admin", system_user: "ex"},
+        %{
+          domain: "blog.example.com",
+          owner_login: "admin",
+          owner_type: "admin",
+          system_user: "ex"
+        },
+        %{
+          domain: "shop.example.com",
+          owner_login: "admin",
+          owner_type: "admin",
+          system_user: "ex_shop"
+        },
+        %{
+          domain: "otherdomain.org",
+          owner_login: "frank",
+          owner_type: "customer",
+          system_user: "other"
+        }
+      ]
+
+      result = SSHProbe.merge_subdomains(subscriptions)
+
+      assert length(result) == 2
+
+      example = Enum.find(result, &(&1.domain == "example.com"))
+      assert length(example.subdomains) == 2
+      assert Enum.find(example.subdomains, &(&1.name == "blog"))
+      assert Enum.find(example.subdomains, &(&1.name == "shop"))
+      assert Enum.find(example.subdomains, &(&1.name == "shop")).system_user == "ex_shop"
+
+      other = Enum.find(result, &(&1.domain == "otherdomain.org"))
+      assert other.subdomains == []
+    end
+
+    test "handles deeply nested subdomains by attaching to root" do
+      subscriptions = [
+        %{domain: "example.com", owner_login: "admin", owner_type: nil, system_user: "ex"},
+        %{
+          domain: "sub.example.com",
+          owner_login: "admin",
+          owner_type: nil,
+          system_user: "ex"
+        },
+        %{
+          domain: "deep.sub.example.com",
+          owner_login: "admin",
+          owner_type: nil,
+          system_user: "ex"
+        }
+      ]
+
+      result = SSHProbe.merge_subdomains(subscriptions)
+
+      assert length(result) == 1
+      assert hd(result).domain == "example.com"
+      assert length(hd(result).subdomains) == 2
+
+      names = Enum.map(hd(result).subdomains, & &1.name)
+      assert "deep.sub" in names
+      assert "sub" in names
+    end
+
+    test "keeps standalone domains when no parent exists" do
+      subscriptions = [
+        %{
+          domain: "sub.example.com",
+          owner_login: "admin",
+          owner_type: nil,
+          system_user: "ex"
+        }
+      ]
+
+      result = SSHProbe.merge_subdomains(subscriptions)
+
+      assert length(result) == 1
+      assert hd(result).domain == "sub.example.com"
+      assert hd(result).subdomains == []
+    end
+
+    test "returns empty list for empty input" do
+      assert SSHProbe.merge_subdomains([]) == []
+    end
   end
 end

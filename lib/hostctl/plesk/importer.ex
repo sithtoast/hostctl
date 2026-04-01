@@ -173,6 +173,96 @@ defmodule Hostctl.Plesk.Importer do
      }}
   end
 
+  @doc """
+  Imports domains and subdomains from subscriptions with merged subdomain data.
+
+  This function creates parent domains first, then creates subdomains under them.
+  Subscriptions should already have subdomains merged via `SSHProbe.merge_subdomains/1`.
+
+  Options:
+    - `:dry_run` (default: true)
+    - `:apply_dns_template` (default: false)
+  """
+  def import_subscriptions(%Scope{} = scope, subscriptions, opts \\ [])
+      when is_list(subscriptions) do
+    dry_run = Keyword.get(opts, :dry_run, true)
+
+    # Import parent domains
+    domain_names = Enum.map(subscriptions, & &1.domain)
+    {:ok, domain_result} = import_domains(scope, domain_names, opts)
+
+    # Collect all subdomains with their parent domain reference
+    all_subdomains =
+      Enum.flat_map(subscriptions, fn sub ->
+        sub
+        |> Map.get(:subdomains, [])
+        |> Enum.map(&Map.put(&1, :parent_domain, sub.domain))
+      end)
+
+    subdomain_result =
+      if dry_run do
+        %{
+          planned: Enum.map(all_subdomains, & &1.full_name),
+          planned_count: length(all_subdomains),
+          created: [],
+          created_count: 0,
+          skipped: [],
+          skipped_count: 0,
+          failed: [],
+          failed_count: 0
+        }
+      else
+        do_import_subdomains(scope, all_subdomains)
+      end
+
+    {:ok, Map.put(domain_result, :subdomain_result, subdomain_result)}
+  end
+
+  defp do_import_subdomains(scope, subdomains) do
+    initial = %{created: [], skipped: [], failed: []}
+
+    result =
+      Enum.reduce(subdomains, initial, fn sub, acc ->
+        parent_domain = Hosting.get_domain_by_name(scope, sub.parent_domain)
+
+        cond do
+          is_nil(parent_domain) ->
+            msg = "#{sub.full_name}: parent domain #{sub.parent_domain} not found"
+            %{acc | failed: [msg | acc.failed]}
+
+          subdomain_exists?(parent_domain, sub.name) ->
+            %{acc | skipped: [sub.full_name | acc.skipped]}
+
+          true ->
+            case Hosting.create_subdomain(parent_domain, %{name: sub.name}) do
+              {:ok, _subdomain} ->
+                %{acc | created: [sub.full_name | acc.created]}
+
+              {:error, changeset} ->
+                message = changeset_error_summary(changeset)
+                %{acc | failed: ["#{sub.full_name}: #{message}" | acc.failed]}
+            end
+        end
+      end)
+
+    %{
+      planned: [],
+      planned_count: 0,
+      created: Enum.reverse(result.created),
+      created_count: length(result.created),
+      skipped: Enum.reverse(result.skipped),
+      skipped_count: length(result.skipped),
+      failed: Enum.reverse(result.failed),
+      failed_count: length(result.failed)
+    }
+  end
+
+  defp subdomain_exists?(domain, subdomain_name) do
+    domain
+    |> Hosting.list_subdomains()
+    |> Enum.any?(&(&1.name == subdomain_name))
+  end
+
   @doc false
   def domains_from_object_index_content(content) when is_binary(content) do
     content
