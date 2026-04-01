@@ -3,6 +3,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   alias Hostctl.Accounts
   alias Hostctl.Accounts.Scope
+  alias Hostctl.Plesk
   alias Hostctl.Plesk.Importer
   alias Hostctl.Plesk.SSHProbe
 
@@ -26,6 +27,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     {"subdomains", "Subdomains", "hero-rectangle-group"},
     {"dns", "DNS Records", "hero-globe-alt"},
     {"mail_accounts", "Mail Accounts", "hero-envelope"},
+    {"mail_content", "Mail Content", "hero-inbox-stack"},
     {"databases", "Databases", "hero-circle-stack"},
     {"db_users", "Database Users", "hero-user-circle"},
     {"cron_jobs", "Cron Jobs", "hero-clock"},
@@ -65,6 +67,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:form_params, @default_params)
      |> assign(:form, to_form(@default_params, as: :import))
      |> assign(:phase, :discovery)
+     |> assign(:discovering, false)
+     |> assign(:discover_task_ref, nil)
      |> assign(:ssh_discovery, nil)
      |> assign(:subscriptions, [])
      |> assign(:domain_configs, %{})
@@ -73,7 +77,10 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:creating_account, false)
      |> assign(:new_account_form, to_form(%{"name" => "", "email" => ""}, as: :account))
      |> assign(:data_type_options, @data_type_options)
-     |> assign(:restore_categories, @restore_categories)}
+     |> assign(:restore_categories, @restore_categories)
+     |> assign(:saved_migrations, [])
+     |> assign(:show_saved, false)
+     |> load_saved_migrations()}
   end
 
   # ── Events ─────────────────────────────────────────────────────────────
@@ -97,22 +104,16 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       |> assign(:form_params, params)
       |> assign(:form, to_form(params, as: :import))
 
-    case run_discovery(params) do
-      {:ok, ssh_discovery, subscriptions} ->
-        domain_configs = build_domain_configs(subscriptions, ssh_discovery)
+    # Run discovery asynchronously
+    task =
+      Task.async(fn ->
+        run_discovery(params)
+      end)
 
-        {:noreply,
-         socket
-         |> assign(:phase, :restore)
-         |> assign(:ssh_discovery, ssh_discovery)
-         |> assign(:subscriptions, subscriptions)
-         |> assign(:domain_configs, domain_configs)
-         |> assign(:restore_results, %{})
-         |> put_flash(:info, "Discovered #{length(subscriptions)} domain(s).")}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, reason)}
-    end
+    {:noreply,
+     socket
+     |> assign(:discovering, true)
+     |> assign(:discover_task_ref, task.ref)}
   end
 
   @impl true
@@ -120,6 +121,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     {:noreply,
      socket
      |> assign(:phase, :discovery)
+     |> assign(:discovering, false)
+     |> assign(:discover_task_ref, nil)
      |> assign(:ssh_discovery, nil)
      |> assign(:subscriptions, [])
      |> assign(:domain_configs, %{})
@@ -254,10 +257,12 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         subscription = Enum.find(socket.assigns.subscriptions, &(&1.domain == domain))
         inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, domain)
         apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
+        ssh_opts = build_ssh_opts(socket.assigns.form_params)
 
         case Importer.restore_domain(scope, subscription, inventory,
                categories: categories,
-               apply_dns_template: apply_dns
+               apply_dns_template: apply_dns,
+               ssh_opts: ssh_opts
              ) do
           {:ok, result} ->
             results = Map.put(socket.assigns.restore_results, domain, {:ok, result})
@@ -306,10 +311,12 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             {:ok, scope} ->
               inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, sub.domain)
               apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
+              ssh_opts = build_ssh_opts(socket.assigns.form_params)
 
               case Importer.restore_domain(scope, sub, inventory,
                      categories: categories,
-                     apply_dns_template: apply_dns
+                     apply_dns_template: apply_dns,
+                     ssh_opts: ssh_opts
                    ) do
                 {:ok, result} -> Map.put(acc, sub.domain, {:ok, result})
                 {:error, result} -> Map.put(acc, sub.domain, {:error, result})
@@ -334,6 +341,150 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> put_flash(elem(flash, 0), elem(flash, 1))}
   end
 
+  # ── Save / Load migrations ────────────────────────────────────────────
+
+  @impl true
+  def handle_event("toggle_saved_migrations", _params, socket) do
+    {:noreply, assign(socket, :show_saved, !socket.assigns.show_saved)}
+  end
+
+  @impl true
+  def handle_event("save_migration", %{"name" => name}, socket) do
+    name = normalize_string(name)
+
+    if name == "" do
+      {:noreply, put_flash(socket, :error, "Migration name is required.")}
+    else
+      attrs = %{
+        name: name,
+        source: socket.assigns.form_params["source"],
+        status: migration_status(socket.assigns.restore_results, socket.assigns.subscriptions),
+        source_params: sanitize_source_params(socket.assigns.form_params),
+        subscriptions: serialize_subscriptions(socket.assigns.subscriptions),
+        inventory: serialize_inventory(socket.assigns.ssh_discovery),
+        domain_configs: serialize_domain_configs(socket.assigns.domain_configs),
+        restore_results: serialize_restore_results(socket.assigns.restore_results)
+      }
+
+      case Plesk.create_migration(socket.assigns.current_scope, attrs) do
+        {:ok, _migration} ->
+          {:noreply,
+           socket
+           |> load_saved_migrations()
+           |> put_flash(:info, "Migration \"#{name}\" saved.")}
+
+        {:error, changeset} ->
+          {:noreply,
+           put_flash(socket, :error, "Failed to save: #{changeset_error_summary(changeset)}")}
+      end
+    end
+  end
+
+  @impl true
+  def handle_event("load_migration", %{"id" => id}, socket) do
+    migration = Plesk.get_migration!(socket.assigns.current_scope, id)
+
+    subscriptions = deserialize_subscriptions(migration.subscriptions)
+    ssh_discovery = deserialize_inventory(migration.inventory)
+    domain_configs = deserialize_domain_configs(migration.domain_configs)
+    restore_results = deserialize_restore_results(migration.restore_results)
+
+    # Restore source params (sans passwords)
+    form_params = Map.merge(@default_params, migration.source_params)
+
+    {:noreply,
+     socket
+     |> assign(:phase, :restore)
+     |> assign(:form_params, form_params)
+     |> assign(:form, to_form(form_params, as: :import))
+     |> assign(:ssh_discovery, ssh_discovery)
+     |> assign(:subscriptions, subscriptions)
+     |> assign(:domain_configs, domain_configs)
+     |> assign(:restore_results, restore_results)
+     |> put_flash(:info, "Loaded migration \"#{migration.name}\".")}
+  end
+
+  @impl true
+  def handle_event("delete_migration", %{"id" => id}, socket) do
+    migration = Plesk.get_migration!(socket.assigns.current_scope, id)
+
+    case Plesk.delete_migration(migration) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> load_saved_migrations()
+         |> put_flash(:info, "Migration \"#{migration.name}\" deleted.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to delete migration.")}
+    end
+  end
+
+  @impl true
+  def handle_event("update_migration", %{"id" => id}, socket) do
+    migration = Plesk.get_migration!(socket.assigns.current_scope, id)
+
+    attrs = %{
+      status: migration_status(socket.assigns.restore_results, socket.assigns.subscriptions),
+      domain_configs: serialize_domain_configs(socket.assigns.domain_configs),
+      restore_results: serialize_restore_results(socket.assigns.restore_results)
+    }
+
+    case Plesk.update_migration(migration, attrs) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> load_saved_migrations()
+         |> put_flash(:info, "Migration \"#{migration.name}\" updated.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to update migration.")}
+    end
+  end
+
+  # ── Async task result ──────────────────────────────────────────────────
+
+  @impl true
+  def handle_info({ref, result}, socket) when ref == socket.assigns.discover_task_ref do
+    Process.demonitor(ref, [:flush])
+
+    socket =
+      socket
+      |> assign(:discovering, false)
+      |> assign(:discover_task_ref, nil)
+
+    case result do
+      {:ok, ssh_discovery, subscriptions} ->
+        domain_configs = build_domain_configs(subscriptions, ssh_discovery)
+
+        {:noreply,
+         socket
+         |> assign(:phase, :restore)
+         |> assign(:ssh_discovery, ssh_discovery)
+         |> assign(:subscriptions, subscriptions)
+         |> assign(:domain_configs, domain_configs)
+         |> assign(:restore_results, %{})
+         |> put_flash(:info, "Discovered #{length(subscriptions)} domain(s).")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, reason)}
+    end
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, socket)
+      when ref == socket.assigns.discover_task_ref do
+    {:noreply,
+     socket
+     |> assign(:discovering, false)
+     |> assign(:discover_task_ref, nil)
+     |> put_flash(:error, "Discovery failed unexpectedly: #{inspect(reason)}")}
+  end
+
+  # Ignore unknown messages
+  @impl true
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
   # ── Render ─────────────────────────────────────────────────────────────
 
   @impl true
@@ -341,20 +492,143 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
       <div class="max-w-6xl mx-auto space-y-6">
-        <div>
-          <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Plesk Import</h1>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Discover and selectively restore domains from an extracted Plesk backup, the Plesk API, or a live Plesk server over SSH.
-          </p>
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Plesk Import</h1>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              Discover and selectively restore domains from an extracted Plesk backup, the Plesk API, or a live Plesk server over SSH.
+            </p>
+          </div>
+          <button
+            id="toggle-saved-btn"
+            type="button"
+            phx-click="toggle_saved_migrations"
+            class={[
+              "inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+              if(@show_saved,
+                do:
+                  "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300",
+                else:
+                  "border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+              )
+            ]}
+          >
+            <.icon name="hero-bookmark" class="w-4 h-4" /> Saved
+            <span
+              :if={@saved_migrations != []}
+              class="text-[10px] font-semibold rounded-full px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"
+            >
+              {length(@saved_migrations)}
+            </span>
+          </button>
         </div>
 
-        <%= if @phase == :discovery do %>
-          {render_discovery_phase(assigns)}
+        <%= if @show_saved do %>
+          {render_saved_migrations(assigns)}
+        <% end %>
+
+        <%= if @discovering do %>
+          {render_discovering(assigns)}
         <% else %>
-          {render_restore_phase(assigns)}
+          <%= if @phase == :discovery do %>
+            {render_discovery_phase(assigns)}
+          <% else %>
+            {render_restore_phase(assigns)}
+          <% end %>
         <% end %>
       </div>
     </Layouts.app>
+    """
+  end
+
+  # ── Discovering progress ───────────────────────────────────────────────
+
+  defp render_discovering(assigns) do
+    ~H"""
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-8">
+      <div class="flex flex-col items-center justify-center gap-4">
+        <div class="relative">
+          <div class="w-12 h-12 rounded-full border-4 border-gray-200 dark:border-gray-700"></div>
+          <div class="absolute inset-0 w-12 h-12 rounded-full border-4 border-t-indigo-500 animate-spin">
+          </div>
+        </div>
+        <div class="text-center">
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Discovering...</h3>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            Connecting to the remote server and inventorying domains, mail, databases, and more.
+          </p>
+        </div>
+        <div class="w-full max-w-sm">
+          <div class="h-1.5 w-full rounded-full bg-gray-100 dark:bg-gray-800 overflow-hidden">
+            <div class="h-full rounded-full bg-indigo-500 animate-pulse" style="width: 100%"></div>
+          </div>
+        </div>
+        <p class="text-[11px] text-gray-400 dark:text-gray-500">
+          This may take a few seconds depending on the server size.
+        </p>
+      </div>
+    </div>
+    """
+  end
+
+  # ── Saved migrations ──────────────────────────────────────────────────
+
+  defp render_saved_migrations(assigns) do
+    ~H"""
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5">
+      <h2 class="text-sm font-semibold text-gray-900 dark:text-white mb-3">
+        <.icon name="hero-bookmark" class="w-4 h-4 inline -mt-0.5" /> Saved Migrations
+      </h2>
+      <%= if @saved_migrations == [] do %>
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          No saved migrations yet. Run a discovery and save it to resume later.
+        </p>
+      <% else %>
+        <div class="space-y-2">
+          <div
+            :for={m <- @saved_migrations}
+            class="flex items-center justify-between rounded-lg border border-gray-100 dark:border-gray-800 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+          >
+            <div class="flex items-center gap-3 min-w-0">
+              <span class={[
+                "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold shrink-0",
+                migration_status_class(m.status)
+              ]}>
+                {m.status}
+              </span>
+              <div class="min-w-0">
+                <p class="text-sm font-medium text-gray-900 dark:text-white truncate">{m.name}</p>
+                <p class="text-[11px] text-gray-400 dark:text-gray-500">
+                  {m.source} · {length(m.subscriptions)} domain(s) · {Calendar.strftime(
+                    m.updated_at,
+                    "%b %d, %Y %H:%M"
+                  )}
+                </p>
+              </div>
+            </div>
+            <div class="flex items-center gap-1.5 shrink-0 ml-3">
+              <button
+                type="button"
+                phx-click="load_migration"
+                phx-value-id={m.id}
+                class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
+              >
+                <.icon name="hero-arrow-up-tray" class="w-3.5 h-3.5" /> Load
+              </button>
+              <button
+                type="button"
+                phx-click="delete_migration"
+                phx-value-id={m.id}
+                data-confirm={"Delete migration \"#{m.name}\"?"}
+                class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors"
+              >
+                <.icon name="hero-trash" class="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    </div>
     """
   end
 
@@ -520,9 +794,42 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           <button
             id="plesk-discover-btn"
             type="submit"
-            class="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors shadow-sm"
+            disabled={@discovering}
+            class={[
+              "inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-white text-sm font-medium transition-colors shadow-sm",
+              if(@discovering,
+                do: "bg-indigo-400 cursor-not-allowed",
+                else: "bg-indigo-600 hover:bg-indigo-500"
+              )
+            ]}
           >
-            <.icon name="hero-magnifying-glass" class="w-4 h-4" /> Discover
+            <%= if @discovering do %>
+              <svg
+                class="animate-spin w-4 h-4"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  class="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  stroke-width="4"
+                >
+                </circle>
+                <path
+                  class="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                >
+                </path>
+              </svg>
+              Discovering...
+            <% else %>
+              <.icon name="hero-magnifying-glass" class="w-4 h-4" /> Discover
+            <% end %>
           </button>
         </div>
       </.form>
@@ -674,6 +981,26 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           </button>
         </div>
       </div>
+    </div>
+
+    <%!-- Save migration --%>
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 px-6 py-4">
+      <form id="save-migration-form" phx-submit="save_migration" class="flex items-center gap-3">
+        <.icon name="hero-bookmark" class="w-4 h-4 text-gray-400 shrink-0" />
+        <input
+          type="text"
+          name="name"
+          placeholder="Migration name (e.g. &quot;Production server 2026-04&quot;)"
+          class="block w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+        />
+        <button
+          id="save-migration-btn"
+          type="submit"
+          class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors shrink-0"
+        >
+          <.icon name="hero-bookmark" class="w-4 h-4" /> Save
+        </button>
+      </form>
     </div>
 
     <%!-- Assign all domains to one account --%>
@@ -1133,6 +1460,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       "subdomains" => subscription |> Map.get(:subdomains, []) |> length(),
       "dns" => 0,
       "mail_accounts" => 0,
+      "mail_content" => 0,
       "databases" => 0,
       "db_users" => 0,
       "cron_jobs" => 0,
@@ -1150,6 +1478,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       "dns" => inv |> Map.get("dns", []) |> Enum.count(&(&1.domain == domain)),
       "mail_accounts" =>
         inv |> Map.get("mail_accounts", []) |> Enum.count(&(&1.domain == domain)),
+      "mail_content" => inv |> Map.get("mail_content", []) |> Enum.count(&(&1.domain == domain)),
       "databases" => inv |> Map.get("databases", []) |> Enum.count(&(&1.domain == domain)),
       "db_users" => inv |> Map.get("db_users", []) |> Enum.count(&(&1.domain == domain)),
       "cron_jobs" => inv |> Map.get("cron_jobs", []) |> Enum.count(&(&1.domain == domain)),
@@ -1167,6 +1496,23 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       filtered = Enum.filter(items, fn item -> Map.get(item, :domain) == domain end)
       {key, filtered}
     end)
+  end
+
+  defp build_ssh_opts(params) do
+    case params["source"] do
+      "ssh" ->
+        %{
+          host: normalize_string(params["ssh_host"]),
+          port: normalize_string(params["ssh_port"]),
+          username: normalize_string(params["ssh_username"]),
+          auth_method: normalize_string(params["ssh_auth_method"]),
+          private_key_path: normalize_string(params["ssh_private_key_path"]),
+          password: normalize_string(params["ssh_password"])
+        }
+
+      _ ->
+        nil
+    end
   end
 
   # ── Account & scope helpers ────────────────────────────────────────────
@@ -1266,4 +1612,197 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       "#{field}: #{Enum.join(errors, ", ")}"
     end)
   end
+
+  # ── Migration persistence helpers ──────────────────────────────────────
+
+  defp load_saved_migrations(socket) do
+    migrations = Plesk.list_migrations(socket.assigns.current_scope)
+    assign(socket, :saved_migrations, migrations)
+  end
+
+  defp sanitize_source_params(params) do
+    # Strip passwords/keys from saved params for security
+    params
+    |> Map.take([
+      "source",
+      "backup_path",
+      "owner_login",
+      "system_user",
+      "api_url",
+      "ssh_host",
+      "ssh_port",
+      "ssh_username",
+      "ssh_auth_method",
+      "apply_dns_template"
+    ])
+  end
+
+  defp serialize_subscriptions(subscriptions) do
+    Enum.map(subscriptions, fn sub ->
+      sub
+      |> Map.from_struct()
+      |> Map.new(fn {k, v} -> {to_string(k), v} end)
+    end)
+  rescue
+    # subscriptions may already be plain maps
+    _ -> Enum.map(subscriptions, &ensure_string_keys/1)
+  end
+
+  defp serialize_inventory(nil), do: %{}
+
+  defp serialize_inventory(discovery) do
+    Map.new(discovery.inventory, fn {key, items} ->
+      {key, Enum.map(items, &ensure_string_keys/1)}
+    end)
+  end
+
+  defp serialize_domain_configs(configs) do
+    Map.new(configs, fn {domain, config} ->
+      {domain,
+       %{
+         "account_email" => Map.get(config, :account_email, ""),
+         "categories" => config |> Map.get(:categories, MapSet.new()) |> MapSet.to_list(),
+         "inventory_counts" => config |> Map.get(:inventory_counts, %{}) |> ensure_string_keys()
+       }}
+    end)
+  end
+
+  defp serialize_restore_results(results) do
+    Map.new(results, fn {domain, {status, data}} ->
+      categories =
+        data
+        |> Map.get(:categories, %{})
+        |> Map.new(fn {cat, r} -> {cat, ensure_string_keys(r)} end)
+
+      {domain,
+       %{
+         "status" => to_string(status),
+         "domain_status" => serialize_domain_status(data.domain_status),
+         "categories" => categories
+       }}
+    end)
+  end
+
+  defp serialize_domain_status(:created), do: "created"
+  defp serialize_domain_status(:exists), do: "exists"
+  defp serialize_domain_status({:failed, reason}), do: %{"failed" => reason}
+  defp serialize_domain_status(other), do: inspect(other)
+
+  defp deserialize_subscriptions(subscriptions) do
+    Enum.map(subscriptions, fn sub ->
+      sub = ensure_atom_keys(sub)
+
+      subdomains =
+        sub
+        |> Map.get(:subdomains, [])
+        |> Enum.map(&ensure_atom_keys/1)
+
+      Map.put(sub, :subdomains, subdomains)
+    end)
+  end
+
+  defp deserialize_inventory(inventory) when inventory == %{}, do: nil
+
+  defp deserialize_inventory(inventory) do
+    inv =
+      Map.new(inventory, fn {key, items} ->
+        {key, Enum.map(items, &ensure_atom_keys/1)}
+      end)
+
+    %{inventory: inv, subscriptions: [], warnings: []}
+  end
+
+  defp deserialize_domain_configs(configs) do
+    Map.new(configs, fn {domain, config} ->
+      config = ensure_atom_keys(config)
+
+      categories =
+        config
+        |> Map.get(:categories, [])
+        |> MapSet.new()
+
+      inventory_counts =
+        config
+        |> Map.get(:inventory_counts, %{})
+        |> ensure_string_keys()
+
+      {domain,
+       %{
+         categories: categories,
+         account_email: Map.get(config, :account_email, ""),
+         inventory_counts: inventory_counts
+       }}
+    end)
+  end
+
+  defp deserialize_restore_results(results) when results == %{}, do: %{}
+
+  defp deserialize_restore_results(results) do
+    Map.new(results, fn {domain, data} ->
+      data = ensure_atom_keys(data)
+      status = if data.status == "ok", do: :ok, else: :error
+
+      domain_status =
+        case data.domain_status do
+          "created" -> :created
+          "exists" -> :exists
+          %{"failed" => reason} -> {:failed, reason}
+          other -> {:failed, inspect(other)}
+        end
+
+      categories =
+        data
+        |> Map.get(:categories, %{})
+        |> Map.new(fn {cat, r} -> {cat, ensure_atom_keys(r)} end)
+
+      {domain, {status, %{domain: domain, domain_status: domain_status, categories: categories}}}
+    end)
+  end
+
+  defp migration_status(restore_results, subscriptions) do
+    total = length(subscriptions)
+
+    cond do
+      map_size(restore_results) == 0 -> "discovered"
+      map_size(restore_results) < total -> "partial"
+      Enum.all?(restore_results, fn {_, {s, _}} -> s == :ok end) -> "completed"
+      true -> "partial"
+    end
+  end
+
+  defp migration_status_class("discovered"),
+    do: "bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300"
+
+  defp migration_status_class("in_progress"),
+    do: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300"
+
+  defp migration_status_class("completed"),
+    do: "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300"
+
+  defp migration_status_class("partial"),
+    do: "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300"
+
+  defp migration_status_class(_),
+    do: "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"
+
+  defp ensure_string_keys(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {to_string(k), v} end)
+  end
+
+  defp ensure_string_keys(other), do: other
+
+  defp ensure_atom_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {k, v} when is_binary(k) ->
+        {String.to_existing_atom(k), v}
+
+      {k, v} ->
+        {k, v}
+    end)
+  rescue
+    # Fall back to string keys if atoms don't exist
+    _ -> map
+  end
+
+  defp ensure_atom_keys(other), do: other
 end
