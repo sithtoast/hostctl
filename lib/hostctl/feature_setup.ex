@@ -122,6 +122,26 @@ defmodule Hostctl.FeatureSetup do
       services: ["mariadb"],
       setup_fn: :setup_mariadb,
       conflicts: ["mysql"]
+    },
+    %{
+      key: "fail2ban",
+      label: "fail2ban",
+      description:
+        "Intrusion prevention that monitors log files and temporarily bans IPs with too many failed authentication attempts. Protects SSH, FTP, and Nginx.",
+      icon: "hero-shield-exclamation",
+      packages: ["fail2ban"],
+      services: ["fail2ban"],
+      setup_fn: :setup_fail2ban
+    },
+    %{
+      key: "spamassassin",
+      label: "SpamAssassin",
+      description:
+        "Mail spam filter using heuristics, Bayesian learning, and DNS blocklists. Integrates with Postfix to tag or reject incoming spam.",
+      icon: "hero-no-symbol",
+      packages: ["spamassassin", "spamc"],
+      services: [],
+      setup_fn: :setup_spamassassin
     }
   ]
 
@@ -963,6 +983,98 @@ defmodule Hostctl.FeatureSetup do
 
   defp random_des_key do
     :crypto.strong_rand_bytes(24) |> Base.encode64() |> binary_part(0, 24)
+  end
+
+  @doc false
+  def setup_fail2ban(key) do
+    broadcast(key, :log, "Configuring fail2ban jails...")
+
+    nginx_installed? = services_active?(["nginx"])
+
+    jail_local =
+      """
+      [DEFAULT]
+      bantime  = 1h
+      findtime = 10m
+      maxretry = 5
+
+      [sshd]
+      enabled = true
+
+      [vsftpd]
+      enabled = true
+      """ <>
+        if nginx_installed? do
+          """
+
+          [nginx-http-auth]
+          enabled = true
+          logpath = /var/log/nginx/error.log
+
+          [nginx-botsearch]
+          enabled  = true
+          logpath  = /var/log/nginx/access.log
+          maxretry = 2
+          """
+        else
+          ""
+        end
+
+    with :ok <- write_file_via_sudo(key, "/etc/fail2ban/jail.local", jail_local),
+         :ok <- run_cmd(key, "systemctl", ["reload-or-restart", "fail2ban"]) do
+      broadcast(key, :log, "fail2ban configured successfully.")
+      broadcast(key, :log, "Active jails: sshd, vsftpd#{if nginx_installed?, do: ", nginx-http-auth, nginx-botsearch", else: ""}.")
+      :ok
+    end
+  end
+
+  @doc false
+  def setup_spamassassin(key) do
+    broadcast(key, :log, "Configuring SpamAssassin...")
+
+    local_cf = """
+    rewrite_header Subject [SPAM]
+    required_score 5.0
+    use_bayes 1
+    bayes_auto_learn 1
+    """
+
+    with :ok <- write_file_via_sudo(key, "/etc/spamassassin/local.cf", local_cf),
+         :ok <- enable_spamassassin_service(key) do
+      broadcast(key, :log, "SpamAssassin configured successfully.")
+
+      if services_active?(["postfix"]) do
+        broadcast(
+          key,
+          :log,
+          "Postfix detected — add `spamc -s 5120000 -E -u spamassassin` as a content_filter to route mail through spamd."
+        )
+      end
+
+      :ok
+    end
+  end
+
+  defp enable_spamassassin_service(key) do
+    broadcast(key, :log, "Starting SpamAssassin daemon...")
+
+    # Service unit name differs: Debian uses spamd, Ubuntu/older uses spamassassin
+    service =
+      cond do
+        unit_exists?("spamd") -> "spamd"
+        unit_exists?("spamassassin") -> "spamassassin"
+        true -> "spamd"
+      end
+
+    run_cmd(key, "systemctl", ["enable", "--now", service])
+  end
+
+  defp unit_exists?(name) do
+    case System.cmd("systemctl", ["list-unit-files", "#{name}.service"],
+           stderr_to_stdout: true
+         ) do
+      {output, _} -> String.contains?(output, "#{name}.service")
+    end
   end
 
   # ---------------------------------------------------------------------------

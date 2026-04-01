@@ -39,6 +39,8 @@ SKIP_POSTGRES=false
 SKIP_MYSQL=false
 MYSQL_FLAVOR="mysql"  # or 'mariadb'
 SKIP_PHP=false
+SKIP_FAIL2BAN=false
+SKIP_SPAMASSASSIN=false
 RECONFIGURE=false
 CLOUDFLARE_PROXY=false
 ASSUME_YES=false
@@ -92,6 +94,8 @@ usage() {
   echo -e "  ${CYAN}    --skip-postgres${NC}        Skip PostgreSQL installation (use existing)"
   echo -e "  ${CYAN}    --skip-mysql${NC}           Skip MySQL/MariaDB installation"
   echo -e "  ${CYAN}    --skip-php${NC}             Skip PHP-FPM installation"
+  echo -e "  ${CYAN}    --skip-fail2ban${NC}        Skip fail2ban installation and configuration"
+  echo -e "  ${CYAN}    --skip-spamassassin${NC}    Skip SpamAssassin installation"
   echo -e ""
   echo -e "${BOLD}AUTOMATION FLAGS${NC}"
   echo -e "  ${CYAN}-y, --yes${NC}                  Skip confirmation prompts (assume yes)"
@@ -172,6 +176,14 @@ interactive_setup() {
   read -rp "$(echo -e "  ${BOLD}Skip PHP-FPM installation?${NC} [$([ "$SKIP_PHP" == true ] && echo 'yes' || echo 'no')]: ")" _in
   case "${_in,,}" in y|yes) SKIP_PHP=true ;; n|no) SKIP_PHP=false ;; esac
 
+  # Skip fail2ban
+  read -rp "$(echo -e "  ${BOLD}Skip fail2ban installation?${NC} [$([ "$SKIP_FAIL2BAN" == true ] && echo 'yes' || echo 'no')]: ")" _in
+  case "${_in,,}" in y|yes) SKIP_FAIL2BAN=true ;; n|no) SKIP_FAIL2BAN=false ;; esac
+
+  # Skip SpamAssassin
+  read -rp "$(echo -e "  ${BOLD}Skip SpamAssassin installation?${NC} [$([ "$SKIP_SPAMASSASSIN" == true ] && echo 'yes' || echo 'no')]: ")" _in
+  case "${_in,,}" in y|yes) SKIP_SPAMASSASSIN=true ;; n|no) SKIP_SPAMASSASSIN=false ;; esac
+
   echo -e ""
 }
 
@@ -190,8 +202,10 @@ for arg in "$@"; do
     --skip-postgres)  SKIP_POSTGRES=true ;;
     --skip-mysql)     SKIP_MYSQL=true ;;
     --db-flavor=*)    MYSQL_FLAVOR="${arg#*=}" ;;
-    --skip-php)       SKIP_PHP=true ;;
-    --reconfigure)    RECONFIGURE=true ;;
+    --skip-php)           SKIP_PHP=true ;;
+    --skip-fail2ban)      SKIP_FAIL2BAN=true ;;
+    --skip-spamassassin)  SKIP_SPAMASSASSIN=true ;;
+    --reconfigure)        RECONFIGURE=true ;;
     --cloudflare)     CLOUDFLARE_PROXY=true ;;
     --interactive|-i) INTERACTIVE=true ;;
     --yes|-y)         ASSUME_YES=true ;;
@@ -361,6 +375,8 @@ echo -e "  Database      : $DB_NAME"
 [[ "$SKIP_POSTGRES" == true ]]    && echo -e "  PostgreSQL    : ${YELLOW}skipped (using existing)${NC}"
 [[ "$SKIP_MYSQL" == true ]]       && echo -e "  Database      : ${YELLOW}skipped${NC}"
 [[ "$SKIP_PHP" == true ]]         && echo -e "  PHP-FPM       : ${YELLOW}skipped${NC}"
+[[ "$SKIP_FAIL2BAN" == true ]]     && echo -e "  fail2ban      : ${YELLOW}skipped${NC}"
+[[ "$SKIP_SPAMASSASSIN" == true ]] && echo -e "  SpamAssassin  : ${YELLOW}skipped${NC}"
 echo ""
 confirm "$(echo -e "${BOLD}Proceed? [Y/n] ${NC}")" "Y" || { echo "Aborted."; exit 0; }
 
@@ -453,6 +469,16 @@ if [[ "$SKIP_PHP" == false ]]; then
       >/dev/null 2>&1 || warn "Some PHP ${_ver} packages unavailable — continuing"
   done
   success "PHP-FPM packages cached"
+fi
+
+if [[ "$SKIP_FAIL2BAN" == false ]] || [[ "$SKIP_SPAMASSASSIN" == false ]]; then
+  _sec_pkgs=""
+  [[ "$SKIP_FAIL2BAN" == false ]]     && _sec_pkgs="$_sec_pkgs fail2ban"
+  [[ "$SKIP_SPAMASSASSIN" == false ]] && _sec_pkgs="$_sec_pkgs spamassassin spamc"
+  info "Pre-downloading security packages..."
+  # shellcheck disable=SC2086
+  apt-get install -y --no-install-recommends --download-only $_sec_pkgs >/dev/null
+  success "Security packages cached"
 fi
 
 success "All prerequisites downloaded. No system changes made yet -- starting installation."
@@ -658,6 +684,84 @@ if [[ "$SKIP_PHP" == false ]]; then
       success "PHP ${_ver} already installed"
     fi
   done
+fi
+
+# 2j. fail2ban -----------------------------------------------------------------
+if [[ "$SKIP_FAIL2BAN" == false ]]; then
+  step "Installing fail2ban"
+
+  if ! command -v fail2ban-client &>/dev/null; then
+    apt-get install -y --no-install-recommends fail2ban
+    success "fail2ban installed"
+  else
+    success "fail2ban already installed"
+  fi
+
+  # Write jail.local — only enable nginx jails when nginx is present
+  {
+    cat <<'F2B'
+[DEFAULT]
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled = true
+F2B
+
+    if [[ "$SKIP_NGINX" == false ]]; then
+      cat <<'F2B'
+
+[nginx-http-auth]
+enabled = true
+logpath = /var/log/nginx/error.log
+
+[nginx-botsearch]
+enabled  = true
+logpath  = /var/log/nginx/access.log
+maxretry = 2
+F2B
+    fi
+
+    cat <<'F2B'
+
+[vsftpd]
+enabled = true
+F2B
+  } > /etc/fail2ban/jail.local
+
+  systemctl enable --now fail2ban
+  success "fail2ban configured and started"
+fi
+
+# 2k. SpamAssassin -------------------------------------------------------------
+if [[ "$SKIP_SPAMASSASSIN" == false ]]; then
+  step "Installing SpamAssassin"
+
+  if ! command -v spamassassin &>/dev/null; then
+    apt-get install -y --no-install-recommends spamassassin spamc
+    success "SpamAssassin installed"
+  else
+    success "SpamAssassin already installed"
+  fi
+
+  # Basic local configuration
+  cat > /etc/spamassassin/local.cf <<'SACF'
+rewrite_header Subject [SPAM]
+required_score 5.0
+use_bayes 1
+bayes_auto_learn 1
+SACF
+
+  # Enable and start the daemon (service name varies across distros)
+  if systemctl list-unit-files 2>/dev/null | grep -q '^spamd\.service'; then
+    systemctl enable --now spamd
+  elif systemctl list-unit-files 2>/dev/null | grep -q '^spamassassin\.service'; then
+    systemctl enable --now spamassassin
+  else
+    warn "Could not detect SpamAssassin service unit — start it manually: systemctl start spamd"
+  fi
+  success "SpamAssassin configured and daemon started"
 fi
 
 # ==============================================================================
