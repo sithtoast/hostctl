@@ -53,6 +53,7 @@ export HOME=/root
 export MIX_ENV=prod
 
 mix deps.get --only prod
+mix deps.compile mime --force
 mix assets.deploy
 mix compile
 mix release --overwrite
