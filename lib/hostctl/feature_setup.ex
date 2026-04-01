@@ -1023,7 +1023,13 @@ defmodule Hostctl.FeatureSetup do
     with :ok <- write_file_via_sudo(key, "/etc/fail2ban/jail.local", jail_local),
          :ok <- run_cmd(key, "systemctl", ["reload-or-restart", "fail2ban"]) do
       broadcast(key, :log, "fail2ban configured successfully.")
-      broadcast(key, :log, "Active jails: sshd, vsftpd#{if nginx_installed?, do: ", nginx-http-auth, nginx-botsearch", else: ""}.")
+
+      broadcast(
+        key,
+        :log,
+        "Active jails: sshd, vsftpd#{if nginx_installed?, do: ", nginx-http-auth, nginx-botsearch", else: ""}."
+      )
+
       :ok
     end
   end
@@ -1070,9 +1076,7 @@ defmodule Hostctl.FeatureSetup do
   end
 
   defp unit_exists?(name) do
-    case System.cmd("systemctl", ["list-unit-files", "#{name}.service"],
-           stderr_to_stdout: true
-         ) do
+    case System.cmd("systemctl", ["list-unit-files", "#{name}.service"], stderr_to_stdout: true) do
       {output, _} -> String.contains?(output, "#{name}.service")
     end
   end

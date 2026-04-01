@@ -168,6 +168,20 @@ defmodule HostctlWeb.DomainLive.Show do
     end
   end
 
+  def handle_event("cancel_ssl", _params, socket) do
+    case Hosting.delete_ssl_certificate(socket.assigns.ssl_cert) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> assign(:ssl_cert, nil)
+         |> stream(:ssl_log_lines, [], reset: true)
+         |> put_flash(:info, "SSL certificate request cancelled.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not cancel SSL request.")}
+    end
+  end
+
   def handle_event("request_ssl", %{"ssl_certificate" => params}, socket) do
     domain = socket.assigns.domain
     email = params["email"]
@@ -874,6 +888,16 @@ defmodule HostctlWeb.DomainLive.Show do
                       <% end %>
                     </p>
                   </div>
+                  <%= if @ssl_cert.status == "pending" do %>
+                    <button
+                      id="cancel-ssl-btn"
+                      phx-click="cancel_ssl"
+                      data-confirm="Cancel this SSL request and remove the pending certificate?"
+                      class="ml-auto text-xs text-red-500 hover:text-red-600 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  <% end %>
                 </div>
                 <%= if @ssl_cert.expires_at do %>
                   <p class="text-sm text-gray-600 dark:text-gray-400">
