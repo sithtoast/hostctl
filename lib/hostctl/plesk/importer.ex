@@ -263,6 +263,304 @@ defmodule Hostctl.Plesk.Importer do
     |> Enum.any?(&(&1.name == subdomain_name))
   end
 
+  @restore_categories [
+    "subdomains",
+    "dns",
+    "mail_accounts",
+    "databases",
+    "db_users",
+    "cron_jobs",
+    "ftp_accounts",
+    "ssl_certificates"
+  ]
+
+  @doc """
+  Restores discovered inventory data for a single domain.
+
+  Creates the domain if it doesn't exist, then restores selected categories
+  from the discovery inventory.
+
+  `inventory` should be the discovery inventory already filtered for this domain.
+  `subscription` should be the subscription map for this domain (with optional subdomains).
+
+  Options:
+    - `:categories` - list of category keys to restore (default: all categories)
+    - `:apply_dns_template` - whether to apply DNS template on domain creation (default: false)
+    - `:dry_run` - if true, returns a plan without writing (default: false)
+  """
+  def restore_domain(%Scope{} = scope, subscription, inventory, opts \\ [])
+      when is_map(subscription) and is_map(inventory) do
+    categories = Keyword.get(opts, :categories, @restore_categories)
+    apply_dns_template = Keyword.get(opts, :apply_dns_template, false)
+    dry_run = Keyword.get(opts, :dry_run, false)
+    domain_name = subscription.domain
+
+    result = %{
+      domain: domain_name,
+      domain_status: nil,
+      categories: %{}
+    }
+
+    if dry_run do
+      {:ok, build_restore_plan(scope, subscription, inventory, categories, apply_dns_template)}
+    else
+      do_restore_domain(scope, subscription, inventory, categories, apply_dns_template, result)
+    end
+  end
+
+  defp build_restore_plan(scope, subscription, inventory, categories, _apply_dns_template) do
+    domain_name = subscription.domain
+    existing_domain = Hosting.get_domain_by_name(scope, domain_name)
+
+    domain_status =
+      if existing_domain, do: :exists, else: :will_create
+
+    category_plans =
+      Enum.reduce(categories, %{}, fn category, acc ->
+        count = plan_category_count(category, subscription, inventory)
+        Map.put(acc, category, %{planned: count, status: :planned})
+      end)
+
+    %{domain: domain_name, domain_status: domain_status, categories: category_plans}
+  end
+
+  defp plan_category_count("subdomains", subscription, _inventory) do
+    subscription |> Map.get(:subdomains, []) |> length()
+  end
+
+  defp plan_category_count(category, _subscription, inventory) do
+    inventory |> Map.get(category, []) |> length()
+  end
+
+  defp do_restore_domain(scope, subscription, inventory, categories, apply_dns_template, result) do
+    domain_name = subscription.domain
+
+    # Ensure domain exists
+    {domain, domain_status} =
+      case Hosting.get_domain_by_name(scope, domain_name) do
+        nil ->
+          case Hosting.create_domain(scope, %{
+                 name: domain_name,
+                 apply_dns_template: apply_dns_template
+               }) do
+            {:ok, domain} -> {domain, :created}
+            {:error, cs} -> {nil, {:failed, changeset_error_summary(cs)}}
+          end
+
+        existing ->
+          {existing, :exists}
+      end
+
+    result = %{result | domain_status: domain_status}
+
+    case domain do
+      nil ->
+        {:error, result}
+
+      %{} ->
+        category_results =
+          Enum.reduce(categories, %{}, fn category, acc ->
+            cat_result = restore_category(category, domain, subscription, inventory)
+            Map.put(acc, category, cat_result)
+          end)
+
+        {:ok, %{result | categories: category_results}}
+    end
+  end
+
+  defp restore_category("subdomains", domain, subscription, _inventory) do
+    subs = Map.get(subscription, :subdomains, [])
+    do_restore_items(subs, fn sub -> restore_subdomain(domain, sub) end)
+  end
+
+  defp restore_category("dns", _domain, _subscription, inventory) do
+    # DNS records from Plesk are counts only in the probe; skip if no detail
+    records = Map.get(inventory, "dns", [])
+
+    if records == [] do
+      %{created: 0, skipped: 0, failed: 0, errors: []}
+    else
+      %{
+        created: 0,
+        skipped: 0,
+        failed: 0,
+        errors: [],
+        note: "DNS record detail import not yet supported from SSH probe"
+      }
+    end
+  end
+
+  defp restore_category("mail_accounts", domain, _subscription, inventory) do
+    accounts = Map.get(inventory, "mail_accounts", [])
+    do_restore_items(accounts, fn item -> restore_mail_account(domain, item) end)
+  end
+
+  defp restore_category("databases", domain, _subscription, inventory) do
+    dbs = Map.get(inventory, "databases", [])
+    do_restore_items(dbs, fn item -> restore_database(domain, item) end)
+  end
+
+  defp restore_category("db_users", domain, _subscription, inventory) do
+    users = Map.get(inventory, "db_users", [])
+    do_restore_items(users, fn item -> restore_db_user(domain, item) end)
+  end
+
+  defp restore_category("cron_jobs", _domain, _subscription, inventory) do
+    jobs = Map.get(inventory, "cron_jobs", [])
+
+    if jobs == [] do
+      %{created: 0, skipped: 0, failed: 0, errors: []}
+    else
+      %{
+        created: 0,
+        skipped: 0,
+        failed: 0,
+        errors: [],
+        note: "Cron job detail import not yet supported (only counts discovered)"
+      }
+    end
+  end
+
+  defp restore_category("ftp_accounts", domain, _subscription, inventory) do
+    accounts = Map.get(inventory, "ftp_accounts", [])
+    do_restore_items(accounts, fn item -> restore_ftp_account(domain, item) end)
+  end
+
+  defp restore_category("ssl_certificates", _domain, _subscription, inventory) do
+    certs = Map.get(inventory, "ssl_certificates", [])
+
+    if certs == [] do
+      %{created: 0, skipped: 0, failed: 0, errors: []}
+    else
+      %{
+        created: 0,
+        skipped: 0,
+        failed: 0,
+        errors: [],
+        note: "SSL certificate content import not yet supported (only names discovered)"
+      }
+    end
+  end
+
+  defp restore_category(_category, _domain, _subscription, _inventory) do
+    %{created: 0, skipped: 0, failed: 0, errors: []}
+  end
+
+  defp do_restore_items(items, restore_fn) do
+    Enum.reduce(items, %{created: 0, skipped: 0, failed: 0, errors: []}, fn item, acc ->
+      case restore_fn.(item) do
+        :created -> %{acc | created: acc.created + 1}
+        :skipped -> %{acc | skipped: acc.skipped + 1}
+        {:failed, reason} -> %{acc | failed: acc.failed + 1, errors: [reason | acc.errors]}
+      end
+    end)
+  end
+
+  defp restore_subdomain(domain, sub) do
+    if subdomain_exists?(domain, sub.name) do
+      :skipped
+    else
+      case Hosting.create_subdomain(domain, %{name: sub.name}) do
+        {:ok, _} -> :created
+        {:error, cs} -> {:failed, "#{sub.full_name}: #{changeset_error_summary(cs)}"}
+      end
+    end
+  end
+
+  defp restore_mail_account(domain, item) do
+    username =
+      item.address
+      |> String.split("@")
+      |> List.first()
+
+    existing =
+      domain
+      |> Hosting.list_email_accounts()
+      |> Enum.any?(&(&1.username == username))
+
+    if existing do
+      :skipped
+    else
+      # Create with a random password since we can't recover the original
+      password = generate_random_password()
+
+      case Hosting.create_email_account(domain, %{
+             username: username,
+             password: password,
+             quota_mb: 500
+           }) do
+        {:ok, _} -> :created
+        {:error, cs} -> {:failed, "#{item.address}: #{changeset_error_summary(cs)}"}
+      end
+    end
+  end
+
+  defp restore_database(domain, item) do
+    existing =
+      domain
+      |> Hosting.list_databases()
+      |> Enum.any?(&(&1.name == item.name))
+
+    if existing do
+      :skipped
+    else
+      case Hosting.create_database(domain, %{name: item.name, db_type: "mysql"}) do
+        {:ok, _} -> :created
+        {:error, cs} -> {:failed, "#{item.name}: #{changeset_error_summary(cs)}"}
+      end
+    end
+  end
+
+  defp restore_db_user(domain, item) do
+    databases = Hosting.list_databases(domain)
+    target_db = Enum.find(databases, &(&1.name == item.database))
+
+    cond do
+      is_nil(target_db) ->
+        {:failed, "#{item.login}: database #{item.database} not found"}
+
+      Hosting.list_db_users(target_db) |> Enum.any?(&(&1.username == item.login)) ->
+        :skipped
+
+      true ->
+        password = generate_random_password()
+
+        case Hosting.create_db_user(target_db, %{
+               username: item.login,
+               password: password
+             }) do
+          {:ok, _} -> :created
+          {:error, cs} -> {:failed, "#{item.login}: #{changeset_error_summary(cs)}"}
+        end
+    end
+  end
+
+  defp restore_ftp_account(domain, item) do
+    existing =
+      domain
+      |> Hosting.list_ftp_accounts()
+      |> Enum.any?(&(&1.username == item.login))
+
+    if existing do
+      :skipped
+    else
+      password = generate_random_password()
+
+      case Hosting.create_ftp_account(domain, %{
+             username: item.login,
+             password: password,
+             home_dir: "/"
+           }) do
+        {:ok, _} -> :created
+        {:error, cs} -> {:failed, "#{item.login}: #{changeset_error_summary(cs)}"}
+      end
+    end
+  end
+
+  defp generate_random_password do
+    :crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false)
+  end
+
   @doc false
   def domains_from_object_index_content(content) when is_binary(content) do
     content

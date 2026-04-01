@@ -71,6 +71,13 @@ defmodule Hostctl.Accounts do
   end
 
   @doc """
+  Lists all users ordered by email.
+  """
+  def list_users do
+    Repo.all(from u in User, order_by: [asc: u.email])
+  end
+
+  @doc """
   Creates a panel user from admin-supplied attrs (name + email).
   Sets role to "client".
   """

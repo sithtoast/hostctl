@@ -22,6 +22,19 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   @default_data_types Enum.map(@data_type_options, fn {key, _label} -> key end)
 
+  @restore_categories [
+    {"subdomains", "Subdomains", "hero-rectangle-group"},
+    {"dns", "DNS Records", "hero-globe-alt"},
+    {"mail_accounts", "Mail Accounts", "hero-envelope"},
+    {"databases", "Databases", "hero-circle-stack"},
+    {"db_users", "Database Users", "hero-user-circle"},
+    {"cron_jobs", "Cron Jobs", "hero-clock"},
+    {"ftp_accounts", "FTP Accounts", "hero-arrow-up-tray"},
+    {"ssl_certificates", "SSL Certificates", "hero-lock-closed"}
+  ]
+
+  @restore_category_keys Enum.map(@restore_categories, fn {key, _, _} -> key end)
+
   @default_params %{
     "source" => "backup",
     "backup_path" => "",
@@ -37,11 +50,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     "ssh_auth_method" => "key",
     "ssh_private_key_path" => "",
     "ssh_password" => "",
-    "target_user_email" => "",
     "apply_dns_template" => "false",
-    "selected_domains" => [],
     "selected_data_types" => @default_data_types
   }
+
+  # ── Mount ──────────────────────────────────────────────────────────────
 
   @impl true
   def mount(_params, _session, socket) do
@@ -51,14 +64,19 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:active_tab, :panel_plesk_import)
      |> assign(:form_params, @default_params)
      |> assign(:form, to_form(@default_params, as: :import))
-     |> assign(:preview, nil)
+     |> assign(:phase, :discovery)
      |> assign(:ssh_discovery, nil)
      |> assign(:subscriptions, [])
-     |> assign(:owner_groups, [])
-     |> assign(:available_domains, [])
-     |> assign(:selected_domains, [])
-     |> assign(:data_type_options, @data_type_options)}
+     |> assign(:domain_configs, %{})
+     |> assign(:restore_results, %{})
+     |> assign(:accounts, load_accounts())
+     |> assign(:creating_account, false)
+     |> assign(:new_account_form, to_form(%{"name" => "", "email" => ""}, as: :account))
+     |> assign(:data_type_options, @data_type_options)
+     |> assign(:restore_categories, @restore_categories)}
   end
+
+  # ── Events ─────────────────────────────────────────────────────────────
 
   @impl true
   def handle_event("validate", %{"import" => params}, socket) do
@@ -71,76 +89,252 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   end
 
   @impl true
-  def handle_event("submit", %{"import" => params}, socket) do
+  def handle_event("discover", %{"import" => params}, socket) do
     params = normalize_form_params(params)
-    action = normalize_string(params["submit_action"])
 
     socket =
       socket
       |> assign(:form_params, params)
       |> assign(:form, to_form(params, as: :import))
 
-    case action do
-      "apply" ->
-        case apply_import(params, socket.assigns.subscriptions) do
-          {:ok, result, selected_domains} ->
-            subdomain_result = Map.get(result, :subdomain_result)
+    case run_discovery(params) do
+      {:ok, ssh_discovery, subscriptions} ->
+        domain_configs = build_domain_configs(subscriptions, ssh_discovery)
 
-            domain_summary =
-              "Created #{result.created_count} domains, skipped #{result.skipped_existing_count}."
+        {:noreply,
+         socket
+         |> assign(:phase, :restore)
+         |> assign(:ssh_discovery, ssh_discovery)
+         |> assign(:subscriptions, subscriptions)
+         |> assign(:domain_configs, domain_configs)
+         |> assign(:restore_results, %{})
+         |> put_flash(:info, "Discovered #{length(subscriptions)} domain(s).")}
 
-            subdomain_summary =
-              if subdomain_result do
-                " Subdomains: #{subdomain_result.created_count} created, #{subdomain_result.skipped_count} skipped, #{subdomain_result.failed_count} failed."
-              else
-                ""
-              end
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, reason)}
+    end
+  end
 
-            summary = "Import complete. " <> domain_summary <> subdomain_summary
+  @impl true
+  def handle_event("reset", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:phase, :discovery)
+     |> assign(:ssh_discovery, nil)
+     |> assign(:subscriptions, [])
+     |> assign(:domain_configs, %{})
+     |> assign(:restore_results, %{})}
+  end
 
+  @impl true
+  def handle_event("toggle_category", %{"domain" => domain, "category" => category}, socket) do
+    configs = socket.assigns.domain_configs
+    config = Map.get(configs, domain, %{})
+    categories = Map.get(config, :categories, MapSet.new())
+
+    categories =
+      if MapSet.member?(categories, category),
+        do: MapSet.delete(categories, category),
+        else: MapSet.put(categories, category)
+
+    config = Map.put(config, :categories, categories)
+
+    {:noreply, assign(socket, :domain_configs, Map.put(configs, domain, config))}
+  end
+
+  @impl true
+  def handle_event("select_all_categories", %{"domain" => domain}, socket) do
+    configs = socket.assigns.domain_configs
+    config = Map.get(configs, domain, %{})
+    counts = Map.get(config, :inventory_counts, %{})
+
+    categories =
+      @restore_category_keys
+      |> Enum.filter(fn key -> Map.get(counts, key, 0) > 0 end)
+      |> MapSet.new()
+
+    config = Map.put(config, :categories, categories)
+
+    {:noreply, assign(socket, :domain_configs, Map.put(configs, domain, config))}
+  end
+
+  @impl true
+  def handle_event("deselect_all_categories", %{"domain" => domain}, socket) do
+    configs = socket.assigns.domain_configs
+    config = Map.get(configs, domain, %{})
+    config = Map.put(config, :categories, MapSet.new())
+
+    {:noreply, assign(socket, :domain_configs, Map.put(configs, domain, config))}
+  end
+
+  @impl true
+  def handle_event("set_account", %{"domain" => domain, "email" => email}, socket) do
+    configs = socket.assigns.domain_configs
+    config = Map.get(configs, domain, %{})
+    config = Map.put(config, :account_email, normalize_string(email))
+
+    {:noreply, assign(socket, :domain_configs, Map.put(configs, domain, config))}
+  end
+
+  @impl true
+  def handle_event("set_all_accounts", %{"email" => email}, socket) do
+    email = normalize_string(email)
+
+    configs =
+      Map.new(socket.assigns.domain_configs, fn {domain, config} ->
+        {domain, Map.put(config, :account_email, email)}
+      end)
+
+    {:noreply, assign(socket, :domain_configs, configs)}
+  end
+
+  @impl true
+  def handle_event("show_create_account", _params, socket) do
+    {:noreply, assign(socket, :creating_account, true)}
+  end
+
+  @impl true
+  def handle_event("cancel_create_account", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:creating_account, false)
+     |> assign(:new_account_form, to_form(%{"name" => "", "email" => ""}, as: :account))}
+  end
+
+  @impl true
+  def handle_event("validate_account", %{"account" => params}, socket) do
+    {:noreply, assign(socket, :new_account_form, to_form(params, as: :account))}
+  end
+
+  @impl true
+  def handle_event("create_account", %{"account" => params}, socket) do
+    name = normalize_string(params["name"])
+    email = normalize_string(params["email"])
+
+    cond do
+      name == "" or email == "" ->
+        {:noreply, put_flash(socket, :error, "Name and email are required to create an account.")}
+
+      true ->
+        case Accounts.create_panel_user(%{name: name, email: email}) do
+          {:ok, _user} ->
             {:noreply,
              socket
-             |> put_flash(:info, summary)
-             |> assign(:preview, result)
-             |> assign(:owner_groups, [])
-             |> assign(:selected_domains, selected_domains)}
-
-          {:error, reason} ->
-            {:noreply, put_flash(socket, :error, reason)}
-        end
-
-      _ ->
-        case build_preview(params) do
-          {:ok, preview, owner_groups, available_domains, selected_domains, ssh_discovery,
-           subscriptions} ->
-            {:noreply,
-             socket
-             |> assign(:preview, preview)
-             |> assign(:ssh_discovery, ssh_discovery)
-             |> assign(:subscriptions, subscriptions)
-             |> assign(:owner_groups, owner_groups)
-             |> assign(:available_domains, available_domains)
-             |> assign(:selected_domains, selected_domains)
-             |> assign(:form_params, Map.put(params, "selected_domains", selected_domains))
+             |> assign(:accounts, load_accounts())
+             |> assign(:creating_account, false)
              |> assign(
-               :form,
-               to_form(Map.put(params, "selected_domains", selected_domains), as: :import)
+               :new_account_form,
+               to_form(%{"name" => "", "email" => ""}, as: :account)
              )
-             |> put_flash(:info, "Preview updated.")}
+             |> put_flash(:info, "Account created for #{email}.")}
 
-          {:error, reason} ->
+          {:error, changeset} ->
             {:noreply,
-             socket
-             |> assign(:preview, nil)
-             |> assign(:ssh_discovery, nil)
-             |> assign(:subscriptions, [])
-             |> assign(:owner_groups, [])
-             |> assign(:available_domains, [])
-             |> assign(:selected_domains, [])
-             |> put_flash(:error, reason)}
+             put_flash(
+               socket,
+               :error,
+               "Failed to create account: #{changeset_error_summary(changeset)}"
+             )}
         end
     end
   end
+
+  @impl true
+  def handle_event("restore_domain", %{"domain" => domain}, socket) do
+    configs = socket.assigns.domain_configs
+    config = Map.get(configs, domain, %{})
+    account_email = Map.get(config, :account_email, "")
+    categories = config |> Map.get(:categories, MapSet.new()) |> MapSet.to_list()
+
+    case resolve_scope(account_email) do
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "#{domain}: #{reason}")}
+
+      {:ok, scope} ->
+        subscription = Enum.find(socket.assigns.subscriptions, &(&1.domain == domain))
+        inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, domain)
+        apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
+
+        case Importer.restore_domain(scope, subscription, inventory,
+               categories: categories,
+               apply_dns_template: apply_dns
+             ) do
+          {:ok, result} ->
+            results = Map.put(socket.assigns.restore_results, domain, {:ok, result})
+
+            {:noreply,
+             socket
+             |> assign(:restore_results, results)
+             |> put_flash(:info, "Restored #{domain} successfully.")}
+
+          {:error, result} ->
+            results = Map.put(socket.assigns.restore_results, domain, {:error, result})
+
+            {:noreply,
+             socket
+             |> assign(:restore_results, results)
+             |> put_flash(:error, "Failed to restore #{domain}.")}
+        end
+    end
+  end
+
+  @impl true
+  def handle_event("restore_all", _params, socket) do
+    results =
+      Enum.reduce(socket.assigns.subscriptions, socket.assigns.restore_results, fn sub, acc ->
+        # Skip already-restored domains
+        if Map.has_key?(acc, sub.domain) do
+          acc
+        else
+          config = Map.get(socket.assigns.domain_configs, sub.domain, %{})
+          account_email = Map.get(config, :account_email, "")
+          categories = config |> Map.get(:categories, MapSet.new()) |> MapSet.to_list()
+
+          case resolve_scope(account_email) do
+            {:error, _reason} ->
+              Map.put(
+                acc,
+                sub.domain,
+                {:error,
+                 %{
+                   domain: sub.domain,
+                   domain_status: {:failed, "No account selected"},
+                   categories: %{}
+                 }}
+              )
+
+            {:ok, scope} ->
+              inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, sub.domain)
+              apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
+
+              case Importer.restore_domain(scope, sub, inventory,
+                     categories: categories,
+                     apply_dns_template: apply_dns
+                   ) do
+                {:ok, result} -> Map.put(acc, sub.domain, {:ok, result})
+                {:error, result} -> Map.put(acc, sub.domain, {:error, result})
+              end
+          end
+        end
+      end)
+
+    ok_count = Enum.count(results, fn {_, {status, _}} -> status == :ok end)
+    err_count = Enum.count(results, fn {_, {status, _}} -> status == :error end)
+
+    flash =
+      cond do
+        err_count == 0 -> {:info, "All #{ok_count} domain(s) restored successfully."}
+        ok_count == 0 -> {:error, "All #{err_count} domain(s) failed to restore."}
+        true -> {:info, "Restored #{ok_count} domain(s), #{err_count} failed."}
+      end
+
+    {:noreply,
+     socket
+     |> assign(:restore_results, results)
+     |> put_flash(elem(flash, 0), elem(flash, 1))}
+  end
+
+  # ── Render ─────────────────────────────────────────────────────────────
 
   @impl true
   def render(assigns) do
@@ -150,507 +344,657 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         <div>
           <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Plesk Import</h1>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Preview and import domains from an extracted Plesk backup, the Plesk API, or a live Plesk server over SSH.
+            Discover and selectively restore domains from an extracted Plesk backup, the Plesk API, or a live Plesk server over SSH.
           </p>
         </div>
 
-        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
-          <.form for={@form} id="plesk-import-form" phx-change="validate" phx-submit="submit">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <.input
-                field={@form[:source]}
-                type="select"
-                label="Source"
-                options={[
-                  {"Extracted backup folder", "backup"},
-                  {"Plesk API", "api"},
-                  {"Direct SSH", "ssh"}
-                ]}
-              />
-
-              <.input
-                field={@form[:target_user_email]}
-                type="email"
-                label="Target Hostctl User Email (required for apply)"
-                placeholder="owner@example.com"
-              />
-
-              <%= if @form[:source].value == "backup" do %>
-                <.input
-                  field={@form[:backup_path]}
-                  type="text"
-                  label="Extracted Backup Path"
-                  placeholder="/Users/you/Downloads/backup_2603260012"
-                />
-
-                <.input
-                  field={@form[:owner_login]}
-                  type="text"
-                  label="Filter: Plesk Owner Login (optional)"
-                  placeholder="admin"
-                />
-
-                <.input
-                  field={@form[:system_user]}
-                  type="text"
-                  label="Filter: Plesk System User (optional)"
-                  placeholder="example_site_abc123"
-                />
-              <% else %>
-                <%= if @form[:source].value == "api" do %>
-                  <.input
-                    field={@form[:api_url]}
-                    type="url"
-                    label="Plesk API URL"
-                    placeholder="https://plesk.example.com:8443"
-                  />
-
-                  <.input
-                    field={@form[:api_key]}
-                    type="text"
-                    label="Plesk API Key"
-                    placeholder="Optional if using username/password"
-                  />
-
-                  <.input
-                    field={@form[:api_username]}
-                    type="text"
-                    label="API Username"
-                    placeholder="Optional if using API key"
-                  />
-
-                  <.input
-                    field={@form[:api_password]}
-                    type="password"
-                    label="API Password"
-                    placeholder="Optional if using API key"
-                  />
-                <% else %>
-                  <div class="md:col-span-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
-                    SSH discovery preview is enabled for domain inventory using key or password auth. Sudo is assumed.
-                  </div>
-
-                  <.input
-                    field={@form[:ssh_host]}
-                    type="text"
-                    label="SSH Host"
-                    placeholder="plesk.example.com"
-                  />
-
-                  <.input
-                    field={@form[:ssh_port]}
-                    type="number"
-                    label="SSH Port"
-                    placeholder="22"
-                  />
-
-                  <.input
-                    field={@form[:ssh_username]}
-                    type="text"
-                    label="SSH Username"
-                    placeholder="root"
-                  />
-
-                  <.input
-                    field={@form[:ssh_auth_method]}
-                    type="select"
-                    label="SSH Auth Method"
-                    options={[{"Private key", "key"}, {"Password", "password"}]}
-                  />
-
-                  <%= if @form[:ssh_auth_method].value == "password" do %>
-                    <.input
-                      field={@form[:ssh_password]}
-                      type="password"
-                      label="SSH Password"
-                      placeholder="Password or sudo-capable login password"
-                    />
-                  <% else %>
-                    <.input
-                      field={@form[:ssh_private_key_path]}
-                      type="text"
-                      label="SSH Private Key Path"
-                      placeholder="~/.ssh/id_ed25519"
-                    />
-                  <% end %>
-                <% end %>
-              <% end %>
-
-              <.input
-                field={@form[:apply_dns_template]}
-                type="checkbox"
-                label="Apply default DNS template when creating domains"
-              />
-
-              <input type="hidden" name="import[submit_action]" value="preview" />
-            </div>
-
-            <%= if @form[:source].value == "ssh" do %>
-              <div class="mt-6 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
-                <div>
-                  <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Import Scope</h2>
-                  <p class="text-xs text-gray-500 dark:text-gray-400">
-                    Choose the data categories to discover and offer for import from the Plesk server.
-                  </p>
-                </div>
-
-                <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <label
-                    :for={{key, label} <- @data_type_options}
-                    class="flex items-start gap-3 rounded-lg border border-gray-100 dark:border-gray-800 px-3 py-3 hover:bg-gray-50 dark:hover:bg-gray-800/50"
-                  >
-                    <input
-                      type="checkbox"
-                      name="import[selected_data_types][]"
-                      value={key}
-                      checked={key in @form_params["selected_data_types"]}
-                      class="checkbox checkbox-sm mt-0.5"
-                    />
-                    <div>
-                      <p class="text-sm font-medium text-gray-900 dark:text-white">{label}</p>
-                      <p class="text-xs text-gray-500 dark:text-gray-400">{key}</p>
-                    </div>
-                  </label>
-                </div>
-              </div>
-            <% end %>
-
-            <div class="mt-4 flex flex-wrap items-center gap-3">
-              <button
-                id="plesk-preview-btn"
-                type="submit"
-                name="import[submit_action]"
-                value="preview"
-                class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
-              >
-                <.icon name="hero-magnifying-glass" class="w-4 h-4" /> Preview
-              </button>
-
-              <button
-                id="plesk-apply-btn"
-                type="submit"
-                name="import[submit_action]"
-                value="apply"
-                data-confirm="Import now? This will create missing domains for the target user."
-                class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors"
-              >
-                <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Apply Import
-              </button>
-            </div>
-
-            <%= if @available_domains != [] do %>
-              <div class="mt-6 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <h2 class="text-sm font-semibold text-gray-900 dark:text-white">
-                      Domain Selection
-                    </h2>
-                    <p class="text-xs text-gray-500 dark:text-gray-400">
-                      Selected {@selected_domains |> length()} of {@available_domains |> length()} discovered domains.
-                    </p>
-                  </div>
-                </div>
-
-                <div class="mt-3 max-h-80 overflow-y-auto rounded-lg border border-gray-100 dark:border-gray-800">
-                  <%= for domain <- @available_domains do %>
-                    <% sub = Enum.find(@subscriptions, &(&1.domain == domain)) %>
-                    <label class="flex items-center gap-2 px-3 py-2 border-b border-gray-100 dark:border-gray-800 last:border-b-0 hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                      <input
-                        type="checkbox"
-                        name="import[selected_domains][]"
-                        value={domain}
-                        checked={domain in @selected_domains}
-                        class="checkbox checkbox-sm"
-                      />
-                      <div>
-                        <span class="text-sm text-gray-800 dark:text-gray-200">{domain}</span>
-                        <%= if sub && Map.get(sub, :subdomains, []) != [] do %>
-                          <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
-                            <.icon name="hero-arrow-turn-down-right" class="w-3 h-3 inline" />
-                            {sub.subdomains |> Enum.map(& &1.name) |> Enum.join(", ")}
-                          </p>
-                        <% end %>
-                      </div>
-                    </label>
-                  <% end %>
-                </div>
-              </div>
-            <% end %>
-          </.form>
-        </div>
-
-        <%= if @owner_groups != [] do %>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
-            <h2 class="text-base font-semibold text-gray-900 dark:text-white">Ownership Summary</h2>
-            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Parsed from Plesk subscriptions (owner login, owner type, system user).
-            </p>
-
-            <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div
-                :for={group <- Enum.take(@owner_groups, 20)}
-                class="rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-2"
-              >
-                <p class="text-sm text-gray-900 dark:text-gray-100">
-                  <span class="font-semibold">Owner:</span> {group.owner_login || "unknown"}
-                </p>
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  type={group.owner_type || "unknown"} system_user={group.system_user || "unknown"}
-                </p>
-                <p class="text-xs font-medium text-indigo-600 dark:text-indigo-400 mt-1">
-                  {group.count} domain(s)
-                </p>
-              </div>
-            </div>
-          </div>
-        <% end %>
-
-        <%= if @ssh_discovery do %>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 space-y-4">
-            <div>
-              <h2 class="text-base font-semibold text-gray-900 dark:text-white">
-                SSH Discovery Summary
-              </h2>
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                Subdomains are automatically grouped under their parent domain. Apply creates domains and subdomains.
-              </p>
-            </div>
-
-            <%= if @ssh_discovery.warnings != [] do %>
-              <div class="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-                <h3 class="font-semibold">Discovery Warnings</h3>
-                <ul class="mt-2 space-y-1 text-xs">
-                  <li :for={warning <- @ssh_discovery.warnings}>{warning}</li>
-                </ul>
-              </div>
-            <% end %>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              <div
-                :for={section <- discovery_sections(@ssh_discovery, @data_type_options)}
-                class="rounded-xl border border-gray-200 dark:border-gray-700 p-4"
-              >
-                <div class="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
-                      {section.label}
-                    </h3>
-                    <p class="text-xs text-gray-500 dark:text-gray-400">{section.key}</p>
-                  </div>
-                  <span class="inline-flex items-center rounded-full bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700 dark:bg-sky-900/30 dark:text-sky-300">
-                    {section.count}
-                  </span>
-                </div>
-
-                <div class="mt-3 space-y-1">
-                  <p
-                    :for={item <- section.samples}
-                    class="text-xs text-gray-600 dark:text-gray-300 break-all"
-                  >
-                    {format_discovery_item(section.key, item)}
-                  </p>
-                </div>
-
-                <p
-                  :if={section.remaining_count > 0}
-                  class="mt-3 text-xs font-medium text-indigo-600 dark:text-indigo-400"
-                >
-                  +{section.remaining_count} more
-                </p>
-              </div>
-            </div>
-          </div>
-        <% end %>
-
-        <%= if @preview do %>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 space-y-3">
-            <h2 class="text-base font-semibold text-gray-900 dark:text-white">Preview Result</h2>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-              <div class="rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2">
-                <p class="text-gray-500 dark:text-gray-400">Total input</p>
-                <p class="text-lg font-semibold text-gray-900 dark:text-white">
-                  {@preview.total_input}
-                </p>
-              </div>
-              <div class="rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2">
-                <p class="text-gray-500 dark:text-gray-400">Planned</p>
-                <p class="text-lg font-semibold text-indigo-600 dark:text-indigo-400">
-                  {@preview.planned_count}
-                </p>
-              </div>
-              <div class="rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2">
-                <p class="text-gray-500 dark:text-gray-400">Skipped existing</p>
-                <p class="text-lg font-semibold text-amber-600 dark:text-amber-400">
-                  {@preview.skipped_existing_count}
-                </p>
-              </div>
-              <div class="rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2">
-                <p class="text-gray-500 dark:text-gray-400">Failed</p>
-                <p class="text-lg font-semibold text-red-600 dark:text-red-400">
-                  {@preview.failed_count}
-                </p>
-              </div>
-            </div>
-
-            <%= if @preview[:subdomain_result] && @preview.subdomain_result.planned_count > 0 do %>
-              <div class="rounded-lg border border-indigo-100 dark:border-indigo-900/40 bg-indigo-50/50 dark:bg-indigo-950/20 px-4 py-3">
-                <h3 class="text-sm font-semibold text-indigo-900 dark:text-indigo-200">
-                  Subdomains: {@preview.subdomain_result.planned_count} planned
-                </h3>
-                <div class="mt-2 flex flex-wrap gap-2">
-                  <span
-                    :for={name <- Enum.take(@preview.subdomain_result.planned, 30)}
-                    class="inline-flex items-center px-2 py-1 rounded-md bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 text-xs"
-                  >
-                    {name}
-                  </span>
-                  <span
-                    :if={length(@preview.subdomain_result.planned) > 30}
-                    class="inline-flex items-center px-2 py-1 text-xs text-indigo-500"
-                  >
-                    +{length(@preview.subdomain_result.planned) - 30} more
-                  </span>
-                </div>
-              </div>
-            <% end %>
-
-            <%= if @preview[:subdomain_result] && @preview.subdomain_result.created_count > 0 do %>
-              <div class="rounded-lg border border-emerald-100 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/20 px-4 py-3">
-                <h3 class="text-sm font-semibold text-emerald-900 dark:text-emerald-200">
-                  Subdomains created: {@preview.subdomain_result.created_count}
-                </h3>
-                <div class="mt-2 flex flex-wrap gap-2">
-                  <span
-                    :for={name <- Enum.take(@preview.subdomain_result.created, 30)}
-                    class="inline-flex items-center px-2 py-1 rounded-md bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 text-xs"
-                  >
-                    {name}
-                  </span>
-                </div>
-              </div>
-            <% end %>
-
-            <%= if @preview.planned != [] do %>
-              <div>
-                <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Would be created</h3>
-                <div class="mt-2 flex flex-wrap gap-2">
-                  <span
-                    :for={name <- Enum.take(@preview.planned, 40)}
-                    class="inline-flex items-center px-2 py-1 rounded-md bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 text-xs"
-                  >
-                    {name}
-                  </span>
-                </div>
-              </div>
-            <% end %>
-
-            <%= if @preview.created != [] do %>
-              <div>
-                <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Created</h3>
-                <div class="mt-2 flex flex-wrap gap-2">
-                  <span
-                    :for={name <- Enum.take(@preview.created, 40)}
-                    class="inline-flex items-center px-2 py-1 rounded-md bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-xs"
-                  >
-                    {name}
-                  </span>
-                </div>
-              </div>
-            <% end %>
-
-            <%= if @preview.failed != [] do %>
-              <div>
-                <h3 class="text-sm font-semibold text-red-700 dark:text-red-300">Failures</h3>
-                <ul class="mt-2 space-y-1 text-xs text-red-600 dark:text-red-300">
-                  <li :for={err <- @preview.failed}>{err}</li>
-                </ul>
-              </div>
-            <% end %>
-
-            <%= if @preview[:subdomain_result] && @preview.subdomain_result.failed != [] do %>
-              <div>
-                <h3 class="text-sm font-semibold text-red-700 dark:text-red-300">
-                  Subdomain Failures
-                </h3>
-                <ul class="mt-2 space-y-1 text-xs text-red-600 dark:text-red-300">
-                  <li :for={err <- @preview.subdomain_result.failed}>{err}</li>
-                </ul>
-              </div>
-            <% end %>
-          </div>
+        <%= if @phase == :discovery do %>
+          {render_discovery_phase(assigns)}
+        <% else %>
+          {render_restore_phase(assigns)}
         <% end %>
       </div>
     </Layouts.app>
     """
   end
 
-  defp build_preview(params) do
-    source = normalize_string(params["source"])
+  # ── Discovery phase ────────────────────────────────────────────────────
 
-    with {:ok, names, owner_groups, ssh_discovery, subscriptions} <-
-           source_domain_names_with_groups(source, params),
-         {:ok, target_scope} <- maybe_target_scope(params["target_user_email"]) do
-      selected_names = resolve_selected_domains(names, params)
-      ssh_discovery = filter_discovery(ssh_discovery, selected_names)
+  defp render_discovery_phase(assigns) do
+    ~H"""
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
+      <.form for={@form} id="plesk-import-form" phx-change="validate" phx-submit="discover">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <.input
+            field={@form[:source]}
+            type="select"
+            label="Source"
+            options={[
+              {"Extracted backup folder", "backup"},
+              {"Plesk API", "api"},
+              {"Direct SSH", "ssh"}
+            ]}
+          />
 
-      # Filter subscriptions to only selected domains
-      selected_subscriptions =
-        if subscriptions != [] do
-          selected_set = MapSet.new(selected_names)
-          Enum.filter(subscriptions, &MapSet.member?(selected_set, &1.domain))
-        else
-          []
-        end
+          <div></div>
 
-      case target_scope do
-        nil ->
-          preview = dry_preview(selected_names, selected_subscriptions)
+          <%= if @form[:source].value == "backup" do %>
+            <.input
+              field={@form[:backup_path]}
+              type="text"
+              label="Extracted Backup Path"
+              placeholder="/Users/you/Downloads/backup_2603260012"
+            />
 
-          {:ok, preview, owner_groups, names, selected_names, ssh_discovery,
-           selected_subscriptions}
+            <.input
+              field={@form[:owner_login]}
+              type="text"
+              label="Filter: Plesk Owner Login (optional)"
+              placeholder="admin"
+            />
 
-        %Scope{} = scope ->
-          Importer.import_subscriptions(scope, selected_subscriptions, dry_run: true)
-          |> case do
-            {:ok, preview} ->
-              {:ok, preview, owner_groups, names, selected_names, ssh_discovery,
-               selected_subscriptions}
-          end
-      end
-    end
+            <.input
+              field={@form[:system_user]}
+              type="text"
+              label="Filter: Plesk System User (optional)"
+              placeholder="example_site_abc123"
+            />
+          <% else %>
+            <%= if @form[:source].value == "api" do %>
+              <.input
+                field={@form[:api_url]}
+                type="url"
+                label="Plesk API URL"
+                placeholder="https://plesk.example.com:8443"
+              />
+
+              <.input
+                field={@form[:api_key]}
+                type="text"
+                label="Plesk API Key"
+                placeholder="Optional if using username/password"
+              />
+
+              <.input
+                field={@form[:api_username]}
+                type="text"
+                label="API Username"
+                placeholder="Optional if using API key"
+              />
+
+              <.input
+                field={@form[:api_password]}
+                type="password"
+                label="API Password"
+                placeholder="Optional if using API key"
+              />
+            <% else %>
+              <div class="md:col-span-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
+                SSH discovery connects to the Plesk server and inventories domains, mail, databases, and more.
+              </div>
+
+              <.input
+                field={@form[:ssh_host]}
+                type="text"
+                label="SSH Host"
+                placeholder="plesk.example.com"
+              />
+
+              <.input
+                field={@form[:ssh_port]}
+                type="number"
+                label="SSH Port"
+                placeholder="22"
+              />
+
+              <.input
+                field={@form[:ssh_username]}
+                type="text"
+                label="SSH Username"
+                placeholder="root"
+              />
+
+              <.input
+                field={@form[:ssh_auth_method]}
+                type="select"
+                label="SSH Auth Method"
+                options={[{"Private key", "key"}, {"Password", "password"}]}
+              />
+
+              <%= if @form[:ssh_auth_method].value == "password" do %>
+                <.input
+                  field={@form[:ssh_password]}
+                  type="password"
+                  label="SSH Password"
+                  placeholder="Password or sudo-capable login password"
+                />
+              <% else %>
+                <.input
+                  field={@form[:ssh_private_key_path]}
+                  type="text"
+                  label="SSH Private Key Path"
+                  placeholder="~/.ssh/id_ed25519"
+                />
+              <% end %>
+            <% end %>
+          <% end %>
+
+          <.input
+            field={@form[:apply_dns_template]}
+            type="checkbox"
+            label="Apply default DNS template when creating domains"
+          />
+        </div>
+
+        <%= if @form[:source].value == "ssh" do %>
+          <div class="mt-6 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
+            <div>
+              <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Discovery Scope</h2>
+              <p class="text-xs text-gray-500 dark:text-gray-400">
+                Choose the data categories to discover from the Plesk server.
+              </p>
+            </div>
+
+            <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label
+                :for={{key, label} <- @data_type_options}
+                class="flex items-start gap-3 rounded-lg border border-gray-100 dark:border-gray-800 px-3 py-3 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  name="import[selected_data_types][]"
+                  value={key}
+                  checked={key in @form_params["selected_data_types"]}
+                  class="checkbox checkbox-sm mt-0.5"
+                />
+                <div>
+                  <p class="text-sm font-medium text-gray-900 dark:text-white">{label}</p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">{key}</p>
+                </div>
+              </label>
+            </div>
+          </div>
+        <% end %>
+
+        <div class="mt-4">
+          <button
+            id="plesk-discover-btn"
+            type="submit"
+            class="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors shadow-sm"
+          >
+            <.icon name="hero-magnifying-glass" class="w-4 h-4" /> Discover
+          </button>
+        </div>
+      </.form>
+    </div>
+
+    <%!-- Create account (available during discovery) --%>
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Accounts</h2>
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {length(@accounts)} account(s) available. Create new accounts before or after discovery.
+          </p>
+        </div>
+        <button
+          :if={not @creating_account}
+          id="plesk-create-account-btn-discovery"
+          type="button"
+          phx-click="show_create_account"
+          class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-indigo-300 dark:border-indigo-700 text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
+        >
+          <.icon name="hero-user-plus" class="w-4 h-4" /> New Account
+        </button>
+      </div>
+
+      <%= if @creating_account do %>
+        <.form
+          for={@new_account_form}
+          id="create-account-form-discovery"
+          phx-change="validate_account"
+          phx-submit="create_account"
+        >
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+            <.input field={@new_account_form[:name]} type="text" label="Name" placeholder="Jane Doe" />
+            <.input
+              field={@new_account_form[:email]}
+              type="email"
+              label="Email"
+              placeholder="jane@example.com"
+            />
+            <div class="flex items-center gap-2 pb-1">
+              <button
+                id="create-account-submit-btn-discovery"
+                type="submit"
+                class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+              >
+                <.icon name="hero-check" class="w-4 h-4" /> Create
+              </button>
+              <button
+                id="create-account-cancel-btn-discovery"
+                type="button"
+                phx-click="cancel_create_account"
+                class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </.form>
+      <% end %>
+
+      <%= if @accounts != [] do %>
+        <div class="mt-3 max-h-40 overflow-y-auto rounded-lg border border-gray-100 dark:border-gray-800">
+          <div
+            :for={account <- @accounts}
+            class="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-gray-800 last:border-b-0 text-sm"
+          >
+            <span class="text-gray-800 dark:text-gray-200">{account.name}</span>
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-gray-500 dark:text-gray-400">{account.email}</span>
+              <span class={[
+                "text-[10px] font-medium rounded-full px-1.5 py-0.5",
+                if(account.role == "admin",
+                  do: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300",
+                  else: "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+                )
+              ]}>
+                {account.role}
+              </span>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    </div>
+    """
   end
 
-  defp apply_import(params, stored_subscriptions) do
+  # ── Restore phase ──────────────────────────────────────────────────────
+
+  defp render_restore_phase(assigns) do
+    total = length(assigns.subscriptions)
+    restored = Enum.count(assigns.restore_results, fn {_, {s, _}} -> s == :ok end)
+    failed = Enum.count(assigns.restore_results, fn {_, {s, _}} -> s == :error end)
+
+    assigns =
+      assigns
+      |> Map.put(:total_domains, total)
+      |> Map.put(:restored_count, restored)
+      |> Map.put(:failed_count, failed)
+
+    ~H"""
+    <%!-- Action bar --%>
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 px-6 py-4">
+      <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div>
+          <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+            {@total_domains} domain(s) discovered
+          </h2>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+            Select categories per domain and assign accounts, then restore.
+            <%= if @restored_count > 0 or @failed_count > 0 do %>
+              <span class="ml-1 font-medium">
+                <span :if={@restored_count > 0} class="text-emerald-600 dark:text-emerald-400">
+                  {@restored_count} restored
+                </span>
+                <span :if={@restored_count > 0 and @failed_count > 0}> · </span>
+                <span :if={@failed_count > 0} class="text-red-600 dark:text-red-400">
+                  {@failed_count} failed
+                </span>
+              </span>
+            <% end %>
+          </p>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button
+            id="plesk-back-btn"
+            phx-click="reset"
+            class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+          >
+            <.icon name="hero-arrow-left" class="w-4 h-4" /> Back
+          </button>
+
+          <button
+            id="plesk-create-account-btn"
+            phx-click="show_create_account"
+            class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-indigo-300 dark:border-indigo-700 text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
+          >
+            <.icon name="hero-user-plus" class="w-4 h-4" /> New Account
+          </button>
+
+          <button
+            id="plesk-restore-all-btn"
+            phx-click="restore_all"
+            data-confirm="Restore all domains with their selected categories?"
+            class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors shadow-sm"
+          >
+            <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Restore All
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <%!-- Assign all domains to one account --%>
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 px-6 py-4">
+      <div class="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+        <label class="text-sm font-medium text-gray-700 dark:text-gray-300 shrink-0">
+          Assign all domains to:
+        </label>
+        <div class="flex items-center gap-2 w-full sm:w-auto">
+          <select
+            id="bulk-account-select"
+            phx-change="set_all_accounts"
+            name="email"
+            class="block w-full sm:w-72 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+          >
+            <option value="">— Select account —</option>
+            <option :for={account <- @accounts} value={account.email}>
+              {account.name} ({account.email}) [{account.role}]
+            </option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <%!-- Create account inline --%>
+    <%= if @creating_account do %>
+      <div class="bg-indigo-50 dark:bg-indigo-950/30 rounded-xl border border-indigo-200 dark:border-indigo-800 p-6">
+        <h3 class="text-sm font-semibold text-indigo-900 dark:text-indigo-200 mb-3">
+          Create New Account
+        </h3>
+        <.form
+          for={@new_account_form}
+          id="create-account-form"
+          phx-change="validate_account"
+          phx-submit="create_account"
+        >
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+            <.input field={@new_account_form[:name]} type="text" label="Name" placeholder="Jane Doe" />
+            <.input
+              field={@new_account_form[:email]}
+              type="email"
+              label="Email"
+              placeholder="jane@example.com"
+            />
+            <div class="flex items-center gap-2 pb-1">
+              <button
+                id="create-account-submit-btn"
+                type="submit"
+                class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+              >
+                <.icon name="hero-check" class="w-4 h-4" /> Create
+              </button>
+              <button
+                id="create-account-cancel-btn"
+                type="button"
+                phx-click="cancel_create_account"
+                class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </.form>
+      </div>
+    <% end %>
+
+    <%!-- Warnings --%>
+    <%= if @ssh_discovery && @ssh_discovery.warnings != [] do %>
+      <div class="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+        <h3 class="font-semibold">Discovery Warnings</h3>
+        <ul class="mt-2 space-y-1 text-xs">
+          <li :for={warning <- @ssh_discovery.warnings}>{warning}</li>
+        </ul>
+      </div>
+    <% end %>
+
+    <%!-- Domain restore cards --%>
+    <div class="space-y-4">
+      <%= for sub <- @subscriptions do %>
+        <% config = Map.get(@domain_configs, sub.domain, %{}) %>
+        <% categories = Map.get(config, :categories, MapSet.new()) %>
+        <% counts = Map.get(config, :inventory_counts, %{}) %>
+        <% result = Map.get(@restore_results, sub.domain) %>
+        <% has_result = result != nil %>
+        <% result_ok = match?({:ok, _}, result) %>
+        <div
+          id={"domain-card-#{sub.domain}"}
+          class={[
+            "bg-white dark:bg-gray-900 rounded-xl border p-5 transition-all",
+            if(has_result and result_ok, do: "border-emerald-300 dark:border-emerald-700", else: ""),
+            if(has_result and not result_ok, do: "border-red-300 dark:border-red-700", else: ""),
+            if(not has_result, do: "border-gray-200 dark:border-gray-800", else: "")
+          ]}
+        >
+          <%!-- Header --%>
+          <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div class="flex items-center gap-3">
+              <div class={[
+                "w-2 h-2 rounded-full shrink-0",
+                if(has_result and result_ok, do: "bg-emerald-500", else: ""),
+                if(has_result and not result_ok, do: "bg-red-500", else: ""),
+                if(not has_result, do: "bg-gray-300 dark:bg-gray-600", else: "")
+              ]}>
+              </div>
+              <div>
+                <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{sub.domain}</h3>
+                <%= if Map.get(sub, :subdomains, []) != [] do %>
+                  <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                    <.icon name="hero-arrow-turn-down-right" class="w-3 h-3 inline" />
+                    {sub.subdomains |> Enum.map(& &1.name) |> Enum.join(", ")}
+                  </p>
+                <% end %>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2 w-full sm:w-auto">
+              <select
+                id={"account-select-#{sub.domain}"}
+                phx-change="set_account"
+                phx-value-domain={sub.domain}
+                name="email"
+                class="block w-full sm:w-56 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              >
+                <option value="">— Account —</option>
+                <option
+                  :for={account <- @accounts}
+                  value={account.email}
+                  selected={Map.get(config, :account_email) == account.email}
+                >
+                  {account.name} ({account.email}) [{account.role}]
+                </option>
+              </select>
+            </div>
+          </div>
+
+          <%!-- Categories --%>
+          <div class="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+            <%= for {key, label, icon} <- @restore_categories do %>
+              <% count = Map.get(counts, key, 0) %>
+              <% selected = MapSet.member?(categories, key) %>
+              <button
+                type="button"
+                phx-click="toggle_category"
+                phx-value-domain={sub.domain}
+                phx-value-category={key}
+                disabled={count == 0}
+                class={[
+                  "flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all",
+                  if(count == 0,
+                    do: "opacity-40 cursor-not-allowed border-gray-100 dark:border-gray-800",
+                    else: "cursor-pointer"
+                  ),
+                  if(selected and count > 0,
+                    do:
+                      "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300",
+                    else: ""
+                  ),
+                  if(not selected and count > 0,
+                    do:
+                      "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600 text-gray-600 dark:text-gray-400",
+                    else: ""
+                  )
+                ]}
+              >
+                <.icon name={icon} class="w-3.5 h-3.5 shrink-0" />
+                <span class="truncate">{label}</span>
+                <span class={[
+                  "ml-auto text-[10px] font-semibold rounded-full px-1.5 py-0.5 shrink-0",
+                  if(selected and count > 0,
+                    do: "bg-indigo-200 dark:bg-indigo-800 text-indigo-700 dark:text-indigo-300",
+                    else: "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+                  )
+                ]}>
+                  {count}
+                </span>
+              </button>
+            <% end %>
+          </div>
+
+          <%!-- Select/deselect all and restore --%>
+          <div class="mt-3 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                phx-click="select_all_categories"
+                phx-value-domain={sub.domain}
+                class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+              >
+                Select all
+              </button>
+              <span class="text-gray-300 dark:text-gray-600">·</span>
+              <button
+                type="button"
+                phx-click="deselect_all_categories"
+                phx-value-domain={sub.domain}
+                class="text-xs text-gray-500 dark:text-gray-400 hover:underline"
+              >
+                Clear
+              </button>
+            </div>
+
+            <button
+              id={"restore-btn-#{sub.domain}"}
+              type="button"
+              phx-click="restore_domain"
+              phx-value-domain={sub.domain}
+              disabled={has_result and result_ok}
+              class={[
+                "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
+                if(has_result and result_ok,
+                  do:
+                    "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 cursor-default",
+                  else: "bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm"
+                )
+              ]}
+            >
+              <%= if has_result and result_ok do %>
+                <.icon name="hero-check" class="w-3.5 h-3.5" /> Restored
+              <% else %>
+                <.icon name="hero-arrow-down-tray" class="w-3.5 h-3.5" /> Restore
+              <% end %>
+            </button>
+          </div>
+
+          <%!-- Restore result --%>
+          <%= if has_result do %>
+            <% {status, result_data} = result %>
+            <div class={[
+              "mt-3 rounded-lg px-4 py-3 text-xs",
+              if(status == :ok,
+                do:
+                  "bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/40",
+                else: "bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900/40"
+              )
+            ]}>
+              <p class={[
+                "font-semibold mb-1",
+                if(status == :ok,
+                  do: "text-emerald-800 dark:text-emerald-200",
+                  else: "text-red-800 dark:text-red-200"
+                )
+              ]}>
+                <%= cond do %>
+                  <% status == :ok -> %>
+                    Domain {format_domain_status(result_data.domain_status)}
+                  <% true -> %>
+                    Failed: {format_domain_status(result_data.domain_status)}
+                <% end %>
+              </p>
+
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-1 mt-2">
+                <%= for {cat, cat_result} <- Map.get(result_data, :categories, %{}) do %>
+                  <div class="flex items-center justify-between rounded px-2 py-1 bg-white/60 dark:bg-gray-900/40">
+                    <span class="text-gray-600 dark:text-gray-400">{cat}</span>
+                    <span>
+                      <span
+                        :if={Map.get(cat_result, :created, 0) > 0}
+                        class="text-emerald-600 dark:text-emerald-400"
+                      >
+                        {cat_result.created}✓
+                      </span>
+                      <span
+                        :if={Map.get(cat_result, :skipped, 0) > 0}
+                        class="text-amber-600 dark:text-amber-400 ml-1"
+                      >
+                        {cat_result.skipped}⊘
+                      </span>
+                      <span
+                        :if={Map.get(cat_result, :failed, 0) > 0}
+                        class="text-red-600 dark:text-red-400 ml-1"
+                      >
+                        {cat_result.failed}✗
+                      </span>
+                      <span
+                        :if={Map.get(cat_result, :note)}
+                        class="text-gray-400 ml-1"
+                        title={cat_result.note}
+                      >
+                        ℹ
+                      </span>
+                    </span>
+                  </div>
+                <% end %>
+              </div>
+
+              <%!-- Show errors --%>
+              <% all_errors =
+                result_data
+                |> Map.get(:categories, %{})
+                |> Enum.flat_map(fn {cat, r} ->
+                  Enum.map(Map.get(r, :errors, []), &"#{cat}: #{&1}")
+                end) %>
+              <%= if all_errors != [] do %>
+                <details class="mt-2">
+                  <summary class="text-red-600 dark:text-red-400 cursor-pointer">
+                    {length(all_errors)} error(s)
+                  </summary>
+                  <ul class="mt-1 space-y-0.5 text-red-600 dark:text-red-300">
+                    <li :for={err <- all_errors}>{err}</li>
+                  </ul>
+                </details>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  # ── Discovery logic ────────────────────────────────────────────────────
+
+  defp run_discovery(params) do
     source = normalize_string(params["source"])
 
-    with {:ok, names, _owner_groups, _ssh_discovery, subscriptions} <-
-           source_domain_names_with_groups(source, params),
-         selected_names <- resolve_selected_domains(names, params),
-         :ok <- validate_selected_domains(selected_names),
-         {:ok, %Scope{} = target_scope} <- required_target_scope(params["target_user_email"]) do
-      # Use stored subscriptions if available, otherwise build from discovered names
-      selected_set = MapSet.new(selected_names)
+    case source_domain_names_with_groups(source, params) do
+      {:ok, _names, _owner_groups, ssh_discovery, subscriptions} ->
+        {:ok, ssh_discovery, subscriptions}
 
-      import_subs =
-        cond do
-          stored_subscriptions != [] ->
-            Enum.filter(stored_subscriptions, &MapSet.member?(selected_set, &1.domain))
-
-          subscriptions != [] ->
-            Enum.filter(subscriptions, &MapSet.member?(selected_set, &1.domain))
-
-          true ->
-            Enum.map(selected_names, fn name ->
-              %{domain: name, owner_login: nil, owner_type: nil, system_user: nil, subdomains: []}
-            end)
-        end
-
-      case Importer.import_subscriptions(target_scope, import_subs,
-             dry_run: false,
-             apply_dns_template: normalize_boolean(params["apply_dns_template"])
-           ) do
-        {:ok, result} -> {:ok, result, selected_names}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -704,7 +1048,6 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
       case Importer.api_domain_names(api_url, auth_opts) do
         {:ok, names} ->
-          # API only returns domain names, no subdomain info
           subscriptions =
             Enum.map(names, fn name ->
               %{
@@ -741,7 +1084,6 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       true ->
         with {:ok, %{subscriptions: subscriptions} = ssh_discovery} <-
                SSHProbe.discover(ssh_opts, selected_data_types_from_params(params)) do
-          # subscriptions already have subdomains merged by SSHProbe
           names = subscriptions |> Enum.map(& &1.domain) |> Enum.uniq() |> Enum.sort()
 
           owner_groups =
@@ -765,58 +1107,92 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   defp source_domain_names_with_groups(_other, _params),
     do: {:error, "Unsupported source. Choose backup, api, or ssh."}
 
-  defp maybe_target_scope(nil), do: {:ok, nil}
+  # ── Domain config helpers ──────────────────────────────────────────────
 
-  defp maybe_target_scope(email) when is_binary(email) do
-    case normalize_string(email) do
-      "" ->
-        {:ok, nil}
+  defp build_domain_configs(subscriptions, ssh_discovery) do
+    Map.new(subscriptions, fn sub ->
+      counts = count_inventory_per_domain(sub, ssh_discovery)
 
-      normalized_email ->
-        case Accounts.get_user_by_email(normalized_email) do
-          nil -> {:error, "Target Hostctl user not found: #{normalized_email}"}
-          user -> {:ok, Scope.for_user(user)}
-        end
-    end
-  end
+      selected =
+        @restore_category_keys
+        |> Enum.filter(fn key -> Map.get(counts, key, 0) > 0 end)
+        |> MapSet.new()
 
-  defp required_target_scope(email) do
-    case maybe_target_scope(email) do
-      {:ok, nil} -> {:error, "Target Hostctl user email is required for apply."}
-      {:ok, scope} -> {:ok, scope}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp dry_preview(names, subscriptions) do
-    all_subdomains =
-      Enum.flat_map(subscriptions, fn sub ->
-        Map.get(sub, :subdomains, []) |> Enum.map(& &1.full_name)
-      end)
-
-    %{
-      dry_run: true,
-      total_input: length(names),
-      planned_count: length(names),
-      created_count: 0,
-      skipped_existing_count: 0,
-      failed_count: 0,
-      planned: names,
-      created: [],
-      skipped_existing: [],
-      failed: [],
-      subdomain_result: %{
-        planned: all_subdomains,
-        planned_count: length(all_subdomains),
-        created: [],
-        created_count: 0,
-        skipped: [],
-        skipped_count: 0,
-        failed: [],
-        failed_count: 0
+      config = %{
+        categories: selected,
+        account_email: "",
+        inventory_counts: counts
       }
+
+      {sub.domain, config}
+    end)
+  end
+
+  defp count_inventory_per_domain(subscription, nil) do
+    %{
+      "subdomains" => subscription |> Map.get(:subdomains, []) |> length(),
+      "dns" => 0,
+      "mail_accounts" => 0,
+      "databases" => 0,
+      "db_users" => 0,
+      "cron_jobs" => 0,
+      "ftp_accounts" => 0,
+      "ssl_certificates" => 0
     }
   end
+
+  defp count_inventory_per_domain(subscription, discovery) do
+    domain = subscription.domain
+    inv = discovery.inventory
+
+    %{
+      "subdomains" => subscription |> Map.get(:subdomains, []) |> length(),
+      "dns" => inv |> Map.get("dns", []) |> Enum.count(&(&1.domain == domain)),
+      "mail_accounts" =>
+        inv |> Map.get("mail_accounts", []) |> Enum.count(&(&1.domain == domain)),
+      "databases" => inv |> Map.get("databases", []) |> Enum.count(&(&1.domain == domain)),
+      "db_users" => inv |> Map.get("db_users", []) |> Enum.count(&(&1.domain == domain)),
+      "cron_jobs" => inv |> Map.get("cron_jobs", []) |> Enum.count(&(&1.domain == domain)),
+      "ftp_accounts" =>
+        inv |> Map.get("ftp_accounts", []) |> Enum.count(&(Map.get(&1, :domain) == domain)),
+      "ssl_certificates" =>
+        inv |> Map.get("ssl_certificates", []) |> Enum.count(&(&1.domain == domain))
+    }
+  end
+
+  defp filter_inventory_for_domain(nil, _domain), do: %{}
+
+  defp filter_inventory_for_domain(discovery, domain) do
+    Map.new(discovery.inventory, fn {key, items} ->
+      filtered = Enum.filter(items, fn item -> Map.get(item, :domain) == domain end)
+      {key, filtered}
+    end)
+  end
+
+  # ── Account & scope helpers ────────────────────────────────────────────
+
+  defp load_accounts do
+    Accounts.list_users()
+    |> Enum.map(fn user ->
+      %{id: user.id, name: user.name, email: user.email, role: user.role}
+    end)
+  end
+
+  defp resolve_scope(""), do: {:error, "No account selected. Assign an account to this domain."}
+
+  defp resolve_scope(email) when is_binary(email) do
+    case Accounts.get_user_by_email(email) do
+      nil -> {:error, "User not found: #{email}"}
+      user -> {:ok, Scope.for_user(user)}
+    end
+  end
+
+  defp format_domain_status(:created), do: "created"
+  defp format_domain_status(:exists), do: "already existed"
+  defp format_domain_status({:failed, reason}), do: reason
+  defp format_domain_status(other), do: inspect(other)
+
+  # ── Shared helpers ─────────────────────────────────────────────────────
 
   defp normalize_string(value) when is_binary(value), do: String.trim(value)
   defp normalize_string(_), do: ""
@@ -824,29 +1200,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   defp normalize_form_params(params) when is_map(params) do
     @default_params
     |> Map.merge(params)
-    |> Map.put("selected_domains", selected_domains_from_params(params))
     |> Map.put("selected_data_types", selected_data_types_from_params(params))
-  end
-
-  defp selected_domains_from_params(params) do
-    case Map.get(params, "selected_domains") do
-      list when is_list(list) ->
-        list
-        |> Enum.map(&normalize_string/1)
-        |> Enum.reject(&(&1 == ""))
-        |> Enum.uniq()
-
-      value when is_binary(value) ->
-        value
-        |> normalize_string()
-        |> case do
-          "" -> []
-          domain -> [domain]
-        end
-
-      _ ->
-        []
-    end
   end
 
   defp selected_data_types_from_params(params) do
@@ -869,20 +1223,6 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         @default_data_types
     end
   end
-
-  defp resolve_selected_domains(available_domains, params) do
-    selected = selected_domains_from_params(params)
-
-    if selected == [] do
-      available_domains
-    else
-      available_set = MapSet.new(available_domains)
-      Enum.filter(selected, &MapSet.member?(available_set, &1))
-    end
-  end
-
-  defp validate_selected_domains([]), do: {:error, "Select at least one domain to import."}
-  defp validate_selected_domains(_), do: :ok
 
   defp normalize_boolean(value) when value in [true, "true", "on", "1", 1], do: true
   defp normalize_boolean(_), do: false
@@ -916,108 +1256,14 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   defp normalize_filter_value(_), do: nil
 
-  defp filter_discovery(nil, _selected_domains), do: nil
-
-  defp filter_discovery(discovery, []) do
-    %{
-      discovery
-      | inventory:
-          Map.new(discovery.inventory, fn {key, items} ->
-            {key, filter_discovery_items(items, nil)}
-          end)
-    }
-  end
-
-  defp filter_discovery(discovery, selected_domains) do
-    selected_domains = MapSet.new(selected_domains)
-
-    %{
-      discovery
-      | inventory:
-          Map.new(discovery.inventory, fn {key, items} ->
-            {key, filter_discovery_items(items, selected_domains)}
-          end)
-    }
-  end
-
-  defp filter_discovery_items(items, nil), do: items
-
-  defp filter_discovery_items(items, selected_domains) do
-    Enum.filter(items, fn item ->
-      case Map.get(item, :domain) do
-        nil -> true
-        domain -> MapSet.member?(selected_domains, domain)
-      end
+  defp changeset_error_summary(changeset) do
+    Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->
+      Regex.replace(~r"%{(\w+)}", msg, fn _, key ->
+        opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+      end)
+    end)
+    |> Enum.map_join("; ", fn {field, errors} ->
+      "#{field}: #{Enum.join(errors, ", ")}"
     end)
   end
-
-  defp discovery_sections(nil, _options), do: []
-
-  defp discovery_sections(discovery, options) do
-    options
-    |> Enum.map(fn {key, label} ->
-      items = Map.get(discovery.inventory, key, [])
-
-      if items == [] do
-        nil
-      else
-        %{
-          key: key,
-          label: label,
-          count: length(items),
-          samples: Enum.take(items, 5),
-          remaining_count: max(length(items) - 5, 0)
-        }
-      end
-    end)
-    |> Enum.reject(&is_nil/1)
-  end
-
-  defp format_discovery_item("dns", item) do
-    if Map.get(item, :enabled, true) do
-      "#{item.domain} (#{item.record_count} records)"
-    else
-      "#{item.domain} (DNS disabled in Plesk / external DNS)"
-    end
-  end
-
-  defp format_discovery_item("web_files", item) do
-    suffix =
-      case item.system_user do
-        nil -> ""
-        login -> " [#{login}]"
-      end
-
-    "#{item.domain} -> #{item.document_root || "unknown"}#{suffix}"
-  end
-
-  defp format_discovery_item("mail_accounts", item), do: item.address
-
-  defp format_discovery_item("mail_content", item), do: "#{item.address} -> #{item.path}"
-
-  defp format_discovery_item("databases", item), do: "#{item.name} (#{item.domain})"
-
-  defp format_discovery_item("db_users", item),
-    do: "#{item.login} on #{item.database} (#{item.domain})"
-
-  defp format_discovery_item("cron_jobs", item),
-    do: "#{item.domain} / #{item.system_user || "unknown"}: #{item.count} jobs"
-
-  defp format_discovery_item("ftp_accounts", item) do
-    case item.domain do
-      nil -> item.login
-      domain -> "#{item.login} (#{domain})"
-    end
-  end
-
-  defp format_discovery_item("ssl_certificates", item), do: "#{item.domain}: #{item.name}"
-
-  defp format_discovery_item("system_users", item) do
-    case item.domain do
-      nil -> item.login
-      domain -> "#{item.login} (#{domain})"
-    end
-  end
-
-  defp format_discovery_item(_key, item), do: inspect(item)
 end
