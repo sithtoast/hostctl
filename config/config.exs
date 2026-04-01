@@ -20,7 +20,7 @@ config :hostctl, :scopes,
   ]
 
 config :mime, :types, %{
-  "text/yaml" => ["yml"]
+  "text/yaml" => ["yml", "yaml"]
 }
 
 config :hostctl,
