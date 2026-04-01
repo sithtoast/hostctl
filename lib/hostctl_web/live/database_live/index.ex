@@ -308,104 +308,109 @@ defmodule HostctlWeb.DatabaseLive.Index do
 
           <%!-- Databases list --%>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
-            <div id="databases" phx-update="stream">
-              <div class={[
-                "flex flex-col items-center justify-center py-16 gap-3",
-                if(@dbs_empty?, do: "block", else: "hidden")
-              ]}>
-                <.icon
-                  name="hero-circle-stack"
-                  class="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto"
-                />
-                <p class="text-sm text-gray-400 mt-2">No databases yet.</p>
-              </div>
-              <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-800">
-                <thead>
-                  <tr class="bg-gray-50 dark:bg-gray-800/50">
-                    <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                      Name
-                    </th>
-                    <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                      Type
-                    </th>
-                    <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                      Status
-                    </th>
-                    <th class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
-                  <tr
-                    :for={{id, db} <- @streams.databases}
-                    id={id}
-                    class="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
-                  >
-                    <td class="px-6 py-4">
-                      <div class="flex items-center gap-3">
-                        <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-purple-100 dark:bg-purple-900/30 shrink-0">
-                          <.icon
-                            name="hero-circle-stack"
-                            class="w-4 h-4 text-purple-600 dark:text-purple-400"
-                          />
-                        </div>
-                        <p class="font-mono text-sm font-medium text-gray-900 dark:text-white">
-                          {db.name}
-                        </p>
-                      </div>
-                    </td>
-                    <td class="px-6 py-4">
-                      <span class={[
-                        "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium",
-                        if(db.db_type == "postgresql",
-                          do: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
-                          else:
-                            "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-                        )
-                      ]}>
-                        {if db.db_type == "postgresql", do: "PostgreSQL", else: "MySQL"}
-                      </span>
-                    </td>
-                    <td class="px-6 py-4">
-                      <span class={[
-                        "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
-                        if(db.status == "active",
-                          do: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-                          else: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                        )
-                      ]}>
-                        {db.status}
-                      </span>
-                    </td>
-                    <td class="px-6 py-4 text-right">
-                      <div class="flex items-center justify-end gap-4">
-                        <button
-                          phx-click="toggle_db_users"
-                          phx-value-id={db.id}
-                          class={[
-                            "text-xs font-medium transition-colors",
-                            if(@expanded_db && @expanded_db.id == db.id,
-                              do: "text-indigo-600 dark:text-indigo-400",
-                              else:
-                                "text-gray-500 hover:text-indigo-600 dark:text-gray-400 dark:hover:text-indigo-400"
-                            )
-                          ]}
-                        >
-                          Users
-                        </button>
-                        <button
-                          phx-click="delete_db"
-                          phx-value-id={db.id}
-                          data-confirm={"Delete database #{db.name}? This cannot be undone."}
-                          class="text-xs font-medium text-red-500 hover:text-red-600"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+            <div class={[
+              "flex flex-col items-center justify-center py-16 gap-3",
+              if(@dbs_empty?, do: "block", else: "hidden")
+            ]}>
+              <.icon
+                name="hero-circle-stack"
+                class="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto"
+              />
+              <p class="text-sm text-gray-400 mt-2">No databases yet.</p>
             </div>
+            <table class={[
+              "min-w-full divide-y divide-gray-200 dark:divide-gray-800",
+              if(@dbs_empty?, do: "hidden")
+            ]}>
+              <thead>
+                <tr class="bg-gray-50 dark:bg-gray-800/50">
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Name
+                  </th>
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Type
+                  </th>
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody
+                id="databases"
+                phx-update="stream"
+                class="divide-y divide-gray-100 dark:divide-gray-800"
+              >
+                <tr
+                  :for={{id, db} <- @streams.databases}
+                  id={id}
+                  class="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+                >
+                  <td class="px-6 py-4">
+                    <div class="flex items-center gap-3">
+                      <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-purple-100 dark:bg-purple-900/30 shrink-0">
+                        <.icon
+                          name="hero-circle-stack"
+                          class="w-4 h-4 text-purple-600 dark:text-purple-400"
+                        />
+                      </div>
+                      <p class="font-mono text-sm font-medium text-gray-900 dark:text-white">
+                        {db.name}
+                      </p>
+                    </div>
+                  </td>
+                  <td class="px-6 py-4">
+                    <span class={[
+                      "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium",
+                      if(db.db_type == "postgresql",
+                        do: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+                        else:
+                          "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+                      )
+                    ]}>
+                      {if db.db_type == "postgresql", do: "PostgreSQL", else: "MySQL"}
+                    </span>
+                  </td>
+                  <td class="px-6 py-4">
+                    <span class={[
+                      "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
+                      if(db.status == "active",
+                        do: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+                        else: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                      )
+                    ]}>
+                      {db.status}
+                    </span>
+                  </td>
+                  <td class="px-6 py-4 text-right">
+                    <div class="flex items-center justify-end gap-4">
+                      <button
+                        phx-click="toggle_db_users"
+                        phx-value-id={db.id}
+                        class={[
+                          "text-xs font-medium transition-colors",
+                          if(@expanded_db && @expanded_db.id == db.id,
+                            do: "text-indigo-600 dark:text-indigo-400",
+                            else:
+                              "text-gray-500 hover:text-indigo-600 dark:text-gray-400 dark:hover:text-indigo-400"
+                          )
+                        ]}
+                      >
+                        Users
+                      </button>
+                      <button
+                        phx-click="delete_db"
+                        phx-value-id={db.id}
+                        data-confirm={"Delete database #{db.name}? This cannot be undone."}
+                        class="text-xs font-medium text-red-500 hover:text-red-600"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
 
           <%!-- Database Users Panel --%>
