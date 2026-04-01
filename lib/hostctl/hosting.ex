@@ -913,6 +913,19 @@ defmodule Hostctl.Hosting do
     end
   end
 
+  def delete_ssl_certificate(%SslCertificate{} = cert) do
+    Repo.delete(cert)
+    |> case do
+      {:ok, _} = result ->
+        domain = Repo.get!(Domain, cert.domain_id)
+        WebServer.sync_domain(domain)
+        result
+
+      error ->
+        error
+    end
+  end
+
   def update_ssl_certificate(%SslCertificate{} = cert, attrs) do
     cert
     |> SslCertificate.changeset(attrs)
