@@ -735,55 +735,7 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp rsync_files(ssh_opts, remote_path, local_path) do
-    host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
-    port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
-    username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
-
-    auth_method =
-      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
-
-    # Ensure remote_path ends with / for rsync directory sync
-    remote_path =
-      if String.ends_with?(remote_path, "/"), do: remote_path, else: remote_path <> "/"
-
-    remote = "#{username}@#{host}:#{remote_path}"
-
-    ssh_cmd =
-      case auth_method do
-        "password" ->
-          "ssh -p #{port} -o StrictHostKeyChecking=accept-new"
-
-        _ ->
-          private_key_path =
-            ssh_opts
-            |> Map.get(:private_key_path, Map.get(ssh_opts, "private_key_path"))
-            |> normalize_string()
-            |> expand_tilde_path()
-
-          "ssh -p #{port} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i #{private_key_path}"
-      end
-
-    rsync = System.find_executable("rsync") || "rsync"
-
-    args = [
-      "systemd-run",
-      "--pipe",
-      "--wait",
-      "--collect",
-      "--quiet",
-      rsync,
-      "-az",
-      "--timeout=300",
-      "-e",
-      ssh_cmd,
-      remote,
-      local_path <> "/"
-    ]
-
-    case System.cmd("sudo", args, stderr_to_stdout: true, env: []) do
-      {_, 0} -> :ok
-      {output, _} -> {:error, String.trim(output)}
-    end
+    do_rsync(ssh_opts, remote_path, local_path, timeout: 300)
   end
 
   defp ensure_local_maildir(path) do
@@ -806,54 +758,50 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp rsync_maildir(ssh_opts, remote_path, local_path) do
+    do_rsync(ssh_opts, remote_path, local_path, timeout: 60)
+  end
+
+  defp do_rsync(ssh_opts, remote_path, local_path, opts) do
     host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
     port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
     username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
+    timeout = Keyword.get(opts, :timeout, 300)
 
-    auth_method =
-      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+    with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts(ssh_opts) do
+      # Ensure remote_path ends with / for rsync directory sync
+      remote_path =
+        if String.ends_with?(remote_path, "/"), do: remote_path, else: remote_path <> "/"
 
-    # Ensure remote_path ends with / for rsync directory sync
-    remote_path =
-      if String.ends_with?(remote_path, "/"), do: remote_path, else: remote_path <> "/"
+      remote = "#{username}@#{host}:#{remote_path}"
 
-    remote = "#{username}@#{host}:#{remote_path}"
+      ssh_args = ["-p", port] ++ auth_args
+      ssh_cmd = String.trim("#{sshpass_prefix} ssh #{Enum.join(ssh_args, " ")}")
 
-    ssh_cmd =
-      case auth_method do
-        "password" ->
-          "ssh -p #{port} -o StrictHostKeyChecking=accept-new"
+      rsync = System.find_executable("rsync") || "rsync"
 
-        _ ->
-          private_key_path =
-            ssh_opts
-            |> Map.get(:private_key_path, Map.get(ssh_opts, "private_key_path"))
-            |> normalize_string()
-            |> expand_tilde_path()
+      # Forward env vars (e.g. SSHPASS) into the systemd-run environment
+      env_args =
+        Enum.flat_map(env, fn {k, v} ->
+          ["--setenv=#{k}=#{v}"]
+        end)
 
-          "ssh -p #{port} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i #{private_key_path}"
+      args =
+        ["systemd-run", "--pipe", "--wait", "--collect", "--quiet"] ++
+          env_args ++
+          [
+            rsync,
+            "-az",
+            "--timeout=#{timeout}",
+            "-e",
+            ssh_cmd,
+            remote,
+            local_path <> "/"
+          ]
+
+      case System.cmd("sudo", args, stderr_to_stdout: true, env: env) do
+        {_, 0} -> :ok
+        {output, _} -> {:error, String.trim(output)}
       end
-
-    rsync = System.find_executable("rsync") || "rsync"
-
-    args = [
-      "systemd-run",
-      "--pipe",
-      "--wait",
-      "--collect",
-      "--quiet",
-      rsync,
-      "-az",
-      "--timeout=60",
-      "-e",
-      ssh_cmd,
-      remote,
-      local_path <> "/"
-    ]
-
-    case System.cmd("sudo", args, stderr_to_stdout: true, env: []) do
-      {_, 0} -> :ok
-      {output, _} -> {:error, String.trim(output)}
     end
   end
 
@@ -986,6 +934,13 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp ssh_exec(ssh_opts, command) do
+    case ssh_exec_output(ssh_opts, command) do
+      {:ok, _output} -> :ok
+      error -> error
+    end
+  end
+
+  defp ssh_exec_output(ssh_opts, command) do
     host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
     port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
     username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
@@ -997,7 +952,7 @@ defmodule Hostctl.Plesk.Importer do
         String.trim("#{sshpass_prefix} ssh #{Enum.map_join(args, " ", &shell_escape/1)}")
 
       case System.cmd("/bin/sh", ["-c", full_cmd], stderr_to_stdout: true, env: env) do
-        {_, 0} -> :ok
+        {output, 0} -> {:ok, String.trim(output)}
         {output, _} -> {:error, String.trim(output)}
       end
     end
@@ -1308,7 +1263,21 @@ defmodule Hostctl.Plesk.Importer do
 
     if ssh_opts do
       host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
-      old_ips = resolve_host_ips(host)
+
+      # Try to get the remote server's IPs by querying it directly via SSH,
+      # falling back to local DNS resolution
+      old_ips =
+        case ssh_exec_output(ssh_opts, "hostname -I") do
+          {:ok, output} ->
+            ips = output |> String.split() |> Enum.reject(&(&1 == ""))
+            Logger.info("[Importer] Got remote server IPs via SSH: #{inspect(ips)}")
+            ips
+
+          {:error, reason} ->
+            Logger.info("[Importer] Could not query remote IPs via SSH (#{reason}), falling back to DNS resolution")
+            resolve_host_ips(host)
+        end
+
       {new_ipv4, new_ipv6} = Hostctl.Settings.server_ips()
 
       Logger.info(
