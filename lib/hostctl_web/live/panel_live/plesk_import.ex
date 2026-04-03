@@ -26,6 +26,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   @restore_categories [
     {"subdomains", "Subdomains", "hero-rectangle-group"},
     {"dns", "DNS Records", "hero-globe-alt"},
+    {"web_files", "Web Files", "hero-document-duplicate"},
     {"mail_accounts", "Mail Accounts", "hero-envelope"},
     {"mail_content", "Mail Content", "hero-inbox-stack"},
     {"databases", "Databases", "hero-circle-stack"},
@@ -180,6 +181,15 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   end
 
   @impl true
+  def handle_event("set_web_path", %{"domain" => domain, "path" => path}, socket) do
+    configs = socket.assigns.domain_configs
+    config = Map.get(configs, domain, %{})
+    config = Map.put(config, :web_files_path, String.trim(path))
+
+    {:noreply, assign(socket, :domain_configs, Map.put(configs, domain, config))}
+  end
+
+  @impl true
   def handle_event("set_all_accounts", %{"email" => email}, socket) do
     email = normalize_string(email)
 
@@ -243,6 +253,83 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   end
 
   @impl true
+  def handle_event("auto_create_accounts", _params, socket) do
+    subscriptions = socket.assigns.subscriptions
+    existing_emails = MapSet.new(socket.assigns.accounts, & &1.email)
+
+    # Group domains by owner identity (prefer owner_email, fall back to owner_login)
+    owner_groups =
+      subscriptions
+      |> Enum.group_by(fn sub ->
+        Map.get(sub, :owner_email) || Map.get(sub, :owner_login)
+      end)
+      |> Map.delete(nil)
+
+    {created, skipped, configs} =
+      Enum.reduce(owner_groups, {0, 0, socket.assigns.domain_configs}, fn
+        {_key, subs}, {created, skipped, configs} ->
+          sample = hd(subs)
+          email = Map.get(sample, :owner_email)
+          name = Map.get(sample, :owner_name) || Map.get(sample, :owner_login) || "User"
+
+          # Synthesize email from owner_login@first_domain if no email from Plesk
+          email =
+            if is_nil(email) or email == "" do
+              login = Map.get(sample, :owner_login, "user")
+              "#{login}@#{sample.domain}"
+            else
+              email
+            end
+
+          if MapSet.member?(existing_emails, email) do
+            # Account exists — just assign domains
+            configs =
+              Enum.reduce(subs, configs, fn sub, acc ->
+                config = Map.get(acc, sub.domain, %{})
+                Map.put(acc, sub.domain, Map.put(config, :account_email, email))
+              end)
+
+            {created, skipped + 1, configs}
+          else
+            case Accounts.create_panel_user(%{name: name, email: email}) do
+              {:ok, _user} ->
+                configs =
+                  Enum.reduce(subs, configs, fn sub, acc ->
+                    config = Map.get(acc, sub.domain, %{})
+                    Map.put(acc, sub.domain, Map.put(config, :account_email, email))
+                  end)
+
+                {created + 1, skipped, configs}
+
+              {:error, _changeset} ->
+                {created, skipped, configs}
+            end
+          end
+      end)
+
+    flash =
+      cond do
+        created > 0 and skipped > 0 ->
+          "Created #{created} account(s), #{skipped} already existed. Domains assigned."
+
+        created > 0 ->
+          "Created #{created} account(s) and assigned domains."
+
+        skipped > 0 ->
+          "All #{skipped} account(s) already exist. Domains assigned."
+
+        true ->
+          "No Plesk owner information available to create accounts."
+      end
+
+    {:noreply,
+     socket
+     |> assign(:accounts, load_accounts())
+     |> assign(:domain_configs, configs)
+     |> put_flash(:info, flash)}
+  end
+
+  @impl true
   def handle_event("restore_domain", %{"domain" => domain}, socket) do
     configs = socket.assigns.domain_configs
     config = Map.get(configs, domain, %{})
@@ -258,11 +345,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, domain)
         apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
         ssh_opts = build_ssh_opts(socket.assigns.form_params)
+        web_files_path = Map.get(config, :web_files_path, "/var/www/#{domain}")
 
         case Importer.restore_domain(scope, subscription, inventory,
                categories: categories,
                apply_dns_template: apply_dns,
-               ssh_opts: ssh_opts
+               ssh_opts: ssh_opts,
+               web_files_path: web_files_path
              ) do
           {:ok, result} ->
             results = Map.put(socket.assigns.restore_results, domain, {:ok, result})
@@ -312,11 +401,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, sub.domain)
               apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
               ssh_opts = build_ssh_opts(socket.assigns.form_params)
+              web_files_path = Map.get(config, :web_files_path, "/var/www/#{sub.domain}")
 
               case Importer.restore_domain(scope, sub, inventory,
                      categories: categories,
                      apply_dns_template: apply_dns,
-                     ssh_opts: ssh_opts
+                     ssh_opts: ssh_opts,
+                     web_files_path: web_files_path
                    ) do
                 {:ok, result} -> Map.put(acc, sub.domain, {:ok, result})
                 {:error, result} -> Map.put(acc, sub.domain, {:error, result})
@@ -964,6 +1055,14 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           </button>
 
           <button
+            id="plesk-auto-create-accounts-btn"
+            phx-click="auto_create_accounts"
+            class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-amber-300 dark:border-amber-700 text-sm font-medium text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/30 transition-colors"
+          >
+            <.icon name="hero-user-group" class="w-4 h-4" /> Auto-create Accounts
+          </button>
+
+          <button
             id="plesk-create-account-btn"
             phx-click="show_create_account"
             class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-indigo-300 dark:border-indigo-700 text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
@@ -1107,6 +1206,21 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               </div>
               <div>
                 <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{sub.domain}</h3>
+                <%= if Map.get(sub, :owner_login) || Map.get(sub, :owner_email) do %>
+                  <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                    <.icon name="hero-user" class="w-3 h-3 inline" />
+                    <span :if={Map.get(sub, :owner_name)}>{sub.owner_name}</span>
+                    <span :if={Map.get(sub, :owner_email)} class="text-gray-400">
+                      {sub.owner_email}
+                    </span>
+                    <span
+                      :if={Map.get(sub, :owner_login) && !Map.get(sub, :owner_email)}
+                      class="text-gray-400"
+                    >
+                      {sub.owner_login}
+                    </span>
+                  </p>
+                <% end %>
                 <%= if Map.get(sub, :subdomains, []) != [] do %>
                   <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
                     <.icon name="hero-arrow-turn-down-right" class="w-3 h-3 inline" />
@@ -1117,22 +1231,23 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             </div>
 
             <div class="flex items-center gap-2 w-full sm:w-auto">
-              <select
-                id={"account-select-#{sub.domain}"}
-                phx-change="set_account"
-                phx-value-domain={sub.domain}
-                name="email"
-                class="block w-full sm:w-56 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-              >
-                <option value="">— Account —</option>
-                <option
-                  :for={account <- @accounts}
-                  value={account.email}
-                  selected={Map.get(config, :account_email) == account.email}
+              <form id={"account-form-#{sub.domain}"} phx-change="set_account">
+                <input type="hidden" name="domain" value={sub.domain} />
+                <select
+                  id={"account-select-#{sub.domain}"}
+                  name="email"
+                  class="block w-full sm:w-56 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                 >
-                  {account.name} ({account.email}) [{account.role}]
-                </option>
-              </select>
+                  <option value="">— Account —</option>
+                  <option
+                    :for={account <- @accounts}
+                    value={account.email}
+                    selected={Map.get(config, :account_email) == account.email}
+                  >
+                    {account.name} ({account.email}) [{account.role}]
+                  </option>
+                </select>
+              </form>
             </div>
           </div>
 
@@ -1179,6 +1294,29 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               </button>
             <% end %>
           </div>
+
+          <%!-- Web files destination path --%>
+          <%= if MapSet.member?(categories, "web_files") do %>
+            <div class="mt-3 flex items-center gap-2">
+              <label
+                for={"web-path-#{sub.domain}"}
+                class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap"
+              >
+                <.icon name="hero-folder" class="w-3.5 h-3.5 inline" /> Destination:
+              </label>
+              <form id={"web-path-form-#{sub.domain}"} phx-change="set_web_path" class="flex-1">
+                <input type="hidden" name="domain" value={sub.domain} />
+                <input
+                  type="text"
+                  id={"web-path-#{sub.domain}"}
+                  name="path"
+                  value={Map.get(config, :web_files_path, "/var/www/#{sub.domain}")}
+                  class="block w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  placeholder="/var/www/{sub.domain}"
+                />
+              </form>
+            </div>
+          <% end %>
 
           <%!-- Select/deselect all and restore --%>
           <div class="mt-3 flex items-center justify-between">
@@ -1381,6 +1519,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                 domain: name,
                 owner_login: nil,
                 owner_type: nil,
+                owner_name: nil,
+                owner_email: nil,
                 system_user: nil,
                 subdomains: []
               }

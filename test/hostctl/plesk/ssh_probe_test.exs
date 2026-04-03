@@ -16,6 +16,8 @@ defmodule Hostctl.Plesk.SSHProbeTest do
                domain: "nightgrease.net",
                owner_login: "frank",
                owner_type: "reseller",
+               owner_name: nil,
+               owner_email: nil,
                system_user: "nightgrease.net_diruri3oizr",
                subdomains: []
              },
@@ -23,6 +25,8 @@ defmodule Hostctl.Plesk.SSHProbeTest do
                domain: "toasted.network",
                owner_login: "admin",
                owner_type: "customer",
+               owner_name: nil,
+               owner_email: nil,
                system_user: "toasted.network_a5d2uy51xgc",
                subdomains: []
              }
@@ -43,6 +47,8 @@ defmodule Hostctl.Plesk.SSHProbeTest do
                domain: "sithtoast.com",
                owner_login: "admin",
                owner_type: nil,
+               owner_name: nil,
+               owner_email: nil,
                system_user: "sithtoast",
                subdomains: []
              }
@@ -78,6 +84,8 @@ defmodule Hostctl.Plesk.SSHProbeTest do
                domain: "nightgrease.net",
                owner_login: "frank",
                owner_type: nil,
+               owner_name: nil,
+               owner_email: nil,
                system_user: "nightgrease.net_diruri3oizr",
                subdomains: []
              }
@@ -109,7 +117,7 @@ defmodule Hostctl.Plesk.SSHProbeTest do
            ]
 
     assert discovery.inventory["databases"] == [
-             %{domain: "nightgrease.net", name: "nightgrease_prod"}
+             %{domain: "nightgrease.net", name: "nightgrease_prod", db_type: "mysql"}
            ]
 
     assert discovery.inventory["db_users"] == [

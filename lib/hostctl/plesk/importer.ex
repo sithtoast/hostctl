@@ -290,7 +290,8 @@ defmodule Hostctl.Plesk.Importer do
     - `:categories` - list of category keys to restore (default: all categories)
     - `:apply_dns_template` - whether to apply DNS template on domain creation (default: false)
     - `:dry_run` - if true, returns a plan without writing (default: false)
-    - `:ssh_opts` - SSH connection opts for mail content rsync (required if restoring mail_content)
+    - `:ssh_opts` - SSH connection opts for mail content and web files rsync
+    - `:web_files_path` - local destination path for web files rsync
   """
   def restore_domain(%Scope{} = scope, subscription, inventory, opts \\ [])
       when is_map(subscription) and is_map(inventory) do
@@ -298,7 +299,10 @@ defmodule Hostctl.Plesk.Importer do
     apply_dns_template = Keyword.get(opts, :apply_dns_template, false)
     dry_run = Keyword.get(opts, :dry_run, false)
     ssh_opts = Keyword.get(opts, :ssh_opts)
+    web_files_path = Keyword.get(opts, :web_files_path)
     domain_name = subscription.domain
+
+    restore_opts = %{ssh_opts: ssh_opts, web_files_path: web_files_path}
 
     result = %{
       domain: domain_name,
@@ -315,7 +319,7 @@ defmodule Hostctl.Plesk.Importer do
         inventory,
         categories,
         apply_dns_template,
-        ssh_opts,
+        restore_opts,
         result
       )
     end
@@ -351,7 +355,7 @@ defmodule Hostctl.Plesk.Importer do
          inventory,
          categories,
          apply_dns_template,
-         ssh_opts,
+         restore_opts,
          result
        ) do
     domain_name = subscription.domain
@@ -381,7 +385,7 @@ defmodule Hostctl.Plesk.Importer do
       %{} ->
         category_results =
           Enum.reduce(categories, %{}, fn category, acc ->
-            cat_result = restore_category(category, domain, subscription, inventory, ssh_opts)
+            cat_result = restore_category(category, domain, subscription, inventory, restore_opts)
             Map.put(acc, category, cat_result)
           end)
 
@@ -389,12 +393,12 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_category("subdomains", domain, subscription, _inventory, _ssh_opts) do
+  defp restore_category("subdomains", domain, subscription, _inventory, _restore_opts) do
     subs = Map.get(subscription, :subdomains, [])
     do_restore_items(subs, fn sub -> restore_subdomain(domain, sub) end)
   end
 
-  defp restore_category("dns", _domain, _subscription, inventory, _ssh_opts) do
+  defp restore_category("dns", _domain, _subscription, inventory, _restore_opts) do
     # DNS records from Plesk are counts only in the probe; skip if no detail
     records = Map.get(inventory, "dns", [])
 
@@ -411,13 +415,48 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_category("mail_accounts", domain, _subscription, inventory, _ssh_opts) do
+  defp restore_category("web_files", domain, _subscription, inventory, restore_opts) do
+    items = Map.get(inventory, "web_files", [])
+    ssh_opts = Map.get(restore_opts, :ssh_opts)
+    web_files_path = Map.get(restore_opts, :web_files_path)
+
+    cond do
+      items == [] ->
+        %{created: 0, skipped: 0, failed: 0, errors: []}
+
+      is_nil(ssh_opts) ->
+        %{
+          created: 0,
+          skipped: 0,
+          failed: length(items),
+          errors: ["SSH connection details required to transfer web files"],
+          note: "Provide SSH credentials to enable web files rsync"
+        }
+
+      is_nil(web_files_path) || web_files_path == "" ->
+        %{
+          created: 0,
+          skipped: 0,
+          failed: length(items),
+          errors: ["No destination path specified for web files"],
+          note: "Set a destination path for web files"
+        }
+
+      true ->
+        do_restore_items(items, fn item ->
+          restore_web_files(domain, item, ssh_opts, web_files_path)
+        end)
+    end
+  end
+
+  defp restore_category("mail_accounts", domain, _subscription, inventory, _restore_opts) do
     accounts = Map.get(inventory, "mail_accounts", [])
     do_restore_items(accounts, fn item -> restore_mail_account(domain, item) end)
   end
 
-  defp restore_category("mail_content", domain, _subscription, inventory, ssh_opts) do
+  defp restore_category("mail_content", domain, _subscription, inventory, restore_opts) do
     items = Map.get(inventory, "mail_content", [])
+    ssh_opts = Map.get(restore_opts, :ssh_opts)
 
     if is_nil(ssh_opts) do
       if items == [] do
@@ -436,17 +475,18 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_category("databases", domain, _subscription, inventory, _ssh_opts) do
+  defp restore_category("databases", domain, _subscription, inventory, restore_opts) do
     dbs = Map.get(inventory, "databases", [])
-    do_restore_items(dbs, fn item -> restore_database(domain, item) end)
+    ssh_opts = Map.get(restore_opts, :ssh_opts)
+    do_restore_items(dbs, fn item -> restore_database(domain, item, ssh_opts) end)
   end
 
-  defp restore_category("db_users", domain, _subscription, inventory, _ssh_opts) do
+  defp restore_category("db_users", domain, _subscription, inventory, _restore_opts) do
     users = Map.get(inventory, "db_users", [])
     do_restore_items(users, fn item -> restore_db_user(domain, item) end)
   end
 
-  defp restore_category("cron_jobs", _domain, _subscription, inventory, _ssh_opts) do
+  defp restore_category("cron_jobs", _domain, _subscription, inventory, _restore_opts) do
     jobs = Map.get(inventory, "cron_jobs", [])
 
     if jobs == [] do
@@ -462,12 +502,12 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_category("ftp_accounts", domain, _subscription, inventory, _ssh_opts) do
+  defp restore_category("ftp_accounts", domain, _subscription, inventory, _restore_opts) do
     accounts = Map.get(inventory, "ftp_accounts", [])
     do_restore_items(accounts, fn item -> restore_ftp_account(domain, item) end)
   end
 
-  defp restore_category("ssl_certificates", _domain, _subscription, inventory, _ssh_opts) do
+  defp restore_category("ssl_certificates", _domain, _subscription, inventory, _restore_opts) do
     certs = Map.get(inventory, "ssl_certificates", [])
 
     if certs == [] do
@@ -483,7 +523,7 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_category(_category, _domain, _subscription, _inventory, _ssh_opts) do
+  defp restore_category(_category, _domain, _subscription, _inventory, _restore_opts) do
     %{created: 0, skipped: 0, failed: 0, errors: []}
   end
 
@@ -563,6 +603,99 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
+  defp restore_web_files(_domain, item, ssh_opts, local_base_path) do
+    remote_path = item.document_root
+
+    if is_nil(remote_path) || remote_path == "" do
+      :skipped
+    else
+      # If the document root is a relative path (e.g. "httpdocs"), construct the full Plesk path
+      remote_path =
+        if String.starts_with?(remote_path, "/") do
+          remote_path
+        else
+          "/var/www/vhosts/#{item.domain}/#{remote_path}"
+        end
+
+      case ensure_local_directory(local_base_path) do
+        :ok ->
+          case rsync_files(ssh_opts, remote_path, local_base_path) do
+            :ok ->
+              :created
+
+            {:error, reason} ->
+              {:failed, "#{item.domain}: rsync failed - #{reason}"}
+          end
+
+        {:error, reason} ->
+          {:failed, "#{item.domain}: #{reason}"}
+      end
+    end
+  end
+
+  defp ensure_local_directory(path) do
+    args = ["mkdir", "-p", path]
+
+    case System.cmd("sudo", ["systemd-run", "--pipe", "--wait", "--collect", "--quiet" | args],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} -> :ok
+      {output, _} -> {:error, "Failed to create directory: #{String.trim(output)}"}
+    end
+  end
+
+  defp rsync_files(ssh_opts, remote_path, local_path) do
+    host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
+    port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
+    username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
+
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    # Ensure remote_path ends with / for rsync directory sync
+    remote_path =
+      if String.ends_with?(remote_path, "/"), do: remote_path, else: remote_path <> "/"
+
+    remote = "#{username}@#{host}:#{remote_path}"
+
+    ssh_cmd =
+      case auth_method do
+        "password" ->
+          "ssh -p #{port} -o StrictHostKeyChecking=accept-new"
+
+        _ ->
+          private_key_path =
+            ssh_opts
+            |> Map.get(:private_key_path, Map.get(ssh_opts, "private_key_path"))
+            |> normalize_string()
+            |> expand_tilde_path()
+
+          "ssh -p #{port} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i #{private_key_path}"
+      end
+
+    rsync = System.find_executable("rsync") || "rsync"
+
+    args = [
+      "systemd-run",
+      "--pipe",
+      "--wait",
+      "--collect",
+      "--quiet",
+      rsync,
+      "-az",
+      "--timeout=300",
+      "-e",
+      ssh_cmd,
+      remote,
+      local_path <> "/"
+    ]
+
+    case System.cmd("sudo", args, stderr_to_stdout: true, env: []) do
+      {_, 0} -> :ok
+      {output, _} -> {:error, String.trim(output)}
+    end
+  end
+
   defp ensure_local_maildir(path) do
     args = ["mkdir", "-p", path]
 
@@ -634,19 +767,47 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_database(domain, item) do
+  defp restore_database(domain, item, ssh_opts) do
+    db_type = Map.get(item, :db_type, "mysql")
+
     existing =
       domain
       |> Hosting.list_databases()
-      |> Enum.any?(&(&1.name == item.name))
+      |> Enum.find(&(&1.name == item.name))
 
-    if existing do
-      :skipped
-    else
-      case Hosting.create_database(domain, %{name: item.name, db_type: "mysql"}) do
-        {:ok, _} -> :created
-        {:error, cs} -> {:failed, "#{item.name}: #{changeset_error_summary(cs)}"}
+    {db, status} =
+      case existing do
+        nil ->
+          case Hosting.create_database(domain, %{name: item.name, db_type: db_type}) do
+            {:ok, db} -> {db, :created}
+            {:error, cs} -> {nil, {:failed, "#{item.name}: #{changeset_error_summary(cs)}"}}
+          end
+
+        db ->
+          {db, :exists}
       end
+
+    case {db, ssh_opts} do
+      {nil, _} ->
+        status
+
+      {_db, nil} ->
+        # No SSH opts — just create the empty database
+        if status == :created, do: :created, else: :skipped
+
+      {_db, _} ->
+        # Dump remote database and import locally
+        case dump_and_import_database(item.name, db_type, ssh_opts) do
+          :ok ->
+            :created
+
+          {:error, reason} ->
+            if status == :created do
+              {:failed, "#{item.name}: created but data import failed - #{reason}"}
+            else
+              {:failed, "#{item.name}: data import failed - #{reason}"}
+            end
+        end
     end
   end
 
@@ -672,6 +833,107 @@ defmodule Hostctl.Plesk.Importer do
           {:error, cs} -> {:failed, "#{item.login}: #{changeset_error_summary(cs)}"}
         end
     end
+  end
+
+  defp dump_and_import_database(db_name, db_type, ssh_opts) do
+    host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
+    port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
+    username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
+
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    password =
+      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+
+    with {:ok, import_cmd} <- local_import_command(db_name, db_type),
+         {:ok, ssh_prefix, ssh_key_args, env} <- ssh_command_parts(auth_method, password, ssh_opts) do
+      dump_cmd = remote_dump_command(db_name, db_type)
+
+      # SSH into remote, run dump, pipe into local import command
+      ssh_args = ["-p", port] ++ ssh_key_args ++ ["#{username}@#{host}", dump_cmd]
+
+      full_shell = "#{ssh_prefix} #{Enum.map_join(ssh_args, " ", &shell_escape/1)} | #{import_cmd}"
+
+      case System.cmd("/bin/sh", ["-c", full_shell], stderr_to_stdout: true, env: env) do
+        {_, 0} -> :ok
+        {output, _} -> {:error, String.trim(output)}
+      end
+    end
+  end
+
+  defp ssh_command_parts("password", password, _ssh_opts) do
+    case find_cmd(["sshpass"]) do
+      nil ->
+        {:error, "sshpass not found — install with: apt install sshpass"}
+
+      sshpass ->
+        env =
+          if is_binary(password) and password != "" do
+            [{"SSHPASS", password}]
+          else
+            []
+          end
+
+        {:ok, "#{sshpass} -e ssh",
+         ["-o", "StrictHostKeyChecking=accept-new"], env}
+    end
+  end
+
+  defp ssh_command_parts(_key, _password, ssh_opts) do
+    private_key_path =
+      ssh_opts
+      |> Map.get(:private_key_path, Map.get(ssh_opts, "private_key_path"))
+      |> normalize_string()
+      |> expand_tilde_path()
+
+    {:ok, "ssh",
+     [
+       "-o",
+       "BatchMode=yes",
+       "-o",
+       "StrictHostKeyChecking=accept-new",
+       "-i",
+       private_key_path
+     ], []}
+  end
+
+  defp remote_dump_command(db_name, "postgres") do
+    "pg_dump -U postgres --no-owner --no-privileges #{shell_escape(db_name)}"
+  end
+
+  defp remote_dump_command(db_name, _mysql) do
+    "mysqldump --single-transaction --routines --triggers --events #{shell_escape(db_name)}"
+  end
+
+  defp local_import_command(db_name, "postgres") do
+    case find_cmd(["psql"]) do
+      nil -> {:error, "psql client not found"}
+      cmd -> {:ok, "#{cmd} -U postgres #{shell_escape(db_name)}"}
+    end
+  end
+
+  defp local_import_command(db_name, _mysql) do
+    case find_cmd(["mysql", "mariadb"]) do
+      nil -> {:error, "mysql/mariadb client not found"}
+      cmd -> {:ok, "#{cmd} #{shell_escape(db_name)}"}
+    end
+  end
+
+  @common_bin_dirs ["/usr/bin", "/usr/local/bin", "/usr/sbin", "/usr/local/sbin"]
+
+  defp find_cmd(names) do
+    Enum.find_value(names, fn name ->
+      System.find_executable(name) ||
+        Enum.find_value(@common_bin_dirs, fn dir ->
+          path = Path.join(dir, name)
+          if File.exists?(path), do: path
+        end)
+    end)
+  end
+
+  defp shell_escape(value) do
+    "'" <> String.replace(value, "'", "'\\''") <> "'"
   end
 
   defp restore_ftp_account(domain, item) do
@@ -728,12 +990,23 @@ defmodule Hostctl.Plesk.Importer do
               domain: domain,
               owner_login: normalize_blank(owner_login),
               owner_type: normalize_blank(owner_type),
+              owner_name: nil,
+              owner_email: nil,
               system_user: normalize_blank(system_user)
             }
           ]
 
         ["subscription", domain | _rest] when is_binary(domain) and domain != "" ->
-          [%{domain: domain, owner_login: nil, owner_type: nil, system_user: nil}]
+          [
+            %{
+              domain: domain,
+              owner_login: nil,
+              owner_type: nil,
+              owner_name: nil,
+              owner_email: nil,
+              system_user: nil
+            }
+          ]
 
         _ ->
           []
@@ -783,7 +1056,14 @@ defmodule Hostctl.Plesk.Importer do
         subscriptions =
           names
           |> Enum.map(fn domain ->
-            %{domain: domain, owner_login: nil, owner_type: nil, system_user: nil}
+            %{
+              domain: domain,
+              owner_login: nil,
+              owner_type: nil,
+              owner_name: nil,
+              owner_email: nil,
+              system_user: nil
+            }
           end)
 
         if names == [] do

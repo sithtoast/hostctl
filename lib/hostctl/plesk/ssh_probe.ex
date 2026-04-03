@@ -29,6 +29,8 @@ defmodule Hostctl.Plesk.SSHProbe do
           domain: String.t(),
           owner_login: String.t() | nil,
           owner_type: String.t() | nil,
+          owner_name: String.t() | nil,
+          owner_email: String.t() | nil,
           system_user: String.t() | nil,
           subdomains: [subdomain_entry()]
         }
@@ -318,12 +320,12 @@ defmodule Hostctl.Plesk.SSHProbe do
       printf 'WARN\\t%s\\t%s\\n' "$code" "$msg"
     }
 
-    owner_rows=$(run_plesk db -Ne "select d.name, coalesce(c.login,''), coalesce(c.type,''), coalesce(s.login,''), coalesce(h.www_root,'') from domains d left join clients c on c.id=d.cl_id left join hosting h on h.dom_id=d.id left join sys_users s on s.id=h.sys_user_id where d.name <> '' order by d.name" 2>&1)
+    owner_rows=$(run_plesk db -Ne "select d.name, coalesce(c.login,''), coalesce(c.type,''), coalesce(s.login,''), coalesce(h.www_root,''), coalesce(c.pname,''), coalesce(c.email,'') from domains d left join clients c on c.id=d.cl_id left join hosting h on h.dom_id=d.id left join sys_users s on s.id=h.sys_user_id where d.name <> '' order by d.name" 2>&1)
 
     if [ $? -eq 0 ] && [ -n "$(printf '%s' \"$owner_rows\" | tr -d '[:space:]')" ]; then
-      printf '%s\n' "$owner_rows" | while IFS="$TAB" read -r d owner owner_type sys docroot; do
+      printf '%s\n' "$owner_rows" | while IFS="$TAB" read -r d owner owner_type sys docroot owner_name owner_email; do
         [ -z "$d" ] && continue
-        printf 'SUB\t%s\t%s\t%s\t%s\n' "$d" "$owner" "$owner_type" "$sys"
+        printf 'SUB\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$owner" "$owner_type" "$sys" "$owner_name" "$owner_email"
     #{extra_loop_steps}
       done
     else
@@ -354,7 +356,7 @@ defmodule Hostctl.Plesk.SSHProbe do
         sys=$(printf '%s\n' "$info" | awk 'BEGIN{IGNORECASE=1} /^[[:space:]]*System[[:space:]]+user([[:space:]]+name)?[[:space:]]*:/ {line=$0; sub(/^[^:]*:[[:space:]]*/, "", line); gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); print line; exit}')
         docroot=$(printf '%s\n' "$info" | awk 'BEGIN{IGNORECASE=1} /^[[:space:]]*Document[[:space:]]+root[[:space:]]*:/ {line=$0; sub(/^[^:]*:[[:space:]]*/, "", line); gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); print line; exit}')
 
-        printf 'SUB\t%s\t%s\t%s\t%s\n' "$d" "$owner" "$owner_type" "$sys"
+        printf 'SUB\t%s\t%s\t%s\t%s\t\t\n' "$d" "$owner" "$owner_type" "$sys"
     #{extra_loop_steps}
       done
     fi
@@ -464,14 +466,14 @@ defmodule Hostctl.Plesk.SSHProbe do
 
   defp database_query_step do
     [
-      "db_rows=$(run_plesk db -Ne \"select db.name, d.name from data_bases db join domains d on d.id = db.dom_id order by d.name, db.name\" 2>&1)",
+      "db_rows=$(run_plesk db -Ne \"select db.name, d.name, db.type from data_bases db join domains d on d.id = db.dom_id order by d.name, db.name\" 2>&1)",
       "if [ $? -ne 0 ]; then",
       "  emit_warn databases_query_failed \"$db_rows\"",
       "else",
-      "  printf '%s\\n' \"$db_rows\" | while IFS=\"$TAB\" read -r db_name domain; do",
+      "  printf '%s\\n' \"$db_rows\" | while IFS=\"$TAB\" read -r db_name domain db_type; do",
       "    [ -z \"$db_name\" ] && continue",
       "    [ -z \"$domain\" ] && continue",
-      "    printf 'DB\\t%s\\t%s\\n' \"$db_name\" \"$domain\"",
+      "    printf 'DB\\t%s\\t%s\\t%s\\n' \"$db_name\" \"$domain\" \"$db_type\"",
       "  done",
       "fi"
     ]
@@ -526,7 +528,29 @@ defmodule Hostctl.Plesk.SSHProbe do
   end
 
   defp parse_probe_line("SUB\t" <> rest) do
-    case String.split(rest, "\t", parts: 4) do
+    case String.split(rest, "\t") do
+      [domain, owner_login, owner_type, system_user, owner_name, owner_email | _] ->
+        if present_string?(domain) do
+          {:ok,
+           fn acc ->
+             Map.update!(acc, :subscriptions, fn subscriptions ->
+               [
+                 %{
+                   domain: String.trim(domain),
+                   owner_login: normalize_blank(owner_login),
+                   owner_type: normalize_blank(owner_type),
+                   owner_name: normalize_blank(owner_name),
+                   owner_email: normalize_blank(owner_email),
+                   system_user: normalize_blank(system_user)
+                 }
+                 | subscriptions
+               ]
+             end)
+           end}
+        else
+          :ignore
+        end
+
       [domain, owner_login, owner_type, system_user] ->
         if present_string?(domain) do
           {:ok,
@@ -537,6 +561,8 @@ defmodule Hostctl.Plesk.SSHProbe do
                    domain: String.trim(domain),
                    owner_login: normalize_blank(owner_login),
                    owner_type: normalize_blank(owner_type),
+                   owner_name: nil,
+                   owner_email: nil,
                    system_user: normalize_blank(system_user)
                  }
                  | subscriptions
@@ -557,6 +583,8 @@ defmodule Hostctl.Plesk.SSHProbe do
                    domain: String.trim(domain),
                    owner_login: normalize_blank(owner_login),
                    owner_type: nil,
+                   owner_name: nil,
+                   owner_email: nil,
                    system_user: normalize_blank(system_user)
                  }
                  | subscriptions
@@ -663,13 +691,26 @@ defmodule Hostctl.Plesk.SSHProbe do
   end
 
   defp parse_probe_line("DB\t" <> rest) do
-    case String.split(rest, "\t", parts: 2) do
+    case String.split(rest, "\t", parts: 3) do
+      [name, domain, db_type] ->
+        if present_string?(name) and present_string?(domain) do
+          {:ok,
+           &put_inventory_item(&1, "databases", %{
+             domain: String.trim(domain),
+             name: String.trim(name),
+             db_type: normalize_db_type(db_type)
+           })}
+        else
+          :ignore
+        end
+
       [name, domain] ->
         if present_string?(name) and present_string?(domain) do
           {:ok,
            &put_inventory_item(&1, "databases", %{
              domain: String.trim(domain),
-             name: String.trim(name)
+             name: String.trim(name),
+             db_type: "mysql"
            })}
         else
           :ignore
@@ -986,6 +1027,17 @@ defmodule Hostctl.Plesk.SSHProbe do
 
   defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
   defp present_string?(_), do: false
+
+  defp normalize_db_type(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "postgresql" -> "postgres"
+      "postgres" -> "postgres"
+      "" -> "mysql"
+      other -> other
+    end
+  end
+
+  defp normalize_db_type(_), do: "mysql"
 
   defp normalize_string(value) when is_binary(value), do: String.trim(value)
   defp normalize_string(_), do: ""

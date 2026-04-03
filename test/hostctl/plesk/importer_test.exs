@@ -24,12 +24,16 @@ defmodule Hostctl.Plesk.ImporterTest do
                domain: "alpha.test",
                owner_login: "admin",
                owner_type: "admin",
+               owner_name: nil,
+               owner_email: nil,
                system_user: "alpha_sys"
              },
              %{
                domain: "beta.test",
                owner_login: "kristan",
                owner_type: "customer",
+               owner_name: nil,
+               owner_email: nil,
                system_user: "beta_sys"
              }
            ]
