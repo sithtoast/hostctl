@@ -474,19 +474,48 @@ defmodule Hostctl.Settings do
     settings = list_ip_settings()
 
     ipv4 =
-      Enum.find_value(settings, "", fn s ->
-        ip = s.external_ip || s.ip_address
-        if String.contains?(ip, ".") and not String.contains?(ip, ":"), do: ip
+      find_best_ip(settings, fn ip ->
+        String.contains?(ip, ".") and not String.contains?(ip, ":")
       end)
 
     ipv6 =
-      Enum.find_value(settings, "", fn s ->
-        ip = s.external_ip || s.ip_address
-        if String.contains?(ip, ":"), do: ip
-      end)
+      find_best_ip(settings, fn ip -> String.contains?(ip, ":") end)
 
     {ipv4, ipv6}
   end
+
+  # Picks the best IP from settings, preferring:
+  # 1. Entries with an explicit external_ip set
+  # 2. Non-private/non-Docker IPs
+  # 3. Any remaining IP as fallback
+  defp find_best_ip(settings, filter_fn) do
+    # First try: entries where admin set an external_ip override
+    Enum.find_value(settings, fn s ->
+      if is_binary(s.external_ip) and s.external_ip != "" and filter_fn.(s.external_ip) do
+        s.external_ip
+      end
+    end) ||
+      # Second try: non-private IPs (skip Docker/internal ranges)
+      Enum.find_value(settings, fn s ->
+        if filter_fn.(s.ip_address) and not private_ip?(s.ip_address), do: s.ip_address
+      end) ||
+      # Last resort: any matching IP
+      Enum.find_value(settings, "", fn s ->
+        if filter_fn.(s.ip_address), do: s.ip_address
+      end)
+  end
+
+  defp private_ip?(ip) when is_binary(ip) do
+    String.starts_with?(ip, "10.") or
+      String.starts_with?(ip, "172.16.") or String.starts_with?(ip, "172.17.") or
+      String.starts_with?(ip, "172.18.") or String.starts_with?(ip, "172.19.") or
+      String.starts_with?(ip, "172.2") or String.starts_with?(ip, "172.30.") or
+      String.starts_with?(ip, "172.31.") or
+      String.starts_with?(ip, "192.168.") or
+      ip == "127.0.0.1" or ip == "::1"
+  end
+
+  defp private_ip?(_), do: false
 
   defp server_hostname do
     case System.cmd("hostname", []) do

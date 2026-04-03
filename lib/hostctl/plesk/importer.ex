@@ -792,6 +792,7 @@ defmodule Hostctl.Plesk.Importer do
             rsync,
             "-az",
             "--timeout=#{timeout}",
+            "--rsync-path=sudo rsync",
             "-e",
             ssh_cmd,
             remote,
