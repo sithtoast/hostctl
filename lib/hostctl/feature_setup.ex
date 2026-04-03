@@ -1277,23 +1277,39 @@ defmodule Hostctl.FeatureSetup do
         ];
 
         function adminer_object() {
-            class HostctlAdminer extends Adminer\\Adminer {
+            class HostctlAdminer extends Adminer\Adminer {
                 function loginForm() {
                     global $hostctl_servers;
-                    $first = reset($hostctl_servers);
-                    if (!$first) {
+                    // Detect which driver was requested from the URL
+                    $driver = 'server';
+                    if (isset($_GET['pgsql'])) {
+                        $driver = 'pgsql';
+                    }
+                    // Find the matching server config
+                    $target = null;
+                    foreach ($hostctl_servers as $s) {
+                        if ($s['driver'] === $driver) {
+                            $target = $s;
+                            break;
+                        }
+                    }
+                    if (!$target) {
+                        $target = reset($hostctl_servers);
+                    }
+                    if (!$target) {
                         echo '<p>No database servers configured.</p>';
                         return;
                     }
-                    // Hidden fields for Adminer's POST handler
-                    echo '<input type="hidden" name="auth[driver]" value="' . $first['driver'] . '">';
+                    echo '<input type="hidden" name="auth[driver]" value="' . $target['driver'] . '">';
                     echo '<input type="hidden" name="auth[server]" value="">';
-                    echo '<input type="hidden" name="auth[username]" value="">';
-                    echo '<input type="hidden" name="auth[password]" value="">';
+                    echo '<input type="hidden" name="auth[username]" value="hostctl">';
+                    echo '<input type="hidden" name="auth[password]" value="hostctl">';
                     echo '<input type="hidden" name="auth[db]" value="">';
                     // Auto-submit on GET; if we already POSTed and still here, login failed
                     if (empty($_POST)) {
-                        echo '<script>document.addEventListener("DOMContentLoaded",function(){document.querySelector("form").submit()});</script>';
+                        echo '<p style="margin:2em 0;color:#888">Connecting to database server&hellip;</p>';
+                        echo '<script ' . Adminer\nonce() . '>document.addEventListener("DOMContentLoaded",function(){document.querySelector("form").submit()});</script>';
+                        echo '<noscript><input type="submit" value="Connect"></noscript>';
                     } else {
                         echo '<p style="color:#c00;margin:1em 0">Auto-login failed &mdash; the database server may be unreachable.</p>';
                         echo '<input type="submit" value="Retry">';

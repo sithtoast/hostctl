@@ -755,11 +755,8 @@ if [[ -f "$ADMINER_DIR/adminer.php" ]]; then
     needs_rewrite=true
   elif ! grep -q 'HostctlAdminer' "$ADMINER_DIR/index.php" 2>/dev/null; then
     needs_rewrite=true
-  elif ! grep -q 'document.querySelector' "$ADMINER_DIR/index.php" 2>/dev/null; then
-    # Old version without auto-submit
-    needs_rewrite=true
-  elif ! grep -q 'Adminer\\\\Adminer' "$ADMINER_DIR/index.php" 2>/dev/null; then
-    # Old version without Adminer 5 namespace
+  elif ! grep -q 'value="hostctl"' "$ADMINER_DIR/index.php" 2>/dev/null; then
+    # Old version with empty auth credentials (blocked by Adminer's empty-password check)
     needs_rewrite=true
   fi
 
@@ -773,18 +770,33 @@ function adminer_object() {
     class HostctlAdminer extends Adminer\Adminer {
         function loginForm() {
             global \$hostctl_servers;
-            \$first = reset(\$hostctl_servers);
-            if (!\$first) {
+            \$driver = 'server';
+            if (isset(\$_GET['pgsql'])) {
+                \$driver = 'pgsql';
+            }
+            \$target = null;
+            foreach (\$hostctl_servers as \$s) {
+                if (\$s['driver'] === \$driver) {
+                    \$target = \$s;
+                    break;
+                }
+            }
+            if (!\$target) {
+                \$target = reset(\$hostctl_servers);
+            }
+            if (!\$target) {
                 echo '<p>No database servers configured.</p>';
                 return;
             }
-            echo '<input type="hidden" name="auth[driver]" value="' . \$first['driver'] . '">';
+            echo '<input type="hidden" name="auth[driver]" value="' . \$target['driver'] . '">';
             echo '<input type="hidden" name="auth[server]" value="">';
-            echo '<input type="hidden" name="auth[username]" value="">';
-            echo '<input type="hidden" name="auth[password]" value="">';
+            echo '<input type="hidden" name="auth[username]" value="hostctl">';
+            echo '<input type="hidden" name="auth[password]" value="hostctl">';
             echo '<input type="hidden" name="auth[db]" value="">';
             if (empty(\$_POST)) {
-                echo '<script>document.addEventListener("DOMContentLoaded",function(){document.querySelector("form").submit()});</script>';
+                echo '<p style="margin:2em 0;color:#888">Connecting to database server&hellip;</p>';
+                echo '<script ' . Adminer\nonce() . '>document.addEventListener("DOMContentLoaded",function(){document.querySelector("form").submit()});</script>';
+                echo '<noscript><input type="submit" value="Connect"></noscript>';
             } else {
                 echo '<p style="color:#c00;margin:1em 0">Auto-login failed &mdash; the database server may be unreachable.</p>';
                 echo '<input type="submit" value="Retry">';
