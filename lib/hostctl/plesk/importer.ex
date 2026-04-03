@@ -847,13 +847,15 @@ defmodule Hostctl.Plesk.Importer do
       normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
 
     with {:ok, import_cmd} <- local_import_command(db_name, db_type),
-         {:ok, ssh_prefix, ssh_key_args, env} <- ssh_command_parts(auth_method, password, ssh_opts) do
+         {:ok, ssh_prefix, ssh_key_args, env} <-
+           ssh_command_parts(auth_method, password, ssh_opts) do
       dump_cmd = remote_dump_command(db_name, db_type)
 
       # SSH into remote, run dump, pipe into local import command
       ssh_args = ["-p", port] ++ ssh_key_args ++ ["#{username}@#{host}", dump_cmd]
 
-      full_shell = "#{ssh_prefix} #{Enum.map_join(ssh_args, " ", &shell_escape/1)} | #{import_cmd}"
+      full_shell =
+        "#{ssh_prefix} #{Enum.map_join(ssh_args, " ", &shell_escape/1)} | #{import_cmd}"
 
       case System.cmd("/bin/sh", ["-c", full_shell], stderr_to_stdout: true, env: env) do
         {_, 0} -> :ok
@@ -875,8 +877,7 @@ defmodule Hostctl.Plesk.Importer do
             []
           end
 
-        {:ok, "#{sshpass} -e ssh",
-         ["-o", "StrictHostKeyChecking=accept-new"], env}
+        {:ok, "#{sshpass} -e ssh", ["-o", "StrictHostKeyChecking=accept-new"], env}
     end
   end
 
