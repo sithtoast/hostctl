@@ -13,6 +13,7 @@ defmodule HostctlWeb.UpdatesLive do
      |> assign(:update_state, :idle)
      |> assign(:update_output, [])
      |> assign(:update_port, nil)
+     |> assign(:current_branch, Updater.current_branch())
      |> assign(:include_prereleases?, Updater.prereleases_enabled?())
      |> assign(:update_possible?, Updater.update_possible?())}
   end
@@ -78,44 +79,54 @@ defmodule HostctlWeb.UpdatesLive do
           <div>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Updates</h1>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Check for new versions and view release notes.
+              <%= if @current_branch != "main" do %>
+                Tracking branch
+                <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 font-mono text-xs font-medium">
+                  {@current_branch}
+                </span>
+                for new commits.
+              <% else %>
+                Check for new versions and view release notes.
+              <% end %>
             </p>
           </div>
           <div class="flex items-center gap-3">
-            <button
-              id="prerelease-toggle"
-              type="button"
-              role="switch"
-              aria-checked={to_string(@include_prereleases?)}
-              aria-label="Include pre-releases"
-              phx-click="toggle_prereleases"
-              disabled={@update_state == :running}
-              class={[
-                "group inline-flex items-center gap-3 rounded-xl border px-3 py-2 text-sm transition-colors",
-                @update_state == :running &&
-                  "cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-600",
-                @update_state != :running &&
-                  "border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
-              ]}
-            >
-              <span class="text-left">
-                <span class="block font-medium text-gray-900 dark:text-white">Pre-releases</span>
-                <span class="block text-xs text-gray-500 dark:text-gray-400">
-                  Include beta and release candidate builds
+            <%= if @current_branch == "main" do %>
+              <button
+                id="prerelease-toggle"
+                type="button"
+                role="switch"
+                aria-checked={to_string(@include_prereleases?)}
+                aria-label="Include pre-releases"
+                phx-click="toggle_prereleases"
+                disabled={@update_state == :running}
+                class={[
+                  "group inline-flex items-center gap-3 rounded-xl border px-3 py-2 text-sm transition-colors",
+                  @update_state == :running &&
+                    "cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-600",
+                  @update_state != :running &&
+                    "border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+                ]}
+              >
+                <span class="text-left">
+                  <span class="block font-medium text-gray-900 dark:text-white">Pre-releases</span>
+                  <span class="block text-xs text-gray-500 dark:text-gray-400">
+                    Include beta and release candidate builds
+                  </span>
                 </span>
-              </span>
-              <span class={[
-                "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
-                @include_prereleases? && "bg-amber-500",
-                !@include_prereleases? && "bg-gray-300 dark:bg-gray-700"
-              ]}>
                 <span class={[
-                  "inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
-                  @include_prereleases? && "translate-x-5",
-                  !@include_prereleases? && "translate-x-0.5"
-                ]} />
-              </span>
-            </button>
+                  "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
+                  @include_prereleases? && "bg-amber-500",
+                  !@include_prereleases? && "bg-gray-300 dark:bg-gray-700"
+                ]}>
+                  <span class={[
+                    "inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
+                    @include_prereleases? && "translate-x-5",
+                    !@include_prereleases? && "translate-x-0.5"
+                  ]} />
+                </span>
+              </button>
+            <% end %>
 
             <%= if @check_status != :loading do %>
               <button
@@ -137,8 +148,8 @@ defmodule HostctlWeb.UpdatesLive do
               </div>
               <span class="text-sm">Checking for updates…</span>
             </div>
-          <% @check_status == :ok and @update_info.has_update -> %>
-            <%!-- Update available --%>
+          <% @check_status == :ok and @update_info.has_update and @update_info.mode == :release -> %>
+            <%!-- Release update available --%>
             <div class="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-6">
               <div class="flex items-start gap-4">
                 <div class="flex items-center justify-center w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/50 shrink-0 mt-0.5">
@@ -204,8 +215,76 @@ defmodule HostctlWeb.UpdatesLive do
                 </div>
               </div>
             </div>
-          <% @check_status == :ok -> %>
-            <%!-- Up to date --%>
+          <% @check_status == :ok and @update_info.has_update and @update_info.mode == :branch -> %>
+            <%!-- Branch update available --%>
+            <div class="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-6">
+              <div class="flex items-start gap-4">
+                <div class="flex items-center justify-center w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/50 shrink-0 mt-0.5">
+                  <.icon
+                    name="hero-arrow-up-circle"
+                    class="w-5 h-5 text-amber-600 dark:text-amber-400"
+                  />
+                </div>
+                <div class="flex-1 min-w-0">
+                  <p class="text-base font-semibold text-amber-900 dark:text-amber-200">
+                    {@update_info.behind_by} new {ngettext(
+                      "commit",
+                      "commits",
+                      @update_info.behind_by
+                    )} on {@update_info.branch}
+                  </p>
+                  <p class="mt-1 text-sm text-amber-700 dark:text-amber-400">
+                    The remote branch has new commits since your last update.
+                  </p>
+                  <div class="mt-3 flex flex-wrap items-center gap-2 text-xs font-mono">
+                    <span class="px-2.5 py-1 rounded-full bg-white/60 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-700">
+                      local: {@update_info.current}
+                    </span>
+                    <.icon name="hero-arrow-right" class="w-3.5 h-3.5 text-amber-500" />
+                    <span class="px-2.5 py-1 rounded-full bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700 font-semibold">
+                      remote: {@update_info.latest}
+                    </span>
+                  </div>
+                  <%!-- Commit list --%>
+                  <%= if @update_info.commits != [] do %>
+                    <div class="mt-4 space-y-1.5">
+                      <div
+                        :for={commit <- @update_info.commits}
+                        class="flex items-baseline gap-2 text-xs"
+                      >
+                        <code class="shrink-0 text-amber-600 dark:text-amber-400">
+                          {commit.sha}
+                        </code>
+                        <span class="text-gray-700 dark:text-gray-300 truncate">
+                          {commit.message}
+                        </span>
+                      </div>
+                    </div>
+                  <% end %>
+                  <div class="mt-4 flex flex-wrap items-center gap-3">
+                    <%= if @update_possible? and @current_scope.user.role == "admin" and @update_state == :idle do %>
+                      <button
+                        id="run-update-btn"
+                        phx-click="run_update"
+                        phx-confirm="This will fetch the latest code, rebuild the release, and restart the service. The page will reconnect automatically. Continue?"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold text-white bg-amber-600 hover:bg-amber-700 active:bg-amber-800 rounded-lg transition-colors"
+                      >
+                        <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Update now
+                      </button>
+                    <% end %>
+                    <%= if @update_state == :running do %>
+                      <span class="inline-flex items-center gap-1.5 text-sm text-amber-700 dark:text-amber-400">
+                        <div class="animate-spin rounded-full h-3.5 w-3.5 border-2 border-amber-500 border-t-transparent">
+                        </div>
+                        Updating…
+                      </span>
+                    <% end %>
+                  </div>
+                </div>
+              </div>
+            </div>
+          <% @check_status == :ok and @update_info.mode == :release -> %>
+            <%!-- Up to date (release) --%>
             <div class="bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-xl p-6">
               <div class="flex items-start gap-4">
                 <div class="flex items-center justify-center w-10 h-10 rounded-full bg-emerald-100 dark:bg-emerald-900/50 shrink-0 mt-0.5">
@@ -234,6 +313,29 @@ defmodule HostctlWeb.UpdatesLive do
                       Released {format_date(@update_info.release.published_at)}
                     </p>
                   <% end %>
+                </div>
+              </div>
+            </div>
+          <% @check_status == :ok and @update_info.mode == :branch -> %>
+            <%!-- Up to date (branch) --%>
+            <div class="bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-xl p-6">
+              <div class="flex items-start gap-4">
+                <div class="flex items-center justify-center w-10 h-10 rounded-full bg-emerald-100 dark:bg-emerald-900/50 shrink-0 mt-0.5">
+                  <.icon
+                    name="hero-check-circle"
+                    class="w-5 h-5 text-emerald-600 dark:text-emerald-400"
+                  />
+                </div>
+                <div>
+                  <p class="text-base font-semibold text-emerald-900 dark:text-emerald-200">
+                    Up to date on {@update_info.branch}
+                  </p>
+                  <p class="mt-1 text-sm text-emerald-700 dark:text-emerald-400">
+                    You are running the latest commit on this branch.
+                  </p>
+                  <span class="mt-3 inline-flex items-center px-2.5 py-1 rounded-full bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 text-xs font-mono font-semibold">
+                    {@update_info.current}
+                  </span>
                 </div>
               </div>
             </div>
@@ -345,8 +447,8 @@ defmodule HostctlWeb.UpdatesLive do
           </script>
         <% end %>
 
-        <%!-- Release notes --%>
-        <%= if @check_status == :ok and @update_info.release.body not in [nil, ""] do %>
+        <%!-- Release notes (release mode only) --%>
+        <%= if @check_status == :ok and @update_info.mode == :release and @update_info.release.body not in [nil, ""] do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
             <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-800">
               <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Release notes</h2>
@@ -359,8 +461,8 @@ defmodule HostctlWeb.UpdatesLive do
           </div>
         <% end %>
 
-        <%!-- Update instructions --%>
-        <%= if @check_status == :ok and @update_info.has_update do %>
+        <%!-- Update instructions (release mode only) --%>
+        <%= if @check_status == :ok and @update_info.mode == :release and @update_info.has_update do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
             <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-800">
               <h2 class="text-sm font-semibold text-gray-900 dark:text-white">How to update</h2>
@@ -459,6 +561,12 @@ defmodule HostctlWeb.UpdatesLive do
 
   defp error_message({:error, :no_releases}),
     do: "No releases found. Make sure the GitHub repository is configured correctly."
+
+  defp error_message({:error, :no_commit_info}),
+    do: "Unable to determine the current commit. Make sure /etc/hostctl/commit exists."
+
+  defp error_message({:error, :commit_not_found}),
+    do: "Could not compare commits. The local commit may no longer exist on the remote."
 
   defp error_message({:error, :rate_limited}),
     do: "GitHub API rate limit exceeded. Please try again later."

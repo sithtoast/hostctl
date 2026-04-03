@@ -929,6 +929,7 @@ POSTGRES_ROOT_URL=postgres://postgres:$POSTGRES_ROOT_PASSWORD@localhost:5432/pos
 SECRET_KEY_BASE=$SECRET_KEY_BASE
 INITIAL_SETUP_TOKEN=$INITIAL_SETUP_TOKEN
 POOL_SIZE=10
+HOSTCTL_BRANCH=$REPO_BRANCH
 ENVEOF
 
   chmod 640 "$ENV_FILE"
@@ -944,13 +945,19 @@ step "Running database migrations"
 sudo -u "$SERVICE_USER" env $(grep -v '^#' "$ENV_FILE" | xargs) "$APP_DIR/bin/migrate"
 success "Migrations complete"
 
-# 3f-1. Write version file -----------------------------------------------------
+# 3f-1. Write version and commit files ------------------------------------------
 VERSION_TAG=$(git -C "$SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null \
   || git -C "$SOURCE_DIR" describe --tags 2>/dev/null \
   || echo "")
 if [[ -n "$VERSION_TAG" ]]; then
   echo "$VERSION_TAG" > "/etc/$APP_NAME/version"
   success "Version recorded: $VERSION_TAG"
+fi
+
+COMMIT_SHA=$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "")
+if [[ -n "$COMMIT_SHA" ]]; then
+  echo "$COMMIT_SHA" > "/etc/$APP_NAME/commit"
+  success "Commit recorded: ${COMMIT_SHA:0:8}"
 fi
 
 # 3g. Systemd service ----------------------------------------------------------

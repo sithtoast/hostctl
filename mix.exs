@@ -4,7 +4,7 @@ defmodule Hostctl.MixProject do
   def project do
     [
       app: :hostctl,
-      version: "0.11.4",
+      version: "0.12.0",
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -21,7 +21,7 @@ defmodule Hostctl.MixProject do
   def application do
     [
       mod: {Hostctl.Application, []},
-      extra_applications: [:logger, :runtime_tools]
+      extra_applications: [:logger, :runtime_tools, :ssh]
     ]
   end
 
