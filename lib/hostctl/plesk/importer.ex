@@ -642,7 +642,9 @@ defmodule Hostctl.Plesk.Importer do
     if subdomain_exists?(domain, sub.name) do
       :skipped
     else
-      case Hosting.create_subdomain(domain, %{name: sub.name}) do
+      # Skip auto-creating DNS records — the "dns" restore category handles
+      # those with the actual records from Plesk (with IP replacement).
+      case Hosting.create_subdomain(domain, %{name: sub.name}, skip_dns_records: true) do
         {:ok, _} -> :created
         {:error, cs} -> {:failed, "#{sub.full_name}: #{changeset_error_summary(cs)}"}
       end
@@ -705,7 +707,6 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   @plesk_rsync_excludes [
-    "logs/",
     ".cache/",
     ".composer/",
     ".local/",
@@ -717,6 +718,7 @@ defmodule Hostctl.Plesk.Importer do
     ".rbenv/",
     ".wp-cli/",
     ".revisium_antivirus_cache/",
+    "error_docs/",
     ".bash*",
     ".node-version",
     ".php-ini",
@@ -727,7 +729,7 @@ defmodule Hostctl.Plesk.Importer do
     ".yarnrc"
   ]
 
-  defp restore_web_files(_domain, item, ssh_opts, local_base_path) do
+  defp restore_web_files(domain, item, ssh_opts, local_base_path) do
     # Rsync the entire domain directory, not just the document root
     remote_path = "/var/www/vhosts/#{item.domain}"
 
@@ -738,7 +740,14 @@ defmodule Hostctl.Plesk.Importer do
                excludes: @plesk_rsync_excludes
              ) do
           :ok ->
+            # Plesk uses httpdocs/ as docroot; hostctl uses public/.
+            # Rename httpdocs → public so nginx serves the right content.
+            rename_httpdocs_to_public(local_base_path)
             Hostctl.WebServer.chown_to_www_data(local_base_path)
+
+            # Update the domain's document_root in case it was provisioned
+            # with the default "/var/www/{name}/public" during create_domain.
+            update_domain_document_root(domain, local_base_path)
             :created
 
           {:error, reason} ->
@@ -748,6 +757,39 @@ defmodule Hostctl.Plesk.Importer do
       {:error, reason} ->
         {:failed, "#{item.domain}: #{reason}"}
     end
+  end
+
+  defp rename_httpdocs_to_public(base_path) do
+    httpdocs = Path.join(base_path, "httpdocs")
+    public = Path.join(base_path, "public")
+
+    # Only rename if httpdocs exists
+    args = [
+      "systemd-run", "--pipe", "--wait", "--collect", "--quiet",
+      "/bin/bash", "-c",
+      "if [ -d '#{httpdocs}' ]; then rm -rf '#{public}' && mv '#{httpdocs}' '#{public}'; fi"
+    ]
+
+    case System.cmd("sudo", args, stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      {output, code} ->
+        Logger.warning(
+          "[Importer] Could not rename httpdocs → public in #{base_path} " <>
+            "(exit #{code}): #{String.trim(output)}"
+        )
+    end
+  end
+
+  defp update_domain_document_root(domain, base_path) do
+    public = Path.join(base_path, "public")
+
+    if domain.document_root != public do
+      domain
+      |> Ecto.Changeset.change(document_root: public)
+      |> Hostctl.Repo.update()
+    end
+
+    :ok
   end
 
   defp ensure_local_directory(path) do
@@ -822,7 +864,8 @@ defmodule Hostctl.Plesk.Importer do
           env_args ++
           [
             rsync,
-            "-az",
+            "-rltzD",
+            "--chmod=D755,F644",
             "--timeout=#{timeout}",
             "--rsync-path=#{rsync_path}"
           ] ++
@@ -835,7 +878,8 @@ defmodule Hostctl.Plesk.Importer do
           ]
 
       case System.cmd("sudo", args, stderr_to_stdout: true, env: env) do
-        {_, 0} -> :ok
+        # exit 0 = success, exit 24 = partial transfer (vanished source files) — both OK
+        {_, code} when code in [0, 24] -> :ok
         {output, _} -> {:error, String.trim(output)}
       end
     end

@@ -260,13 +260,16 @@ defmodule Hostctl.Hosting do
     Repo.all(from s in Subdomain, where: s.domain_id == ^domain.id, order_by: [asc: s.name])
   end
 
-  def create_subdomain(%Domain{} = domain, attrs) do
+  def create_subdomain(%Domain{} = domain, attrs, opts \\ []) do
     %Subdomain{domain_id: domain.id}
     |> Subdomain.changeset(attrs)
     |> Repo.insert()
     |> case do
       {:ok, subdomain} = result ->
-        maybe_create_subdomain_dns_records(domain, subdomain.name)
+        unless Keyword.get(opts, :skip_dns_records, false) do
+          maybe_create_subdomain_dns_records(domain, subdomain.name)
+        end
+
         WebServer.sync_domain(domain)
         result
 
