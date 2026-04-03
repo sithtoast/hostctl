@@ -869,7 +869,7 @@ defmodule Hostctl.Plesk.Importer do
     File.mkdir_p!(local_dir)
 
     backup_cmd =
-      "plesk bin pleskbackup --domains-name #{shell_escape(domain_name)}" <>
+      "sudo plesk bin pleskbackup --domains-name #{shell_escape(domain_name)}" <>
         " -exclude-files -exclude-mail -exclude-logs" <>
         " -output-file #{shell_escape(remote_tar)}"
 
