@@ -72,10 +72,10 @@ defmodule Hostctl.Hosting.Domain do
 
     auto_generated? =
       is_nil(doc_root) or doc_root == "" or
-        Regex.match?(~r|^/var/www/[^/]+/public$|, doc_root)
+        Regex.match?(~r{^/var/www/[^/]+/(public|httpdocs)$}, doc_root)
 
     if is_binary(name) and name != "" and auto_generated? do
-      put_change(changeset, :document_root, "/var/www/#{name}/public")
+      put_change(changeset, :document_root, "/var/www/#{name}/httpdocs")
     else
       changeset
     end

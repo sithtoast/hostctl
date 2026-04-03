@@ -62,7 +62,7 @@ defmodule Hostctl.WebServer do
       end
 
       # Ensure the document root exists before nginx tries to serve from it
-      provision_webroot(domain.document_root || "/var/www/#{domain.name}/public")
+      provision_webroot(domain.document_root || "/var/www/#{domain.name}/httpdocs")
 
       Enum.each(subdomains, fn sub ->
         sub_root =

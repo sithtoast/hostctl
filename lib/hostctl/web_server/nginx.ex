@@ -42,7 +42,7 @@ defmodule Hostctl.WebServer.Nginx do
   # ---------------------------------------------------------------------------
 
   defp active_config(%Domain{} = domain, subdomains, ssl_cert, proxies) do
-    doc_root = domain.document_root || "/var/www/#{domain.name}/public"
+    doc_root = domain.document_root || "/var/www/#{domain.name}/httpdocs"
     php_socket = php_fpm_socket(domain.php_version)
     use_ssl = ssl_active?(domain, ssl_cert)
 

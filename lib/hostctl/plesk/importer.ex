@@ -729,8 +729,11 @@ defmodule Hostctl.Plesk.Importer do
     ".yarnrc"
   ]
 
-  defp restore_web_files(domain, item, ssh_opts, local_base_path) do
-    # Rsync the entire domain directory, not just the document root
+  defp restore_web_files(_domain, item, ssh_opts, local_base_path) do
+    # Rsync the entire domain directory, not just the document root.
+    # Plesk stores web files under /var/www/vhosts/{domain}/ with httpdocs/
+    # as the docroot. Our default domain docroot is also httpdocs/, so the
+    # rsynced structure maps directly with no rename needed.
     remote_path = "/var/www/vhosts/#{item.domain}"
 
     case ensure_local_directory(local_base_path) do
@@ -740,14 +743,7 @@ defmodule Hostctl.Plesk.Importer do
                excludes: @plesk_rsync_excludes
              ) do
           :ok ->
-            # Plesk uses httpdocs/ as docroot; hostctl uses public/.
-            # Rename httpdocs → public so nginx serves the right content.
-            rename_httpdocs_to_public(local_base_path)
-            Hostctl.WebServer.chown_to_www_data(local_base_path)
-
-            # Update the domain's document_root in case it was provisioned
-            # with the default "/var/www/{name}/public" during create_domain.
-            update_domain_document_root(domain, local_base_path)
+            chown_web_files(local_base_path)
             :created
 
           {:error, reason} ->
@@ -759,37 +755,26 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp rename_httpdocs_to_public(base_path) do
-    httpdocs = Path.join(base_path, "httpdocs")
-    public = Path.join(base_path, "public")
-
-    # Only rename if httpdocs exists
+  defp chown_web_files(path) do
     args = [
       "systemd-run", "--pipe", "--wait", "--collect", "--quiet",
-      "/bin/bash", "-c",
-      "if [ -d '#{httpdocs}' ]; then rm -rf '#{public}' && mv '#{httpdocs}' '#{public}'; fi"
+      "chown", "-R", "www-data:www-data", path
     ]
 
+    Logger.info("[Importer] chown -R www-data:www-data #{path}")
+
     case System.cmd("sudo", args, stderr_to_stdout: true) do
-      {_, 0} -> :ok
+      {_, 0} ->
+        Logger.info("[Importer] chown completed for #{path}")
+        :ok
+
       {output, code} ->
         Logger.warning(
-          "[Importer] Could not rename httpdocs → public in #{base_path} " <>
-            "(exit #{code}): #{String.trim(output)}"
+          "[Importer] chown failed for #{path} (exit #{code}): #{String.trim(output)}"
         )
+
+        {:error, String.trim(output)}
     end
-  end
-
-  defp update_domain_document_root(domain, base_path) do
-    public = Path.join(base_path, "public")
-
-    if domain.document_root != public do
-      domain
-      |> Ecto.Changeset.change(document_root: public)
-      |> Hostctl.Repo.update()
-    end
-
-    :ok
   end
 
   defp ensure_local_directory(path) do
