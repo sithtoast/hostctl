@@ -758,6 +758,9 @@ if [[ -f "$ADMINER_DIR/adminer.php" ]]; then
   elif ! grep -q 'document.querySelector' "$ADMINER_DIR/index.php" 2>/dev/null; then
     # Old version without auto-submit
     needs_rewrite=true
+  elif ! grep -q 'Adminer\\\\Adminer' "$ADMINER_DIR/index.php" 2>/dev/null; then
+    # Old version without Adminer 5 namespace
+    needs_rewrite=true
   fi
 
   if $needs_rewrite; then
@@ -767,7 +770,7 @@ if [[ -f "$ADMINER_DIR/adminer.php" ]]; then
 ${SERVERS_PHP}];
 
 function adminer_object() {
-    class HostctlAdminer extends Adminer {
+    class HostctlAdminer extends Adminer\Adminer {
         function loginForm() {
             global \$hostctl_servers;
             \$first = reset(\$hostctl_servers);

@@ -1277,7 +1277,7 @@ defmodule Hostctl.FeatureSetup do
         ];
 
         function adminer_object() {
-            class HostctlAdminer extends Adminer {
+            class HostctlAdminer extends Adminer\\Adminer {
                 function loginForm() {
                     global $hostctl_servers;
                     $first = reset($hostctl_servers);
