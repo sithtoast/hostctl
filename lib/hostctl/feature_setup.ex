@@ -142,6 +142,42 @@ defmodule Hostctl.FeatureSetup do
       packages: ["spamassassin", "spamc"],
       services: [],
       setup_fn: :setup_spamassassin
+    },
+    %{
+      key: "phpmyadmin",
+      label: "phpMyAdmin",
+      description:
+        "Web-based MySQL/MariaDB administration tool. Browse tables, run queries, and manage users from the browser at /phpmyadmin.",
+      icon: "hero-circle-stack",
+      packages: [
+        "phpmyadmin",
+        "apache2",
+        "libapache2-mod-php",
+        "php-mysql",
+        "php-mbstring",
+        "php-zip",
+        "php-gd",
+        "php-json",
+        "php-curl"
+      ],
+      services: [],
+      setup_fn: :setup_phpmyadmin
+    },
+    %{
+      key: "adminer",
+      label: "Adminer",
+      description:
+        "Lightweight database management tool supporting PostgreSQL and MySQL in a single PHP file. Accessible at /adminer.",
+      icon: "hero-circle-stack",
+      packages: [
+        "apache2",
+        "libapache2-mod-php",
+        "php-pgsql",
+        "php-mysql",
+        "php-mbstring"
+      ],
+      services: [],
+      setup_fn: :setup_adminer
     }
   ]
 
@@ -1079,6 +1115,122 @@ defmodule Hostctl.FeatureSetup do
     case System.cmd("systemctl", ["list-unit-files", "#{name}.service"], stderr_to_stdout: true) do
       {output, _} -> String.contains?(output, "#{name}.service")
     end
+  end
+
+  @doc false
+  def setup_phpmyadmin(key) do
+    broadcast(key, :log, "Configuring phpMyAdmin...")
+
+    blowfish_secret = :crypto.strong_rand_bytes(32) |> Base.encode64() |> binary_part(0, 32)
+
+    config = """
+    <?php
+    $cfg['blowfish_secret'] = '#{blowfish_secret}';
+    $cfg['Servers'][1]['auth_type'] = 'cookie';
+    $cfg['Servers'][1]['host'] = 'localhost';
+    $cfg['Servers'][1]['compress'] = false;
+    $cfg['Servers'][1]['AllowNoPassword'] = false;
+    $cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
+    """
+
+    with :ok <- setup_apache_port(key),
+         :ok <- write_file_via_sudo(key, "/etc/phpmyadmin/config.inc.php", config),
+         :ok <- run_cmd(key, "mkdir", ["-p", "/var/lib/phpmyadmin/tmp"]),
+         :ok <- run_cmd(key, "chown", ["-R", "www-data:www-data", "/var/lib/phpmyadmin/tmp"]),
+         :ok <- write_phpmyadmin_apache_conf(key),
+         :ok <- enable_apache_conf(key, "phpmyadmin") do
+      broadcast(key, :log, "phpMyAdmin configuration complete.")
+      broadcast(key, :log, "phpMyAdmin is available at /phpmyadmin")
+      :ok
+    end
+  end
+
+  defp write_phpmyadmin_apache_conf(key) do
+    broadcast(key, :log, "Writing Apache config for phpMyAdmin...")
+
+    conf = """
+    Alias /phpmyadmin /usr/share/phpmyadmin
+
+    <Directory /usr/share/phpmyadmin>
+        Options SymLinksIfOwnerMatch
+        DirectoryIndex index.php
+        AllowOverride All
+        Require all granted
+
+        <FilesMatch "\\.php$">
+            SetHandler application/x-httpd-php
+        </FilesMatch>
+    </Directory>
+
+    <Directory /usr/share/phpmyadmin/templates>
+        Require all denied
+    </Directory>
+
+    <Directory /usr/share/phpmyadmin/libraries>
+        Require all denied
+    </Directory>
+    """
+
+    write_file_via_sudo(key, "/etc/apache2/conf-available/phpmyadmin.conf", conf)
+  end
+
+  @doc false
+  def setup_adminer(key) do
+    broadcast(key, :log, "Installing Adminer...")
+
+    install_dir = "/var/www/adminer"
+
+    with :ok <- setup_apache_port(key),
+         :ok <- run_cmd(key, "mkdir", ["-p", install_dir]),
+         :ok <- download_adminer(key, install_dir),
+         :ok <- run_cmd(key, "chown", ["-R", "www-data:www-data", install_dir]),
+         :ok <- write_adminer_apache_conf(key),
+         :ok <- enable_apache_conf(key, "adminer") do
+      broadcast(key, :log, "Adminer configuration complete.")
+      broadcast(key, :log, "Adminer is available at /adminer")
+      :ok
+    end
+  end
+
+  defp download_adminer(key, install_dir) do
+    broadcast(key, :log, "Downloading latest Adminer release...")
+
+    url = "https://www.adminer.org/latest.php"
+
+    case escaped_cmd(
+           "sh",
+           ["-c", "curl -fsSL -o '#{install_dir}/index.php' '#{url}'"],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        broadcast(key, :log, "Adminer downloaded.")
+        :ok
+
+      {output, code} ->
+        broadcast(key, :log, "Download failed (exit #{code}): #{output}")
+        {:error, {:download_failed, code}}
+    end
+  end
+
+  defp write_adminer_apache_conf(key) do
+    broadcast(key, :log, "Writing Apache config for Adminer...")
+
+    conf = """
+    Alias /adminer /var/www/adminer
+
+    <Directory /var/www/adminer>
+        Options -Indexes
+        DirectoryIndex index.php
+        AllowOverride All
+        Require all granted
+
+        <FilesMatch "\\.php$">
+            SetHandler application/x-httpd-php
+        </FilesMatch>
+    </Directory>
+    """
+
+    write_file_via_sudo(key, "/etc/apache2/conf-available/adminer.conf", conf)
   end
 
   # ---------------------------------------------------------------------------

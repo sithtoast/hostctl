@@ -2,6 +2,7 @@ defmodule HostctlWeb.PanelLive.Databases do
   use HostctlWeb, :live_view
 
   alias Hostctl.Hosting
+  alias Hostctl.Settings
 
   @impl true
   def render(assigns) do
@@ -16,9 +17,25 @@ defmodule HostctlWeb.PanelLive.Databases do
               All databases across every user and domain.
             </p>
           </div>
-          <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-xs font-medium text-gray-600 dark:text-gray-300">
-            {@total} total
-          </span>
+          <div class="flex items-center gap-2">
+            <%= if @db_admin_links != [] do %>
+              <a
+                :for={{_key, label, path, icon, hint} <- @db_admin_links}
+                href={path}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={hint}
+                class="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 text-sm font-medium rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                <.icon name={icon} class="w-4 h-4" />
+                {label}
+                <.icon name="hero-arrow-top-right-on-square" class="w-3.5 h-3.5 text-gray-400" />
+              </a>
+            <% end %>
+            <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-xs font-medium text-gray-600 dark:text-gray-300">
+              {@total} total
+            </span>
+          </div>
         </div>
 
         <%!-- Table --%>
@@ -86,6 +103,15 @@ defmodule HostctlWeb.PanelLive.Databases do
      |> assign(:page_title, "All Databases")
      |> assign(:total, length(databases))
      |> assign(:dbs_empty?, databases == [])
+     |> assign(:db_admin_links, db_admin_links())
      |> stream(:databases, databases)}
+  end
+
+  defp db_admin_links do
+    [
+      {"phpmyadmin", "phpMyAdmin", "/phpmyadmin", "hero-circle-stack", "MySQL"},
+      {"adminer", "Adminer", "/adminer", "hero-circle-stack", "PostgreSQL & MySQL"}
+    ]
+    |> Enum.filter(fn {key, _, _, _, _} -> Settings.feature_enabled?(key) end)
   end
 end

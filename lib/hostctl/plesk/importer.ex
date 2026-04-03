@@ -306,7 +306,11 @@ defmodule Hostctl.Plesk.Importer do
     progress_pid = Keyword.get(opts, :progress_pid)
     domain_name = subscription.domain
 
-    restore_opts = %{ssh_opts: ssh_opts, web_files_path: web_files_path, progress_pid: progress_pid}
+    restore_opts = %{
+      ssh_opts: ssh_opts,
+      web_files_path: web_files_path,
+      progress_pid: progress_pid
+    }
 
     result = %{
       domain: domain_name,
@@ -420,7 +424,9 @@ defmodule Hostctl.Plesk.Importer do
     # Filter records belonging to this domain and with supported types
     domain_records =
       records
-      |> Enum.filter(fn r -> r.domain == domain.name and MapSet.member?(supported_types, r.type) end)
+      |> Enum.filter(fn r ->
+        r.domain == domain.name and MapSet.member?(supported_types, r.type)
+      end)
 
     if domain_records == [] do
       %{created: 0, skipped: 0, failed: 0, errors: []}
@@ -451,8 +457,7 @@ defmodule Hostctl.Plesk.Importer do
 
       existing_set = MapSet.new(existing_records)
 
-      Enum.reduce(domain_records, %{created: 0, skipped: 0, failed: 0, errors: []}, fn rec,
-                                                                                        acc ->
+      Enum.reduce(domain_records, %{created: 0, skipped: 0, failed: 0, errors: []}, fn rec, acc ->
         key = {rec.type, rec.name, rec.value}
 
         if MapSet.member?(existing_set, key) do
@@ -473,7 +478,8 @@ defmodule Hostctl.Plesk.Importer do
               %{
                 acc
                 | failed: acc.failed + 1,
-                  errors: acc.errors ++ ["#{rec.type} #{rec.name}: #{changeset_error_summary(cs)}"]
+                  errors:
+                    acc.errors ++ ["#{rec.type} #{rec.name}: #{changeset_error_summary(cs)}"]
               }
           end
         end

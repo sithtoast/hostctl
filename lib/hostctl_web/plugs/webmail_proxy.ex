@@ -1,15 +1,15 @@
 defmodule HostctlWeb.Plugs.WebmailProxy do
   @moduledoc """
-  Reverse proxy plug that forwards `/roundcube` and `/snappymail` requests
-  to the local Apache instance on port 8080, so webmail is accessible on the
-  main port without exposing 8080 externally.
+  Reverse proxy plug that forwards `/roundcube`, `/snappymail`, `/phpmyadmin`,
+  and `/adminer` requests to the local Apache instance on port 8080, so these
+  tools are accessible on the main port without exposing 8080 externally.
   """
 
   @behaviour Plug
 
   import Plug.Conn
 
-  @proxy_prefixes ["roundcube", "snappymail"]
+  @proxy_prefixes ["roundcube", "snappymail", "phpmyadmin", "adminer"]
 
   @impl true
   def init(opts), do: opts

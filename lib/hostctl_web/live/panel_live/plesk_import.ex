@@ -629,12 +629,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         {:restore_result, domain, result}
       end)
 
-    progress = Map.put(socket.assigns.restore_progress, domain, %{
-      category: nil,
-      index: 0,
-      total: length(categories),
-      status: :starting
-    })
+    progress =
+      Map.put(socket.assigns.restore_progress, domain, %{
+        category: nil,
+        index: 0,
+        total: length(categories),
+        status: :starting
+      })
 
     task_refs = Map.put(socket.assigns.restore_task_refs, domain, task.ref)
 
@@ -1464,7 +1465,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                   else: ""
                 ),
                 if(restoring,
-                  do: "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 cursor-not-allowed",
+                  do:
+                    "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 cursor-not-allowed",
                   else: ""
                 ),
                 if(not restoring and not (has_result and result_ok),

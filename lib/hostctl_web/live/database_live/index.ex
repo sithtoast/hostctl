@@ -4,6 +4,7 @@ defmodule HostctlWeb.DatabaseLive.Index do
   alias Hostctl.Hosting
   alias Hostctl.Hosting.Database
   alias Hostctl.Hosting.DbUser
+  alias Hostctl.Settings
 
   def mount(_params, _session, socket) do
     domains = Hosting.list_domains(socket.assigns.current_scope)
@@ -19,6 +20,7 @@ defmodule HostctlWeb.DatabaseLive.Index do
      |> assign(:db_users, [])
      |> assign(:db_user_form, nil)
      |> assign(:dbs_empty?, all_databases == [])
+     |> assign(:db_admin_links, db_admin_links())
      |> assign_db_form()
      |> stream(:databases, all_databases)}
   end
@@ -178,6 +180,14 @@ defmodule HostctlWeb.DatabaseLive.Index do
     end
   end
 
+  defp db_admin_links do
+    [
+      {"phpmyadmin", "phpMyAdmin", "/phpmyadmin", "hero-circle-stack", "MySQL"},
+      {"adminer", "Adminer", "/adminer", "hero-circle-stack", "PostgreSQL & MySQL"}
+    ]
+    |> Enum.filter(fn {key, _, _, _, _} -> Settings.feature_enabled?(key) end)
+  end
+
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
@@ -189,6 +199,22 @@ defmodule HostctlWeb.DatabaseLive.Index do
               Manage your MySQL and PostgreSQL databases
             </p>
           </div>
+          <%= if @db_admin_links != [] do %>
+            <div class="flex items-center gap-2">
+              <a
+                :for={{_key, label, path, icon, hint} <- @db_admin_links}
+                href={path}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={hint}
+                class="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 text-sm font-medium rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                <.icon name={icon} class="w-4 h-4" />
+                {label}
+                <.icon name="hero-arrow-top-right-on-square" class="w-3.5 h-3.5 text-gray-400" />
+              </a>
+            </div>
+          <% end %>
         </div>
 
         <%= if @domains == [] do %>
