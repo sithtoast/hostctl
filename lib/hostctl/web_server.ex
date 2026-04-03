@@ -234,7 +234,19 @@ defmodule Hostctl.WebServer do
   end
 
   defp chown_to_www_data(path) do
-    case System.cmd("chown", ["-R", "www-data:www-data", path], stderr_to_stdout: true) do
+    args = [
+      "systemd-run",
+      "--pipe",
+      "--wait",
+      "--collect",
+      "--quiet",
+      "/usr/bin/chown",
+      "-R",
+      "www-data:www-data",
+      path
+    ]
+
+    case System.cmd("sudo", args, stderr_to_stdout: true) do
       {_, 0} ->
         :ok
 
