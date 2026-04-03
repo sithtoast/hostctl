@@ -1055,53 +1055,110 @@ defmodule Hostctl.Plesk.Importer do
 
     Logger.info("[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH (pg_dump=#{pg_dump_bin})")
 
-    # Build sudo -u postgres prefix for peer auth on Unix socket.
-    # -p '' suppresses the password prompt so it doesn't contaminate output.
+    # Build the full dump command. Uses SUDO_ASKPASS (same proven pattern as
+    # rsync) to avoid piping the password through stdin, which can interfere
+    # with command output and cause empty dumps.
     auth_method =
       normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
 
     password =
       normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
 
-    sudo_pg =
+    escaped_pg_dump = shell_escape(pg_dump_bin)
+    escaped_db = shell_escape(db_name)
+    escaped_out = shell_escape(remote_dump)
+
+    dump_cmd =
       if auth_method == "password" and password != "" do
-        "echo #{shell_escape(password)} | sudo -S -p '' -u postgres"
+        escaped_pass = String.replace(password, "'", "'\\''")
+        askpass = "/tmp/hostctl_pgask_#{rand}"
+
+        "AP=#{askpass}; " <>
+          "printf '#!/bin/sh\\necho '\"'\"'#{escaped_pass}'\"'\"'\\n' > $AP && " <>
+          "chmod 700 $AP && " <>
+          "SUDO_ASKPASS=$AP sudo -A -u postgres " <>
+          "#{escaped_pg_dump} --no-owner --no-acl #{escaped_db} > #{escaped_out} 2>&1; " <>
+          "RC=$?; rm -f $AP; " <>
+          "if [ $RC -ne 0 ]; then cat #{escaped_out} >&2; fi; exit $RC"
       else
-        "sudo -u postgres"
+        "sudo -u postgres #{escaped_pg_dump} --no-owner --no-acl " <>
+          "#{escaped_db} > #{escaped_out} 2>&1"
       end
 
-    # --no-owner / --no-acl: skip OWNER and GRANT/REVOKE statements which
-    # reference Plesk-specific users that don't exist on the local server.
-    dump_cmd =
-      "#{sudo_pg} #{shell_escape(pg_dump_bin)} --no-owner --no-acl " <>
-        "#{shell_escape(db_name)} > #{shell_escape(remote_dump)}"
+    with {:ok, output} <- ssh_exec_output(ssh_opts, dump_cmd) do
+      if output != "", do: Logger.info("[Importer] pg_dump output for '#{db_name}': #{output}")
 
-    with :ok <- ssh_exec(ssh_opts, dump_cmd),
-         :ok <- scp_download(ssh_opts, remote_dump, local_dump),
-         _ <- ssh_exec(ssh_opts, "rm -f #{shell_escape(remote_dump)}") do
-      # Verify dump has meaningful content (pg_dump always emits headers ≥ ~200 bytes)
-      case File.stat(local_dump) do
-        {:ok, %{size: size}} when size > 100 ->
-          Logger.info("[Importer] Downloaded PG dump for '#{db_name}': #{size} bytes")
-          {:ok, local_dir, local_dump}
-
-        {:ok, %{size: size}} ->
-          Logger.warning(
-            "[Importer] PG dump for '#{db_name}' is suspiciously small: #{size} bytes"
-          )
-
-          File.rm_rf(local_dir)
-          {:error, "pg_dump produced empty or near-empty output (#{size} bytes)"}
+      case scp_download(ssh_opts, remote_dump, local_dump) do
+        :ok ->
+          ssh_exec(ssh_opts, "rm -f #{escaped_out}")
+          validate_pg_dump(local_dir, local_dump, db_name)
 
         {:error, reason} ->
           File.rm_rf(local_dir)
-          {:error, "dump file not found after download: #{inspect(reason)}"}
+          ssh_exec(ssh_opts, "rm -f #{escaped_out}")
+          {:error, "SCP download failed: #{reason}"}
       end
     else
       {:error, reason} ->
         File.rm_rf(local_dir)
-        ssh_exec(ssh_opts, "rm -f #{shell_escape(remote_dump)}")
+        ssh_exec(ssh_opts, "rm -f #{escaped_out}")
         {:error, reason}
+    end
+  end
+
+  defp validate_pg_dump(local_dir, local_dump, db_name) do
+    case File.stat(local_dump) do
+      {:ok, %{size: size}} when size > 100 ->
+        # Log the first few lines for diagnostics
+        head =
+          case File.open(local_dump, [:read, :utf8]) do
+            {:ok, file} ->
+              lines = Enum.reduce_while(1..15, [], fn _, acc ->
+                case IO.read(file, :line) do
+                  :eof -> {:halt, acc}
+                  {:error, _} -> {:halt, acc}
+                  line -> {:cont, [line | acc]}
+                end
+              end)
+              File.close(file)
+              Enum.reverse(lines)
+
+            _ ->
+              []
+          end
+
+        Logger.info(
+          "[Importer] PG dump head for '#{db_name}' (#{size} bytes):\n" <>
+            Enum.join(head, "")
+        )
+
+        # Check for actual table data
+        has_tables? =
+          case System.cmd("grep", ["-c", "-E", "^(CREATE TABLE|COPY )", local_dump],
+                 stderr_to_stdout: true
+               ) do
+            {count_str, 0} -> String.trim(count_str) != "0"
+            _ -> false
+          end
+
+        if has_tables? do
+          {:ok, local_dir, local_dump}
+        else
+          Logger.warning("[Importer] PG dump for '#{db_name}' has no CREATE TABLE or COPY statements")
+          {:ok, local_dir, local_dump}
+        end
+
+      {:ok, %{size: size}} ->
+        Logger.warning(
+          "[Importer] PG dump for '#{db_name}' is suspiciously small: #{size} bytes"
+        )
+
+        File.rm_rf(local_dir)
+        {:error, "pg_dump produced empty or near-empty output (#{size} bytes)"}
+
+      {:error, reason} ->
+        File.rm_rf(local_dir)
+        {:error, "dump file not found after download: #{inspect(reason)}"}
     end
   end
 
@@ -1408,8 +1465,16 @@ defmodule Hostctl.Plesk.Importer do
       Logger.info("[Importer] Importing DB dump: #{full_cmd}")
 
       case System.cmd("/bin/sh", ["-c", full_cmd], stderr_to_stdout: true) do
-        {_, 0} -> :ok
-        {output, _} -> {:error, String.trim(output)}
+        {output, 0} ->
+          if output != "" do
+            Logger.info("[Importer] DB import output for '#{db_name}': #{String.slice(String.trim(output), 0, 2000)}")
+          end
+
+          :ok
+
+        {output, code} ->
+          Logger.warning("[Importer] DB import failed for '#{db_name}' (exit #{code}): #{String.trim(output)}")
+          {:error, String.trim(output)}
       end
     end
   end
