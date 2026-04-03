@@ -63,7 +63,7 @@ defmodule Hostctl.WebServer.Nginx do
       |> Enum.map(fn sub ->
         sub_root =
           sub.document_root ||
-            "/var/www/#{domain.name}/subdomains/#{sub.name}/public"
+            "/var/www/#{domain.name}/#{sub.name}.#{domain.name}"
 
         vhost_block(
           "#{sub.name}.#{domain.name}",

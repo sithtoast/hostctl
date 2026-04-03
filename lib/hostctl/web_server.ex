@@ -67,7 +67,7 @@ defmodule Hostctl.WebServer do
       Enum.each(subdomains, fn sub ->
         sub_root =
           sub.document_root ||
-            "/var/www/#{domain.name}/subdomains/#{sub.name}/public"
+            "/var/www/#{domain.name}/#{sub.name}.#{domain.name}"
 
         provision_webroot(sub_root)
       end)
@@ -240,7 +240,8 @@ defmodule Hostctl.WebServer do
     end
   end
 
-  defp chown_to_www_data(path) do
+  @doc "Recursively chown the given path to www-data:www-data via sudo."
+  def chown_to_www_data(path) do
     args = [
       "systemd-run",
       "--pipe",

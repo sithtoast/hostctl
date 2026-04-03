@@ -35,11 +35,11 @@ defmodule Hostctl.Hosting.Subdomain do
 
     auto_generated? =
       is_nil(doc_root) or doc_root == "" or
-        Regex.match?(~r|^/var/www/[^/]+/[^/]+/public$|, doc_root)
+        Regex.match?(~r|^/var/www/[^/]+/[^/]+(/public)?$|, doc_root)
 
     if is_binary(subdomain_name) and subdomain_name != "" and
          is_binary(domain_name) and domain_name != "" and auto_generated? do
-      put_change(changeset, :document_root, "/var/www/#{domain_name}/#{subdomain_name}/public")
+      put_change(changeset, :document_root, "/var/www/#{domain_name}/#{subdomain_name}.#{domain_name}")
     else
       changeset
     end

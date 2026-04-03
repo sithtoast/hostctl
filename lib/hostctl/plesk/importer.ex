@@ -704,14 +704,41 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
+  @plesk_rsync_excludes [
+    "logs/",
+    ".cache/",
+    ".composer/",
+    ".local/",
+    ".trash/",
+    ".ssh/",
+    ".pki/",
+    ".nodenv/",
+    ".phpenv/",
+    ".rbenv/",
+    ".wp-cli/",
+    ".revisium_antivirus_cache/",
+    ".bash*",
+    ".node-version",
+    ".php-ini",
+    ".php-version",
+    ".imunify*",
+    ".myimunify*",
+    ".wget*",
+    ".yarnrc"
+  ]
+
   defp restore_web_files(_domain, item, ssh_opts, local_base_path) do
     # Rsync the entire domain directory, not just the document root
     remote_path = "/var/www/vhosts/#{item.domain}"
 
     case ensure_local_directory(local_base_path) do
       :ok ->
-        case rsync_files(ssh_opts, remote_path, local_base_path) do
+        case do_rsync(ssh_opts, remote_path, local_base_path,
+               timeout: 3600,
+               excludes: @plesk_rsync_excludes
+             ) do
           :ok ->
+            Hostctl.WebServer.chown_to_www_data(local_base_path)
             :created
 
           {:error, reason} ->
@@ -732,10 +759,6 @@ defmodule Hostctl.Plesk.Importer do
       {_, 0} -> :ok
       {output, _} -> {:error, "Failed to create directory: #{String.trim(output)}"}
     end
-  end
-
-  defp rsync_files(ssh_opts, remote_path, local_path) do
-    do_rsync(ssh_opts, remote_path, local_path, timeout: 300)
   end
 
   defp ensure_local_maildir(path) do
@@ -766,6 +789,7 @@ defmodule Hostctl.Plesk.Importer do
     port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
     username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
     timeout = Keyword.get(opts, :timeout, 300)
+    excludes = Keyword.get(opts, :excludes, [])
 
     # Build the remote rsync-path with sudo.
     # For password auth: feed the password to sudo -S via printf, then
@@ -791,6 +815,8 @@ defmodule Hostctl.Plesk.Importer do
           ["--setenv=#{k}=#{v}"]
         end)
 
+      exclude_args = Enum.map(excludes, fn pattern -> "--exclude=#{pattern}" end)
+
       args =
         ["systemd-run", "--pipe", "--wait", "--collect", "--quiet"] ++
           env_args ++
@@ -798,7 +824,10 @@ defmodule Hostctl.Plesk.Importer do
             rsync,
             "-az",
             "--timeout=#{timeout}",
-            "--rsync-path=#{rsync_path}",
+            "--rsync-path=#{rsync_path}"
+          ] ++
+          exclude_args ++
+          [
             "-e",
             ssh_cmd,
             remote,
