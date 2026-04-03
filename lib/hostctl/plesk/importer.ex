@@ -1237,16 +1237,46 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp local_import_command(db_name, "postgres") do
+    config = Application.get_env(:hostctl, :postgres_server, [])
+
     case find_cmd(["psql"]) do
-      nil -> {:error, "psql client not found"}
-      cmd -> {:ok, "#{cmd} -U postgres #{shell_escape(db_name)}"}
+      nil ->
+        {:error, "psql client not found"}
+
+      cmd ->
+        host = Keyword.get(config, :hostname, "localhost")
+        port = Keyword.get(config, :port, 5432)
+        user = Keyword.get(config, :username, "postgres")
+
+        {:ok,
+         "PGPASSWORD=#{shell_escape(Keyword.get(config, :password, ""))} " <>
+           "#{cmd} -h #{shell_escape(host)} -p #{port} -U #{shell_escape(user)} #{shell_escape(db_name)}"}
     end
   end
 
   defp local_import_command(db_name, _mysql) do
+    config = Application.get_env(:hostctl, :database_server, [])
+
     case find_cmd(["mysql", "mariadb"]) do
-      nil -> {:error, "mysql/mariadb client not found"}
-      cmd -> {:ok, "#{cmd} #{shell_escape(db_name)}"}
+      nil ->
+        {:error, "mysql/mariadb client not found"}
+
+      cmd ->
+        host = Keyword.get(config, :hostname, "localhost")
+        port = Keyword.get(config, :port, 3306)
+        user = Keyword.get(config, :username, "root")
+        pass = Keyword.get(config, :password, "")
+
+        args = "#{cmd} -h #{shell_escape(host)} -P #{port} -u #{shell_escape(user)}"
+
+        args =
+          if pass != "" do
+            args <> " -p#{shell_escape(pass)}"
+          else
+            args
+          end
+
+        {:ok, "#{args} #{shell_escape(db_name)}"}
     end
   end
 
