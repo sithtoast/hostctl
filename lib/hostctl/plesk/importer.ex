@@ -415,8 +415,12 @@ defmodule Hostctl.Plesk.Importer do
 
   defp restore_category("dns", domain, _subscription, inventory, _restore_opts) do
     records = Map.get(inventory, "dns_records", [])
-    # Filter records belonging to this domain
-    domain_records = Enum.filter(records, fn r -> r.domain == domain.name end)
+    supported_types = Hostctl.Hosting.DnsRecord.valid_types() |> MapSet.new()
+
+    # Filter records belonging to this domain and with supported types
+    domain_records =
+      records
+      |> Enum.filter(fn r -> r.domain == domain.name and MapSet.member?(supported_types, r.type) end)
 
     if domain_records == [] do
       %{created: 0, skipped: 0, failed: 0, errors: []}
