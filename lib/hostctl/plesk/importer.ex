@@ -868,8 +868,10 @@ defmodule Hostctl.Plesk.Importer do
 
     File.mkdir_p!(local_dir)
 
+    sudo_prefix = sudo_prefix(ssh_opts)
+
     backup_cmd =
-      "sudo plesk bin pleskbackup --domains-name #{shell_escape(domain_name)}" <>
+      "#{sudo_prefix}plesk bin pleskbackup --domains-name #{shell_escape(domain_name)}" <>
         " -exclude-files -exclude-mail -exclude-logs" <>
         " -output-file #{shell_escape(remote_tar)}"
 
@@ -921,6 +923,23 @@ defmodule Hostctl.Plesk.Importer do
         {_, 0} -> :ok
         {output, _} -> {:error, "scp download failed: #{String.trim(output)}"}
       end
+    end
+  end
+
+  # Builds a sudo prefix for remote commands. With password auth, pipes the
+  # SSH password into `sudo -S`. With key auth, uses plain `sudo` (requires
+  # NOPASSWD in sudoers).
+  defp sudo_prefix(ssh_opts) do
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    password =
+      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+
+    if auth_method == "password" and password != "" do
+      "echo #{shell_escape(password)} | sudo -S "
+    else
+      "sudo "
     end
   end
 
