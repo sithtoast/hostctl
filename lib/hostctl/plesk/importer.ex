@@ -767,6 +767,10 @@ defmodule Hostctl.Plesk.Importer do
     username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
     timeout = Keyword.get(opts, :timeout, 300)
 
+    # Build the remote rsync path with sudo (password-aware)
+    remote_sudo = sudo_prefix(ssh_opts)
+    rsync_path = "#{remote_sudo}rsync"
+
     with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts(ssh_opts) do
       # Ensure remote_path ends with / for rsync directory sync
       remote_path =
@@ -792,7 +796,7 @@ defmodule Hostctl.Plesk.Importer do
             rsync,
             "-az",
             "--timeout=#{timeout}",
-            "--rsync-path=sudo rsync",
+            "--rsync-path=#{rsync_path}",
             "-e",
             ssh_cmd,
             remote,
