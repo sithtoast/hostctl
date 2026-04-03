@@ -7,7 +7,21 @@ defmodule HostctlWeb.DnsLive.Index do
 
   def mount(%{"domain_id" => domain_id}, _session, socket) do
     domain = Hosting.get_domain!(socket.assigns.current_scope, domain_id)
-    zone = Hosting.get_dns_zone_with_records!(domain)
+
+    zone =
+      case Hosting.get_dns_zone_for_domain(domain) do
+        nil ->
+          {:ok, zone} =
+            %Hostctl.Hosting.DnsZone{domain_id: domain.id}
+            |> Hostctl.Hosting.DnsZone.changeset(%{})
+            |> Hostctl.Repo.insert()
+
+          %{zone | dns_records: []}
+
+        _exists ->
+          Hosting.get_dns_zone_with_records!(domain)
+      end
+
     dns_setting = Settings.get_dns_provider_setting()
 
     {:ok,

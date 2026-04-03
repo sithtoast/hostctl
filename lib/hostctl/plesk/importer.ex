@@ -11,6 +11,8 @@ defmodule Hostctl.Plesk.Importer do
   alias Hostctl.Accounts.Scope
   alias Hostctl.Hosting
 
+  import Ecto.Query
+
   @domain_info_regex ~r/<domain-info[^>]*\sname="([^"]+)"/
 
   @doc """
@@ -292,6 +294,7 @@ defmodule Hostctl.Plesk.Importer do
     - `:dry_run` - if true, returns a plan without writing (default: false)
     - `:ssh_opts` - SSH connection opts for mail content and web files rsync
     - `:web_files_path` - local destination path for web files rsync
+    - `:progress_pid` - PID to receive `{:restore_progress, domain, category, index, total, result}` messages
   """
   def restore_domain(%Scope{} = scope, subscription, inventory, opts \\ [])
       when is_map(subscription) and is_map(inventory) do
@@ -300,9 +303,10 @@ defmodule Hostctl.Plesk.Importer do
     dry_run = Keyword.get(opts, :dry_run, false)
     ssh_opts = Keyword.get(opts, :ssh_opts)
     web_files_path = Keyword.get(opts, :web_files_path)
+    progress_pid = Keyword.get(opts, :progress_pid)
     domain_name = subscription.domain
 
-    restore_opts = %{ssh_opts: ssh_opts, web_files_path: web_files_path}
+    restore_opts = %{ssh_opts: ssh_opts, web_files_path: web_files_path, progress_pid: progress_pid}
 
     result = %{
       domain: domain_name,
@@ -345,6 +349,10 @@ defmodule Hostctl.Plesk.Importer do
     subscription |> Map.get(:subdomains, []) |> length()
   end
 
+  defp plan_category_count("dns", _subscription, inventory) do
+    inventory |> Map.get("dns_records", []) |> length()
+  end
+
   defp plan_category_count(category, _subscription, inventory) do
     inventory |> Map.get(category, []) |> length()
   end
@@ -383,9 +391,16 @@ defmodule Hostctl.Plesk.Importer do
         {:error, result}
 
       %{} ->
+        progress_pid = Map.get(restore_opts, :progress_pid)
+        total = length(categories)
+
         category_results =
-          Enum.reduce(categories, %{}, fn category, acc ->
+          categories
+          |> Enum.with_index(1)
+          |> Enum.reduce(%{}, fn {category, index}, acc ->
+            notify_progress(progress_pid, domain_name, category, index, total, :in_progress)
             cat_result = restore_category(category, domain, subscription, inventory, restore_opts)
+            notify_progress(progress_pid, domain_name, category, index, total, cat_result)
             Map.put(acc, category, cat_result)
           end)
 
@@ -398,20 +413,67 @@ defmodule Hostctl.Plesk.Importer do
     do_restore_items(subs, fn sub -> restore_subdomain(domain, sub) end)
   end
 
-  defp restore_category("dns", _domain, _subscription, inventory, _restore_opts) do
-    # DNS records from Plesk are counts only in the probe; skip if no detail
-    records = Map.get(inventory, "dns", [])
+  defp restore_category("dns", domain, _subscription, inventory, _restore_opts) do
+    records = Map.get(inventory, "dns_records", [])
+    # Filter records belonging to this domain
+    domain_records = Enum.filter(records, fn r -> r.domain == domain.name end)
 
-    if records == [] do
+    if domain_records == [] do
       %{created: 0, skipped: 0, failed: 0, errors: []}
     else
-      %{
-        created: 0,
-        skipped: 0,
-        failed: 0,
-        errors: [],
-        note: "DNS record detail import not yet supported from SSH probe"
-      }
+      # Ensure a DNS zone exists for this domain
+      zone =
+        case Hosting.get_dns_zone_for_domain(domain) do
+          nil ->
+            {:ok, zone} =
+              %Hostctl.Hosting.DnsZone{domain_id: domain.id}
+              |> Hostctl.Hosting.DnsZone.changeset(%{})
+              |> Hostctl.Repo.insert()
+
+            zone
+
+          existing_zone ->
+            existing_zone
+        end
+
+      # Get existing records to avoid duplicates
+      existing_records =
+        Hostctl.Repo.all(
+          from(r in Hostctl.Hosting.DnsRecord,
+            where: r.dns_zone_id == ^zone.id,
+            select: {r.type, r.name, r.value}
+          )
+        )
+
+      existing_set = MapSet.new(existing_records)
+
+      Enum.reduce(domain_records, %{created: 0, skipped: 0, failed: 0, errors: []}, fn rec,
+                                                                                        acc ->
+        key = {rec.type, rec.name, rec.value}
+
+        if MapSet.member?(existing_set, key) do
+          %{acc | skipped: acc.skipped + 1}
+        else
+          attrs = %{
+            type: rec.type,
+            name: rec.name,
+            value: rec.value,
+            priority: rec.priority
+          }
+
+          case Hosting.create_dns_record(zone, attrs) do
+            {:ok, _record} ->
+              %{acc | created: acc.created + 1}
+
+            {:error, cs} ->
+              %{
+                acc
+                | failed: acc.failed + 1,
+                  errors: acc.errors ++ ["#{rec.type} #{rec.name}: #{changeset_error_summary(cs)}"]
+              }
+          end
+        end
+      end)
     end
   end
 
@@ -530,6 +592,12 @@ defmodule Hostctl.Plesk.Importer do
 
   defp restore_category(_category, _domain, _subscription, _inventory, _restore_opts) do
     %{created: 0, skipped: 0, failed: 0, errors: []}
+  end
+
+  defp notify_progress(nil, _domain, _category, _index, _total, _status), do: :ok
+
+  defp notify_progress(pid, domain, category, index, total, status) do
+    send(pid, {:restore_progress, domain, category, index, total, status})
   end
 
   defp do_restore_items(items, restore_fn) do

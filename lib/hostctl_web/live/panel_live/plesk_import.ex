@@ -74,6 +74,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:subscriptions, [])
      |> assign(:domain_configs, %{})
      |> assign(:restore_results, %{})
+     |> assign(:restore_progress, %{})
+     |> assign(:restore_task_refs, %{})
      |> assign(:accounts, load_accounts())
      |> assign(:creating_account, false)
      |> assign(:new_account_form, to_form(%{"name" => "", "email" => ""}, as: :account))
@@ -127,7 +129,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:ssh_discovery, nil)
      |> assign(:subscriptions, [])
      |> assign(:domain_configs, %{})
-     |> assign(:restore_results, %{})}
+     |> assign(:restore_results, %{})
+     |> assign(:restore_progress, %{})
+     |> assign(:restore_task_refs, %{})}
   end
 
   @impl true
@@ -331,105 +335,61 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   @impl true
   def handle_event("restore_domain", %{"domain" => domain}, socket) do
-    configs = socket.assigns.domain_configs
-    config = Map.get(configs, domain, %{})
-    account_email = Map.get(config, :account_email, "")
-    categories = config |> Map.get(:categories, MapSet.new()) |> MapSet.to_list()
+    # Ignore if already restoring or restored
+    if Map.has_key?(socket.assigns.restore_task_refs, domain) or
+         Map.has_key?(socket.assigns.restore_results, domain) do
+      {:noreply, socket}
+    else
+      configs = socket.assigns.domain_configs
+      config = Map.get(configs, domain, %{})
+      account_email = Map.get(config, :account_email, "")
+      categories = config |> Map.get(:categories, MapSet.new()) |> MapSet.to_list()
 
-    case resolve_scope(account_email) do
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "#{domain}: #{reason}")}
+      case resolve_scope(account_email) do
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "#{domain}: #{reason}")}
 
-      {:ok, scope} ->
-        subscription = Enum.find(socket.assigns.subscriptions, &(&1.domain == domain))
-        inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, domain)
-        apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
-        ssh_opts = build_ssh_opts(socket.assigns.form_params)
-        web_files_path = Map.get(config, :web_files_path, "/var/www/#{domain}")
-
-        case Importer.restore_domain(scope, subscription, inventory,
-               categories: categories,
-               apply_dns_template: apply_dns,
-               ssh_opts: ssh_opts,
-               web_files_path: web_files_path
-             ) do
-          {:ok, result} ->
-            results = Map.put(socket.assigns.restore_results, domain, {:ok, result})
-
-            {:noreply,
-             socket
-             |> assign(:restore_results, results)
-             |> put_flash(:info, "Restored #{domain} successfully.")}
-
-          {:error, result} ->
-            results = Map.put(socket.assigns.restore_results, domain, {:error, result})
-
-            {:noreply,
-             socket
-             |> assign(:restore_results, results)
-             |> put_flash(:error, "Failed to restore #{domain}.")}
-        end
+        {:ok, scope} ->
+          socket = launch_restore_task(socket, domain, scope, config, categories)
+          {:noreply, socket}
+      end
     end
   end
 
   @impl true
   def handle_event("restore_all", _params, socket) do
-    results =
-      Enum.reduce(socket.assigns.subscriptions, socket.assigns.restore_results, fn sub, acc ->
-        # Skip already-restored domains
-        if Map.has_key?(acc, sub.domain) do
-          acc
+    socket =
+      Enum.reduce(socket.assigns.subscriptions, socket, fn sub, sock ->
+        # Skip already-restored or in-progress domains
+        if Map.has_key?(sock.assigns.restore_results, sub.domain) or
+             Map.has_key?(sock.assigns.restore_task_refs, sub.domain) do
+          sock
         else
-          config = Map.get(socket.assigns.domain_configs, sub.domain, %{})
+          config = Map.get(sock.assigns.domain_configs, sub.domain, %{})
           account_email = Map.get(config, :account_email, "")
           categories = config |> Map.get(:categories, MapSet.new()) |> MapSet.to_list()
 
           case resolve_scope(account_email) do
             {:error, _reason} ->
-              Map.put(
-                acc,
-                sub.domain,
-                {:error,
-                 %{
-                   domain: sub.domain,
-                   domain_status: {:failed, "No account selected"},
-                   categories: %{}
-                 }}
-              )
+              results =
+                Map.put(sock.assigns.restore_results, sub.domain, {
+                  :error,
+                  %{
+                    domain: sub.domain,
+                    domain_status: {:failed, "No account selected"},
+                    categories: %{}
+                  }
+                })
+
+              assign(sock, :restore_results, results)
 
             {:ok, scope} ->
-              inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, sub.domain)
-              apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
-              ssh_opts = build_ssh_opts(socket.assigns.form_params)
-              web_files_path = Map.get(config, :web_files_path, "/var/www/#{sub.domain}")
-
-              case Importer.restore_domain(scope, sub, inventory,
-                     categories: categories,
-                     apply_dns_template: apply_dns,
-                     ssh_opts: ssh_opts,
-                     web_files_path: web_files_path
-                   ) do
-                {:ok, result} -> Map.put(acc, sub.domain, {:ok, result})
-                {:error, result} -> Map.put(acc, sub.domain, {:error, result})
-              end
+              launch_restore_task(sock, sub.domain, scope, config, categories)
           end
         end
       end)
 
-    ok_count = Enum.count(results, fn {_, {status, _}} -> status == :ok end)
-    err_count = Enum.count(results, fn {_, {status, _}} -> status == :error end)
-
-    flash =
-      cond do
-        err_count == 0 -> {:info, "All #{ok_count} domain(s) restored successfully."}
-        ok_count == 0 -> {:error, "All #{err_count} domain(s) failed to restore."}
-        true -> {:info, "Restored #{ok_count} domain(s), #{err_count} failed."}
-      end
-
-    {:noreply,
-     socket
-     |> assign(:restore_results, results)
-     |> put_flash(elem(flash, 0), elem(flash, 1))}
+    {:noreply, socket}
   end
 
   # ── Save / Load migrations ────────────────────────────────────────────
@@ -555,6 +515,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
          |> assign(:subscriptions, subscriptions)
          |> assign(:domain_configs, domain_configs)
          |> assign(:restore_results, %{})
+         |> assign(:restore_progress, %{})
          |> put_flash(:info, "Discovered #{length(subscriptions)} domain(s).")}
 
       {:error, reason} ->
@@ -572,9 +533,115 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> put_flash(:error, "Discovery failed unexpectedly: #{inspect(reason)}")}
   end
 
+  # Restore task completed
+  @impl true
+  def handle_info({ref, {:restore_result, domain, result}}, socket) do
+    Process.demonitor(ref, [:flush])
+
+    task_refs = Map.delete(socket.assigns.restore_task_refs, domain)
+    progress = Map.delete(socket.assigns.restore_progress, domain)
+
+    {status, flash_type, flash_msg} =
+      case result do
+        {:ok, r} -> {{:ok, r}, :info, "Restored #{domain} successfully."}
+        {:error, r} -> {{:error, r}, :error, "Failed to restore #{domain}."}
+      end
+
+    results = Map.put(socket.assigns.restore_results, domain, status)
+
+    {:noreply,
+     socket
+     |> assign(:restore_task_refs, task_refs)
+     |> assign(:restore_progress, progress)
+     |> assign(:restore_results, results)
+     |> put_flash(flash_type, flash_msg)}
+  end
+
+  # Restore progress update from importer
+  @impl true
+  def handle_info({:restore_progress, domain, category, index, total, status}, socket) do
+    progress =
+      Map.put(socket.assigns.restore_progress, domain, %{
+        category: category,
+        index: index,
+        total: total,
+        status: status
+      })
+
+    {:noreply, assign(socket, :restore_progress, progress)}
+  end
+
+  # Restore task crashed
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
+    case Enum.find(socket.assigns.restore_task_refs, fn {_domain, r} -> r == ref end) do
+      {domain, _} ->
+        task_refs = Map.delete(socket.assigns.restore_task_refs, domain)
+        progress = Map.delete(socket.assigns.restore_progress, domain)
+
+        results =
+          Map.put(socket.assigns.restore_results, domain, {
+            :error,
+            %{
+              domain: domain,
+              domain_status: {:failed, "Restore crashed: #{inspect(reason)}"},
+              categories: %{}
+            }
+          })
+
+        {:noreply,
+         socket
+         |> assign(:restore_task_refs, task_refs)
+         |> assign(:restore_progress, progress)
+         |> assign(:restore_results, results)
+         |> put_flash(:error, "Restore of #{domain} crashed.")}
+
+      nil ->
+        {:noreply, socket}
+    end
+  end
+
   # Ignore unknown messages
   @impl true
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # ── Restore task launcher ─────────────────────────────────────────────
+
+  defp launch_restore_task(socket, domain, scope, config, categories) do
+    subscription = Enum.find(socket.assigns.subscriptions, &(&1.domain == domain))
+    inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, domain)
+    apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
+    ssh_opts = build_ssh_opts(socket.assigns.form_params)
+    web_files_path = Map.get(config, :web_files_path, "/var/www/#{domain}")
+    lv_pid = self()
+
+    task =
+      Task.async(fn ->
+        result =
+          Importer.restore_domain(scope, subscription, inventory,
+            categories: categories,
+            apply_dns_template: apply_dns,
+            ssh_opts: ssh_opts,
+            web_files_path: web_files_path,
+            progress_pid: lv_pid
+          )
+
+        {:restore_result, domain, result}
+      end)
+
+    progress = Map.put(socket.assigns.restore_progress, domain, %{
+      category: nil,
+      index: 0,
+      total: length(categories),
+      status: :starting
+    })
+
+    task_refs = Map.put(socket.assigns.restore_task_refs, domain, task.ref)
+
+    socket
+    |> assign(:restore_progress, progress)
+    |> assign(:restore_task_refs, task_refs)
+  end
 
   # ── Render ─────────────────────────────────────────────────────────────
 
@@ -1014,12 +1081,14 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     total = length(assigns.subscriptions)
     restored = Enum.count(assigns.restore_results, fn {_, {s, _}} -> s == :ok end)
     failed = Enum.count(assigns.restore_results, fn {_, {s, _}} -> s == :error end)
+    in_progress = map_size(assigns.restore_task_refs)
 
     assigns =
       assigns
       |> Map.put(:total_domains, total)
       |> Map.put(:restored_count, restored)
       |> Map.put(:failed_count, failed)
+      |> Map.put(:in_progress_count, in_progress)
 
     ~H"""
     <%!-- Action bar --%>
@@ -1031,8 +1100,12 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           </h2>
           <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
             Select categories per domain and assign accounts, then restore.
-            <%= if @restored_count > 0 or @failed_count > 0 do %>
+            <%= if @restored_count > 0 or @failed_count > 0 or @in_progress_count > 0 do %>
               <span class="ml-1 font-medium">
+                <span :if={@in_progress_count > 0} class="text-indigo-600 dark:text-indigo-400">
+                  {@in_progress_count} in progress
+                </span>
+                <span :if={@in_progress_count > 0 and @restored_count > 0}> · </span>
                 <span :if={@restored_count > 0} class="text-emerald-600 dark:text-emerald-400">
                   {@restored_count} restored
                 </span>
@@ -1074,9 +1147,42 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             id="plesk-restore-all-btn"
             phx-click="restore_all"
             data-confirm="Restore all domains with their selected categories?"
-            class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors shadow-sm"
+            disabled={@restore_task_refs != %{}}
+            class={[
+              "inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-white text-sm font-medium transition-colors shadow-sm",
+              if(@restore_task_refs != %{},
+                do: "bg-indigo-400 cursor-not-allowed",
+                else: "bg-emerald-600 hover:bg-emerald-500"
+              )
+            ]}
           >
-            <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Restore All
+            <%= if @restore_task_refs != %{} do %>
+              <svg
+                class="animate-spin w-4 h-4"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  class="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  stroke-width="4"
+                >
+                </circle>
+                <path
+                  class="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                >
+                </path>
+              </svg>
+              Restoring {map_size(@restore_task_refs)} domain(s)...
+            <% else %>
+              <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Restore All
+            <% end %>
           </button>
         </div>
       </div>
@@ -1183,6 +1289,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         <% categories = Map.get(config, :categories, MapSet.new()) %>
         <% counts = Map.get(config, :inventory_counts, %{}) %>
         <% result = Map.get(@restore_results, sub.domain) %>
+        <% progress = Map.get(@restore_progress, sub.domain) %>
+        <% restoring = progress != nil %>
         <% has_result = result != nil %>
         <% result_ok = match?({:ok, _}, result) %>
         <div
@@ -1191,7 +1299,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             "bg-white dark:bg-gray-900 rounded-xl border p-5 transition-all",
             if(has_result and result_ok, do: "border-emerald-300 dark:border-emerald-700", else: ""),
             if(has_result and not result_ok, do: "border-red-300 dark:border-red-700", else: ""),
-            if(not has_result, do: "border-gray-200 dark:border-gray-800", else: "")
+            if(restoring, do: "border-indigo-300 dark:border-indigo-700", else: ""),
+            if(not has_result and not restoring, do: "border-gray-200 dark:border-gray-800", else: "")
           ]}
         >
           <%!-- Header --%>
@@ -1201,7 +1310,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                 "w-2 h-2 rounded-full shrink-0",
                 if(has_result and result_ok, do: "bg-emerald-500", else: ""),
                 if(has_result and not result_ok, do: "bg-red-500", else: ""),
-                if(not has_result, do: "bg-gray-300 dark:bg-gray-600", else: "")
+                if(restoring, do: "bg-indigo-500 animate-pulse", else: ""),
+                if(not has_result and not restoring, do: "bg-gray-300 dark:bg-gray-600", else: "")
               ]}>
               </div>
               <div>
@@ -1345,23 +1455,81 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               type="button"
               phx-click="restore_domain"
               phx-value-domain={sub.domain}
-              disabled={has_result and result_ok}
+              disabled={restoring or (has_result and result_ok)}
               class={[
                 "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
                 if(has_result and result_ok,
                   do:
                     "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 cursor-default",
-                  else: "bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm"
+                  else: ""
+                ),
+                if(restoring,
+                  do: "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 cursor-not-allowed",
+                  else: ""
+                ),
+                if(not restoring and not (has_result and result_ok),
+                  do: "bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm",
+                  else: ""
                 )
               ]}
             >
-              <%= if has_result and result_ok do %>
-                <.icon name="hero-check" class="w-3.5 h-3.5" /> Restored
-              <% else %>
-                <.icon name="hero-arrow-down-tray" class="w-3.5 h-3.5" /> Restore
+              <%= cond do %>
+                <% has_result and result_ok -> %>
+                  <.icon name="hero-check" class="w-3.5 h-3.5" /> Restored
+                <% restoring -> %>
+                  <svg
+                    class="animate-spin w-3.5 h-3.5"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      class="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      stroke-width="4"
+                    >
+                    </circle>
+                    <path
+                      class="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                    >
+                    </path>
+                  </svg>
+                  Restoring...
+                <% true -> %>
+                  <.icon name="hero-arrow-down-tray" class="w-3.5 h-3.5" /> Restore
               <% end %>
             </button>
           </div>
+
+          <%!-- Restore progress --%>
+          <%= if restoring do %>
+            <div class="mt-3 rounded-lg px-4 py-3 bg-indigo-50 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/40">
+              <div class="flex items-center justify-between mb-2">
+                <p class="text-xs font-medium text-indigo-800 dark:text-indigo-200">
+                  <%= if progress.category do %>
+                    Restoring {category_display_name(progress.category)}...
+                  <% else %>
+                    Starting restore...
+                  <% end %>
+                </p>
+                <span class="text-[10px] text-indigo-500 dark:text-indigo-400">
+                  {progress.index}/{progress.total}
+                </span>
+              </div>
+              <div class="h-1.5 w-full rounded-full bg-indigo-100 dark:bg-indigo-900/40 overflow-hidden">
+                <div
+                  class="h-full rounded-full bg-indigo-500 transition-all duration-500 ease-out"
+                  style={"width: #{if(progress.total > 0, do: round(progress.index / progress.total * 100), else: 0)}%"}
+                >
+                </div>
+              </div>
+            </div>
+          <% end %>
 
           <%!-- Restore result --%>
           <%= if has_result do %>
@@ -1677,6 +1845,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   defp format_domain_status(:exists), do: "already existed"
   defp format_domain_status({:failed, reason}), do: reason
   defp format_domain_status(other), do: inspect(other)
+
+  defp category_display_name(key) do
+    case Enum.find(@restore_categories, fn {k, _, _} -> k == key end) do
+      {_, label, _} -> label
+      nil -> key
+    end
+  end
 
   # ── Shared helpers ─────────────────────────────────────────────────────
 

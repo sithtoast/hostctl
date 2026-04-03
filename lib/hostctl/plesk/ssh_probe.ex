@@ -8,6 +8,7 @@ defmodule Hostctl.Plesk.SSHProbe do
 
   @inventory_keys [
     "dns",
+    "dns_records",
     "web_files",
     "mail_accounts",
     "mail_content",
@@ -412,7 +413,16 @@ defmodule Hostctl.Plesk.SSHProbe do
       "          emit_warn dns_info_failed \"$d: $dns_info\"\n" <>
       "        fi\n" <>
       "      else\n" <>
-      "        dns_count=$(printf '%s\\n' \"$dns_info\" | awk 'NF {count++} END {print count+0}')\n" <>
+      "        dns_count=0\n" <>
+      "        printf '%s\\n' \"$dns_info\" | while IFS= read -r line; do\n" <>
+      "          [ -z \"$line\" ] && continue\n" <>
+      "          rec_name=$(printf '%s' \"$line\" | awk '{print $1}')\n" <>
+      "          rec_type=$(printf '%s' \"$line\" | awk '{print $2}')\n" <>
+      "          rec_value=$(printf '%s' \"$line\" | awk '{for(i=3;i<=NF;i++) printf \"%s \", $i; print \"\"}')\n" <>
+      "          [ -z \"$rec_type\" ] && continue\n" <>
+      "          printf 'DNSREC\\t%s\\t%s\\t%s\\t%s\\n' \"$d\" \"$rec_type\" \"$rec_name\" \"$rec_value\"\n" <>
+      "          dns_count=$((dns_count + 1))\n" <>
+      "        done\n" <>
       "        printf 'DNS\\t%s\\t%s\\n' \"$d\" \"$dns_count\"\n" <>
       "      fi"
   end
@@ -609,6 +619,29 @@ defmodule Hostctl.Plesk.SSHProbe do
              domain: String.trim(domain),
              enabled: true,
              record_count: normalize_count(record_count)
+           })}
+        else
+          :ignore
+        end
+
+      _ ->
+        :ignore
+    end
+  end
+
+  defp parse_probe_line("DNSREC\t" <> rest) do
+    case String.split(rest, "\t", parts: 4) do
+      [domain, type, name, value] when type != "" ->
+        if present_string?(domain) do
+          {priority, clean_value} = extract_dns_priority(String.trim(type), String.trim(value))
+
+          {:ok,
+           &put_inventory_item(&1, "dns_records", %{
+             domain: String.trim(domain),
+             type: String.upcase(String.trim(type)),
+             name: String.trim(name) |> String.trim_trailing("."),
+             value: clean_value,
+             priority: priority
            })}
         else
           :ignore
@@ -892,6 +925,26 @@ defmodule Hostctl.Plesk.SSHProbe do
   end
 
   defp normalize_count(_), do: 0
+
+  # MX and SRV records embed the priority in the value field.
+  # e.g. MX "10 mail.example.com." → priority 10, value "mail.example.com."
+  # SRV "10 0 443 srv.example.com." → priority 10, value "0 443 srv.example.com."
+  defp extract_dns_priority(type, value) when type in ["MX", "SRV"] do
+    case String.split(value, " ", parts: 2) do
+      [pri_str, rest] ->
+        case Integer.parse(pri_str) do
+          {pri, ""} -> {pri, String.trim(rest) |> String.trim_trailing(".")}
+          _ -> {nil, String.trim(value) |> String.trim_trailing(".")}
+        end
+
+      _ ->
+        {nil, String.trim(value) |> String.trim_trailing(".")}
+    end
+  end
+
+  defp extract_dns_priority(_type, value) do
+    {nil, String.trim(value) |> String.trim_trailing(".")}
+  end
 
   defp format_probe_error(code, message) do
     code = String.trim(code)
