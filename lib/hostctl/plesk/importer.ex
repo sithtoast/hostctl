@@ -880,6 +880,45 @@ defmodule Hostctl.Plesk.Importer do
   # ---------------------------------------------------------------------------
 
   defp restore_databases_via_pleskbackup(domain, dbs, ssh_opts) do
+    # Partition databases by type — pleskbackup only includes MySQL dumps,
+    # so PostgreSQL databases need a separate pg_dump-over-SSH path.
+    {pg_dbs, mysql_dbs} =
+      Enum.split_with(dbs, fn item ->
+        db_type =
+          (Map.get(item, :db_type) || Map.get(item, "db_type") || "mysql")
+          |> normalize_db_type()
+
+        db_type == "postgresql"
+      end)
+
+    mysql_results =
+      if mysql_dbs != [] do
+        restore_mysql_databases_via_pleskbackup(domain, mysql_dbs, ssh_opts)
+      else
+        %{created: 0, skipped: 0, failed: 0, errors: []}
+      end
+
+    pg_results =
+      if pg_dbs != [] do
+        restore_pg_databases_via_ssh(domain, pg_dbs, ssh_opts)
+      else
+        %{created: 0, skipped: 0, failed: 0, errors: []}
+      end
+
+    # Merge results from both paths
+    %{
+      created: mysql_results.created + pg_results.created,
+      skipped: mysql_results.skipped + pg_results.skipped,
+      failed: mysql_results.failed + pg_results.failed,
+      errors: mysql_results.errors ++ pg_results.errors
+    }
+  end
+
+  # ---------------------------------------------------------------------------
+  # MySQL: pleskbackup-based database import
+  # ---------------------------------------------------------------------------
+
+  defp restore_mysql_databases_via_pleskbackup(domain, dbs, ssh_opts) do
     # Step 1: Create all database entries in hostctl
     db_statuses =
       Enum.map(dbs, fn item ->
@@ -941,6 +980,91 @@ defmodule Hostctl.Plesk.Importer do
           end)
 
         tally_restore_results(results)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL: pg_dump-over-SSH database import
+  # ---------------------------------------------------------------------------
+  # pleskbackup does not include PostgreSQL dumps. Instead, we run pg_dump
+  # directly on the remote Plesk server via SSH using `sudo -u postgres`
+  # (which leverages PostgreSQL's peer authentication on Unix sockets).
+  # ---------------------------------------------------------------------------
+
+  defp restore_pg_databases_via_ssh(domain, dbs, ssh_opts) do
+    results =
+      Enum.map(dbs, fn item ->
+        # Step 1: Create the database entry locally
+        create_status = restore_database(domain, item)
+
+        case create_status do
+          {:failed, _} = status ->
+            status
+
+          _ ->
+            # Step 2: pg_dump on remote, download, and import locally
+            case dump_pg_database_via_ssh(item.name, ssh_opts) do
+              {:ok, local_dir, dump_file} ->
+                result = import_sql_file(dump_file, item.name, "postgresql")
+                File.rm_rf(local_dir)
+
+                case result do
+                  :ok -> :created
+                  {:error, reason} ->
+                    label = if create_status == :created, do: "created but ", else: ""
+                    {:failed, "#{item.name}: #{label}data import failed - #{reason}"}
+                end
+
+              {:error, reason} ->
+                label = if create_status == :created, do: "created but ", else: ""
+                {:failed, "#{item.name}: #{label}pg_dump failed - #{reason}"}
+            end
+        end
+      end)
+
+    tally_restore_results(results)
+  end
+
+  defp dump_pg_database_via_ssh(db_name, ssh_opts) do
+    rand =
+      :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false) |> String.slice(0, 8)
+
+    remote_dump = "/tmp/hostctl_pgdump_#{rand}.sql"
+    local_dir = Path.join(System.tmp_dir!(), "hostctl_pgdump_#{rand}")
+    local_dump = Path.join(local_dir, "#{db_name}.sql")
+
+    File.mkdir_p!(local_dir)
+
+    # Use sudo -u postgres for peer auth on Unix socket — no PG password needed.
+    # We build the sudo prefix from ssh_opts (handles password-based sudo)
+    # and add -u postgres to run pg_dump as the postgres system user.
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    password =
+      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+
+    sudo_cmd =
+      if auth_method == "password" and password != "" do
+        "echo #{shell_escape(password)} | sudo -S -u postgres"
+      else
+        "sudo -u postgres"
+      end
+
+    dump_cmd =
+      "#{sudo_cmd} pg_dump #{shell_escape(db_name)} > #{shell_escape(remote_dump)}"
+
+    Logger.info("[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH pg_dump")
+
+    with :ok <- ssh_exec(ssh_opts, dump_cmd),
+         :ok <- scp_download(ssh_opts, remote_dump, local_dump),
+         _ <- ssh_exec(ssh_opts, "rm -f #{shell_escape(remote_dump)}") do
+      {:ok, local_dir, local_dump}
+    else
+      {:error, reason} ->
+        File.rm_rf(local_dir)
+        ssh_exec(ssh_opts, "rm -f #{shell_escape(remote_dump)}")
+        {:error, reason}
     end
   end
 
