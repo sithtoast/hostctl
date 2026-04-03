@@ -41,7 +41,8 @@ defmodule HostctlWeb.Plugs.WebmailProxy do
     cookie = conn.cookies["_hostctl_key"]
 
     with cookie when is_binary(cookie) <- cookie,
-         secret_key_base = HostctlWeb.Endpoint.config(:secret_key_base),
+         secret_key_base when is_binary(secret_key_base) <-
+           HostctlWeb.Endpoint.config(:secret_key_base),
          signing_key =
            Plug.Crypto.KeyGenerator.generate(secret_key_base, "jhfCBqbP",
              iterations: 1000,
@@ -50,13 +51,20 @@ defmodule HostctlWeb.Plugs.WebmailProxy do
              cache: Plug.Keys
            ),
          {:ok, binary} <- Plug.Crypto.MessageVerifier.verify(cookie, signing_key),
-         session_data <- Plug.Crypto.non_executable_binary_to_term(binary),
-         %{"user_token" => token} <- session_data,
+         %{"user_token" => token} <- safe_binary_to_term(binary),
          {user, _inserted_at} <- Accounts.get_user_by_session_token(token) do
       user
     else
       _ -> nil
     end
+  rescue
+    _ -> nil
+  end
+
+  defp safe_binary_to_term(binary) do
+    Plug.Crypto.non_executable_binary_to_term(binary)
+  rescue
+    _ -> nil
   end
 
   defp reject_unauthorized(conn) do

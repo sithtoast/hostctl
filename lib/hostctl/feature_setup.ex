@@ -1266,53 +1266,65 @@ defmodule Hostctl.FeatureSetup do
 
     # The index.php wrapper auto-authenticates the admin user.
     # The proxy plug already gates /adminer to admin users only.
-    php = """
-    <?php
-    $hostctl_servers = [
-    #{servers_php}
-    ];
+    php =
+      ~S"""
+      <?php
+      $hostctl_servers = [
+      """ <>
+        servers_php <>
+        ~S"""
 
-    function adminer_object() {
-        class HostctlAdminer extends Adminer {
-            function loginForm() {
-                global $hostctl_servers;
-                echo '<select name="auth[driver]">';
-                foreach ($hostctl_servers as $name => $s) {
-                    $selected = (isset($_GET['pgsql']) && $s['driver'] === 'pgsql') ||
-                                (isset($_GET['server']) && $s['driver'] === 'server')
-                                ? ' selected' : '';
-                    echo '<option value="' . $s['driver'] . '"' . $selected . '>' . htmlspecialchars($name) . '</option>';
-                }
-                echo '</select>';
-                echo '<input type="hidden" name="auth[server]" value="">';
-                echo '<input type="hidden" name="auth[username]" value="">';
-                echo '<input type="hidden" name="auth[password]" value="">';
-                echo '<input type="hidden" name="auth[db]" value="">';
-                echo '<input type="submit" value="Login">';
-            }
+        ];
 
-            function credentials() {
-                global $hostctl_servers;
-                $driver = $_GET['pgsql'] ?? ($_GET['server'] ?? null);
-                foreach ($hostctl_servers as $s) {
-                    $d = ($s['driver'] === 'pgsql') ? 'pgsql' : 'server';
-                    if ($driver === null || isset($_GET[$d])) {
-                        return [$s['server'], $s['username'], $s['password']];
+        function adminer_object() {
+            class HostctlAdminer extends Adminer {
+                function loginForm() {
+                    global $hostctl_servers;
+                    $first = reset($hostctl_servers);
+                    if (!$first) {
+                        echo '<p>No database servers configured.</p>';
+                        return;
+                    }
+                    // Hidden fields for Adminer's POST handler
+                    echo '<input type="hidden" name="auth[driver]" value="' . $first['driver'] . '">';
+                    echo '<input type="hidden" name="auth[server]" value="">';
+                    echo '<input type="hidden" name="auth[username]" value="">';
+                    echo '<input type="hidden" name="auth[password]" value="">';
+                    echo '<input type="hidden" name="auth[db]" value="">';
+                    // Auto-submit on GET; if we already POSTed and still here, login failed
+                    if (empty($_POST)) {
+                        echo '<script>document.addEventListener("DOMContentLoaded",function(){document.querySelector("form").submit()});</script>';
+                    } else {
+                        echo '<p style="color:#c00;margin:1em 0">Auto-login failed &mdash; the database server may be unreachable.</p>';
+                        echo '<input type="submit" value="Retry">';
                     }
                 }
-                $first = reset($hostctl_servers);
-                return [$first['server'], $first['username'], $first['password']];
-            }
 
-            function login($login, $password) {
-                return true;
+                function credentials() {
+                    global $hostctl_servers;
+                    // After login, Adminer sets ?server= or ?pgsql= in the URL
+                    foreach ($hostctl_servers as $s) {
+                        if ($s['driver'] === 'pgsql' && isset($_GET['pgsql'])) {
+                            return [$s['server'], $s['username'], $s['password']];
+                        }
+                        if ($s['driver'] === 'server' && isset($_GET['server'])) {
+                            return [$s['server'], $s['username'], $s['password']];
+                        }
+                    }
+                    // During login POST or first load, use the first configured server
+                    $first = reset($hostctl_servers);
+                    return [$first['server'], $first['username'], $first['password']];
+                }
+
+                function login($login, $password) {
+                    return true;
+                }
             }
+            return new HostctlAdminer;
         }
-        return new HostctlAdminer;
-    }
 
-    include './adminer.php';
-    """
+        include './adminer.php';
+        """
 
     write_file_via_sudo(key, install_dir <> "/index.php", php)
   end

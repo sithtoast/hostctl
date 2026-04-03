@@ -651,6 +651,185 @@ else
   ok "Docker not installed — skipping"
 fi
 
+# =============================================================================
+# 9. phpMyAdmin & Adminer auto-login configs
+# =============================================================================
+section "9. Database admin tools"
+
+# Parse database credentials from the env file
+MYSQL_HOST="localhost"
+MYSQL_PORT="3306"
+MYSQL_USER="root"
+MYSQL_PASS=""
+PG_HOST="localhost"
+PG_PORT="5432"
+PG_USER="postgres"
+PG_PASS=""
+
+if [[ -f "$ENV_FILE" ]]; then
+  if grep -q '^MYSQL_ROOT_URL=' "$ENV_FILE"; then
+    MYSQL_URL="$(grep '^MYSQL_ROOT_URL=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    # mysql://user:pass@host:port/db
+    if [[ "$MYSQL_URL" =~ mysql://([^:]+):([^@]*)@([^:/]+):?([0-9]*) ]]; then
+      MYSQL_USER="${BASH_REMATCH[1]}"
+      MYSQL_PASS="${BASH_REMATCH[2]}"
+      MYSQL_HOST="${BASH_REMATCH[3]}"
+      [[ -n "${BASH_REMATCH[4]}" ]] && MYSQL_PORT="${BASH_REMATCH[4]}"
+    fi
+  fi
+  if grep -q '^POSTGRES_ROOT_URL=' "$ENV_FILE"; then
+    PG_URL="$(grep '^POSTGRES_ROOT_URL=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    # postgres://user:pass@host:port/db
+    if [[ "$PG_URL" =~ postgres://([^:]+):([^@]*)@([^:/]+):?([0-9]*) ]]; then
+      PG_USER="${BASH_REMATCH[1]}"
+      PG_PASS="${BASH_REMATCH[2]}"
+      PG_HOST="${BASH_REMATCH[3]}"
+      [[ -n "${BASH_REMATCH[4]}" ]] && PG_PORT="${BASH_REMATCH[4]}"
+    fi
+  fi
+fi
+
+# --- phpMyAdmin ---------------------------------------------------------------
+if dpkg -l phpmyadmin &>/dev/null 2>&1; then
+  PMA_CONF="/etc/phpmyadmin/config.inc.php"
+
+  # Check if config uses auto-login (auth_type = 'config')
+  if [[ -f "$PMA_CONF" ]] && grep -q "auth_type.*cookie" "$PMA_CONF" 2>/dev/null; then
+    # Old cookie-based config — rewrite with auto-login
+    BLOWFISH="$(head -c 32 /dev/urandom | base64 | head -c 32)"
+    PMA_PASS_ESC="${MYSQL_PASS//\'/\\\'}"
+    cat > "$PMA_CONF" <<PMAEOF
+<?php
+\$cfg['blowfish_secret'] = '${BLOWFISH}';
+\$cfg['Servers'][1]['auth_type'] = 'config';
+\$cfg['Servers'][1]['host'] = '${MYSQL_HOST}';
+\$cfg['Servers'][1]['port'] = '${MYSQL_PORT}';
+\$cfg['Servers'][1]['user'] = '${MYSQL_USER}';
+\$cfg['Servers'][1]['password'] = '${PMA_PASS_ESC}';
+\$cfg['Servers'][1]['AllowNoPassword'] = true;
+\$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
+PMAEOF
+    mkdir -p /var/lib/phpmyadmin/tmp
+    chown -R www-data:www-data /var/lib/phpmyadmin/tmp
+    fix "phpMyAdmin config → auto-login as $MYSQL_USER"
+    FIXED=$((FIXED + 1))
+  elif [[ -f "$PMA_CONF" ]]; then
+    ok "phpMyAdmin config (auto-login)"
+  else
+    warn "phpMyAdmin config file not found at $PMA_CONF"
+  fi
+
+  # Ensure Apache conf is enabled
+  if [[ ! -f /etc/apache2/conf-enabled/phpmyadmin.conf ]]; then
+    a2enconf -q phpmyadmin 2>/dev/null || true
+    fix "phpMyAdmin Apache conf enabled"
+    FIXED=$((FIXED + 1))
+  else
+    ok "phpMyAdmin Apache conf"
+  fi
+else
+  ok "phpMyAdmin not installed — skipping"
+fi
+
+# --- Adminer ------------------------------------------------------------------
+ADMINER_DIR="/var/www/adminer"
+if [[ -f "$ADMINER_DIR/adminer.php" ]]; then
+  # Build auto-login index.php with current credentials
+  MYSQL_ENABLED=false
+  PG_ENABLED=false
+  [[ -f "$ENV_FILE" ]] && grep -q '^MYSQL_ROOT_URL=' "$ENV_FILE" && MYSQL_ENABLED=true
+  [[ -f "$ENV_FILE" ]] && grep -q '^POSTGRES_ROOT_URL=' "$ENV_FILE" && PG_ENABLED=true
+
+  SERVERS_PHP=""
+  if $MYSQL_ENABLED; then
+    M_PASS_ESC="${MYSQL_PASS//\'/\\\'}"
+    SERVERS_PHP+="    'MySQL' => ['driver' => 'server', 'server' => '${MYSQL_HOST}:${MYSQL_PORT}', 'username' => '${MYSQL_USER}', 'password' => '${M_PASS_ESC}'],"$'\n'
+  fi
+  if $PG_ENABLED; then
+    P_PASS_ESC="${PG_PASS//\'/\\\'}"
+    SERVERS_PHP+="    'PostgreSQL' => ['driver' => 'pgsql', 'server' => '${PG_HOST}:${PG_PORT}', 'username' => '${PG_USER}', 'password' => '${P_PASS_ESC}'],"$'\n'
+  fi
+
+  needs_rewrite=false
+  if [[ ! -f "$ADMINER_DIR/index.php" ]]; then
+    needs_rewrite=true
+  elif ! grep -q 'HostctlAdminer' "$ADMINER_DIR/index.php" 2>/dev/null; then
+    needs_rewrite=true
+  elif ! grep -q 'document.querySelector' "$ADMINER_DIR/index.php" 2>/dev/null; then
+    # Old version without auto-submit
+    needs_rewrite=true
+  fi
+
+  if $needs_rewrite; then
+    cat > "$ADMINER_DIR/index.php" <<ADMEOF
+<?php
+\$hostctl_servers = [
+${SERVERS_PHP}];
+
+function adminer_object() {
+    class HostctlAdminer extends Adminer {
+        function loginForm() {
+            global \$hostctl_servers;
+            \$first = reset(\$hostctl_servers);
+            if (!\$first) {
+                echo '<p>No database servers configured.</p>';
+                return;
+            }
+            echo '<input type="hidden" name="auth[driver]" value="' . \$first['driver'] . '">';
+            echo '<input type="hidden" name="auth[server]" value="">';
+            echo '<input type="hidden" name="auth[username]" value="">';
+            echo '<input type="hidden" name="auth[password]" value="">';
+            echo '<input type="hidden" name="auth[db]" value="">';
+            if (empty(\$_POST)) {
+                echo '<script>document.addEventListener("DOMContentLoaded",function(){document.querySelector("form").submit()});</script>';
+            } else {
+                echo '<p style="color:#c00;margin:1em 0">Auto-login failed &mdash; the database server may be unreachable.</p>';
+                echo '<input type="submit" value="Retry">';
+            }
+        }
+
+        function credentials() {
+            global \$hostctl_servers;
+            foreach (\$hostctl_servers as \$s) {
+                if (\$s['driver'] === 'pgsql' && isset(\$_GET['pgsql'])) {
+                    return [\$s['server'], \$s['username'], \$s['password']];
+                }
+                if (\$s['driver'] === 'server' && isset(\$_GET['server'])) {
+                    return [\$s['server'], \$s['username'], \$s['password']];
+                }
+            }
+            \$first = reset(\$hostctl_servers);
+            return [\$first['server'], \$first['username'], \$first['password']];
+        }
+
+        function login(\$login, \$password) {
+            return true;
+        }
+    }
+    return new HostctlAdminer;
+}
+
+include './adminer.php';
+ADMEOF
+    chown www-data:www-data "$ADMINER_DIR/index.php"
+    fix "Adminer auto-login wrapper written"
+    FIXED=$((FIXED + 1))
+  else
+    ok "Adminer auto-login wrapper"
+  fi
+
+  # Ensure Apache conf is enabled
+  if [[ ! -f /etc/apache2/conf-enabled/adminer.conf ]]; then
+    a2enconf -q adminer 2>/dev/null || true
+    fix "Adminer Apache conf enabled"
+    FIXED=$((FIXED + 1))
+  else
+    ok "Adminer Apache conf"
+  fi
+else
+  ok "Adminer not installed — skipping"
+fi
+
 
 section "10. Apply changes"
 
