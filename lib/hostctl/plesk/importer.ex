@@ -1148,30 +1148,41 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp find_and_import_dump(extract_dir, db_name, db_type) do
-    # Search for SQL dump files matching the database name
-    # Plesk backups store dumps in various locations, so search broadly
-    all_sql_files =
+    # Search for dump files — Plesk uses various naming conventions:
+    #   - Standard: *.sql, *.sql.gz
+    #   - Plesk backup: databases/{name}_N/backup_sqldump_* (with optional .tzst/.zst)
+    all_dump_files =
       Path.wildcard("#{extract_dir}/**/*.sql") ++
-        Path.wildcard("#{extract_dir}/**/*.sql.gz")
+        Path.wildcard("#{extract_dir}/**/*.sql.gz") ++
+        Path.wildcard("#{extract_dir}/**/backup_sqldump_*") ++
+        Path.wildcard("#{extract_dir}/**/*.sql.zst") ++
+        Path.wildcard("#{extract_dir}/**/*.sql.tzst")
+
+    # Deduplicate and exclude directories
+    all_dump_files =
+      all_dump_files
+      |> Enum.uniq()
+      |> Enum.reject(&File.dir?/1)
 
     db_name_lower = String.downcase(db_name)
 
-    # Try matching by basename first (e.g. "mysql.mydb.2024.sql.gz")
+    # Try matching by basename first
     match =
-      Enum.find(all_sql_files, fn path ->
+      Enum.find(all_dump_files, fn path ->
         basename = Path.basename(path) |> String.downcase()
         String.contains?(basename, db_name_lower)
       end)
 
-    # Fall back to matching by any component in the path (e.g. ".../databases/mysql/mydb/dump.sql")
+    # Fall back to matching by any component in the path
+    # (e.g. databases/anope_1/backup_sqldump_... where dir contains "anope")
     match =
       match ||
-        Enum.find(all_sql_files, fn path ->
+        Enum.find(all_dump_files, fn path ->
           path |> String.downcase() |> String.contains?(db_name_lower)
         end)
 
     Logger.info(
-      "[Importer] DB dump search for '#{db_name}': found #{length(all_sql_files)} SQL file(s), " <>
+      "[Importer] DB dump search for '#{db_name}': found #{length(all_dump_files)} dump file(s), " <>
         "match=#{inspect(match && Path.relative_to(match, extract_dir))}"
     )
 
@@ -1184,9 +1195,15 @@ defmodule Hostctl.Plesk.Importer do
   defp import_sql_file(dump_file, db_name, db_type) do
     with {:ok, import_cmd} <- local_import_command(db_name, db_type) do
       cat_cmd =
-        if String.ends_with?(dump_file, ".gz"), do: "zcat", else: "cat"
+        cond do
+          String.ends_with?(dump_file, ".gz") -> "zcat"
+          String.ends_with?(dump_file, ".zst") or String.ends_with?(dump_file, ".tzst") -> "zstd -d -c"
+          true -> "cat"
+        end
 
       full_cmd = "#{cat_cmd} #{shell_escape(dump_file)} | #{import_cmd}"
+
+      Logger.info("[Importer] Importing DB dump: #{full_cmd}")
 
       case System.cmd("/bin/sh", ["-c", full_cmd], stderr_to_stdout: true) do
         {_, 0} -> :ok
