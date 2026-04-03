@@ -268,6 +268,7 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   @restore_categories [
+    "web_files",
     "subdomains",
     "dns",
     "mail_accounts",
@@ -1310,6 +1311,10 @@ defmodule Hostctl.Plesk.Importer do
       old_ips = resolve_host_ips(host)
       {new_ipv4, new_ipv6} = Hostctl.Settings.server_ips()
 
+      Logger.info(
+        "[Importer] DNS IP replacement: host=#{inspect(host)} old_ips=#{inspect(old_ips)} new_ipv4=#{inspect(new_ipv4)} new_ipv6=#{inspect(new_ipv6)}"
+      )
+
       replacements =
         Enum.reduce(old_ips, %{}, fn old_ip, acc ->
           if String.contains?(old_ip, ":") do
@@ -1325,10 +1330,15 @@ defmodule Hostctl.Plesk.Importer do
         Logger.info(
           "[Importer] DNS IP replacements: #{inspect(replacements)}"
         )
+      else
+        Logger.warning(
+          "[Importer] DNS IP replacement: no replacements built (old IPs may not match or server IPs not configured)"
+        )
       end
 
       replacements
     else
+      Logger.info("[Importer] DNS IP replacement skipped: no ssh_opts in restore_opts")
       %{}
     end
   end

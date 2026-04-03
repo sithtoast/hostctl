@@ -24,9 +24,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   @default_data_types Enum.map(@data_type_options, fn {key, _label} -> key end)
 
   @restore_categories [
+    {"web_files", "Web Files", "hero-document-duplicate"},
     {"subdomains", "Subdomains", "hero-rectangle-group"},
     {"dns", "DNS Records", "hero-globe-alt"},
-    {"web_files", "Web Files", "hero-document-duplicate"},
     {"mail_accounts", "Mail Accounts", "hero-envelope"},
     {"mail_content", "Mail Content", "hero-inbox-stack"},
     {"databases", "Databases", "hero-circle-stack"},

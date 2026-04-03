@@ -200,22 +200,29 @@ defmodule Hostctl.WebServer do
   # Files are chowned to www-data so FTP virtual users (who run as www-data)
   # can manage them.
   defp provision_webroot(path) do
-    case File.mkdir_p(path) do
-      :ok ->
-        index = Path.join(path, "index.html")
-
-        unless File.exists?(index) do
-          File.write(index, default_index_html())
-        end
-
+    # Use sudo to create the directory tree — /var/www/<domain> may be
+    # owned by root (e.g. after an rsync import) and the app user cannot
+    # create nested directories inside it.
+    case System.cmd("sudo",
+           ["systemd-run", "--pipe", "--wait", "--collect", "--quiet",
+            "mkdir", "-p", path],
+           stderr_to_stdout: true) do
+      {_, 0} ->
         # Chown the entire domain directory tree to www-data so FTP users
         # (mapped to www-data via vsftpd guest_username) can read/write/delete.
         # Walk up to /var/www/<domain> so the chown covers all content.
         domain_root = domain_root_from_webroot(path)
         chown_to_www_data(domain_root)
 
-      {:error, reason} ->
-        Logger.warning("[WebServer] Could not create webroot #{path}: #{inspect(reason)}")
+        # Write a default index after chown so the app user can write
+        index = Path.join(path, "index.html")
+
+        unless File.exists?(index) do
+          File.write(index, default_index_html())
+        end
+
+      {output, code} ->
+        Logger.warning("[WebServer] Could not create webroot #{path} (exit #{code}): #{String.trim(output)}")
     end
   end
 
