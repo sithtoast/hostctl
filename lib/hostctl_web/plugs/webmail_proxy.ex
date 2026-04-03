@@ -1,10 +1,10 @@
 defmodule HostctlWeb.Plugs.WebmailProxy do
   @moduledoc """
-  Reverse proxy plug that forwards `/roundcube`, `/snappymail`, `/phpmyadmin`,
+  Reverse proxy plug that forwards `/roundcube`, `/snappymail`,
   and `/adminer` requests to the local Apache instance on port 8080, so these
   tools are accessible on the main port without exposing 8080 externally.
 
-  `/phpmyadmin` and `/adminer` are restricted to admin users. The session cookie
+  `/adminer` is restricted to admin users. The session cookie
   is verified inline since this plug runs before `Plug.Session` in the endpoint.
   """
 
@@ -14,8 +14,8 @@ defmodule HostctlWeb.Plugs.WebmailProxy do
 
   alias Hostctl.Accounts
 
-  @proxy_prefixes ["roundcube", "snappymail", "phpmyadmin", "adminer"]
-  @admin_only_prefixes ["phpmyadmin", "adminer"]
+  @proxy_prefixes ["roundcube", "snappymail", "adminer"]
+  @admin_only_prefixes ["adminer"]
 
   @impl true
   def init(opts), do: opts

@@ -108,26 +108,15 @@ defmodule HostctlWeb.PanelLive.Databases do
   end
 
   defp db_admin_links do
-    links =
-      if Settings.feature_enabled?("phpmyadmin") do
-        [{"phpmyadmin", "phpMyAdmin", "/phpmyadmin", "hero-circle-stack", "MySQL admin"}]
-      else
-        []
-      end
-
-    links =
-      if Settings.feature_enabled?("adminer") do
-        links ++
-          [
-            {"adminer-mysql", "Adminer (MySQL)", "/adminer/?server=", "hero-circle-stack",
-             "MySQL admin via Adminer"},
-            {"adminer-pgsql", "Adminer (PostgreSQL)", "/adminer/?pgsql=", "hero-circle-stack",
-             "PostgreSQL admin via Adminer"}
-          ]
-      else
-        links
-      end
-
-    links
+    if Settings.feature_enabled?("adminer") do
+      [
+        {"adminer-mysql", "Adminer (MySQL)", "/adminer/?server=", "hero-circle-stack",
+         "MySQL admin via Adminer"},
+        {"adminer-pgsql", "Adminer (PostgreSQL)", "/adminer/?pgsql=", "hero-circle-stack",
+         "PostgreSQL admin via Adminer"}
+      ]
+    else
+      []
+    end
   end
 end

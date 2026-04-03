@@ -108,6 +108,7 @@ printf '%s\n' '#!/bin/bash' \
   'if [[ -n "$COMMIT_SHA" ]]; then echo "$COMMIT_SHA" > "/etc/$APP_NAME/commit"; fi' \
   'ENV_VARS=$(grep -v "^#" "$ENV_FILE" | grep -v "^[[:space:]]*$" | xargs)' \
   'sudo -u "$SERVICE_USER" env $ENV_VARS "$APP_DIR/bin/migrate"' \
+  'ENV_FILE="$ENV_FILE" APP_NAME="$APP_NAME" "$APP_DIR/bin/post_deploy"' \
   'systemctl start "$APP_NAME"' \
   'echo "[$(date -u +%FT%TZ)] hostctl update-install handoff complete"' \
   'rm -f "$0"' \

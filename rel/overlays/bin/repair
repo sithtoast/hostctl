@@ -689,48 +689,6 @@ if [[ -f "$ENV_FILE" ]]; then
   fi
 fi
 
-# --- phpMyAdmin ---------------------------------------------------------------
-if dpkg -l phpmyadmin &>/dev/null 2>&1; then
-  PMA_CONF="/etc/phpmyadmin/config.inc.php"
-
-  # Check if config uses auto-login (auth_type = 'config')
-  if [[ -f "$PMA_CONF" ]] && grep -q "auth_type.*cookie" "$PMA_CONF" 2>/dev/null; then
-    # Old cookie-based config — rewrite with auto-login
-    BLOWFISH="$(head -c 32 /dev/urandom | base64 | head -c 32)"
-    PMA_PASS_ESC="${MYSQL_PASS//\'/\\\'}"
-    cat > "$PMA_CONF" <<PMAEOF
-<?php
-\$cfg['blowfish_secret'] = '${BLOWFISH}';
-\$cfg['Servers'][1]['auth_type'] = 'config';
-\$cfg['Servers'][1]['host'] = '${MYSQL_HOST}';
-\$cfg['Servers'][1]['port'] = '${MYSQL_PORT}';
-\$cfg['Servers'][1]['user'] = '${MYSQL_USER}';
-\$cfg['Servers'][1]['password'] = '${PMA_PASS_ESC}';
-\$cfg['Servers'][1]['AllowNoPassword'] = true;
-\$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
-PMAEOF
-    mkdir -p /var/lib/phpmyadmin/tmp
-    chown -R www-data:www-data /var/lib/phpmyadmin/tmp
-    fix "phpMyAdmin config → auto-login as $MYSQL_USER"
-    FIXED=$((FIXED + 1))
-  elif [[ -f "$PMA_CONF" ]]; then
-    ok "phpMyAdmin config (auto-login)"
-  else
-    warn "phpMyAdmin config file not found at $PMA_CONF"
-  fi
-
-  # Ensure Apache conf is enabled
-  if [[ ! -f /etc/apache2/conf-enabled/phpmyadmin.conf ]]; then
-    a2enconf -q phpmyadmin 2>/dev/null || true
-    fix "phpMyAdmin Apache conf enabled"
-    FIXED=$((FIXED + 1))
-  else
-    ok "phpMyAdmin Apache conf"
-  fi
-else
-  ok "phpMyAdmin not installed — skipping"
-fi
-
 # --- Adminer ------------------------------------------------------------------
 ADMINER_DIR="/var/www/adminer"
 if [[ -f "$ADMINER_DIR/adminer.php" ]]; then

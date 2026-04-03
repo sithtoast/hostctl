@@ -1,0 +1,125 @@
+#!/bin/bash
+# post_deploy — runs as root after bin/migrate during deploys.
+# Regenerates config files that embed credentials so they stay
+# in sync with the environment file on every deploy.
+set -euo pipefail
+
+APP_NAME="${APP_NAME:-hostctl}"
+ENV_FILE="${ENV_FILE:-/etc/$APP_NAME/env}"
+
+# ----- Adminer auto-login wrapper -------------------------------------------
+ADMINER_DIR="/var/www/adminer"
+if [[ -f "$ADMINER_DIR/adminer.php" && -f "$ENV_FILE" ]]; then
+  # Parse MySQL credentials
+  MYSQL_HOST="localhost"
+  MYSQL_PORT="3306"
+  MYSQL_USER="root"
+  MYSQL_PASS=""
+  if grep -q '^MYSQL_ROOT_URL=' "$ENV_FILE"; then
+    M_URL="$(grep '^MYSQL_ROOT_URL=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    if [[ "$M_URL" =~ mysql://([^:]+):([^@]*)@([^:/]+):?([0-9]*) ]]; then
+      MYSQL_USER="${BASH_REMATCH[1]}"
+      MYSQL_PASS="${BASH_REMATCH[2]}"
+      MYSQL_HOST="${BASH_REMATCH[3]}"
+      [[ -n "${BASH_REMATCH[4]}" ]] && MYSQL_PORT="${BASH_REMATCH[4]}"
+    fi
+  fi
+
+  # Parse PostgreSQL credentials
+  PG_HOST="localhost"
+  PG_PORT="5432"
+  PG_USER="postgres"
+  PG_PASS="postgres"
+  if grep -q '^POSTGRES_ROOT_URL=' "$ENV_FILE"; then
+    PG_URL="$(grep '^POSTGRES_ROOT_URL=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    if [[ "$PG_URL" =~ postgres://([^:]+):([^@]*)@([^:/]+):?([0-9]*) ]]; then
+      PG_USER="${BASH_REMATCH[1]}"
+      PG_PASS="${BASH_REMATCH[2]}"
+      PG_HOST="${BASH_REMATCH[3]}"
+      [[ -n "${BASH_REMATCH[4]}" ]] && PG_PORT="${BASH_REMATCH[4]}"
+    fi
+  fi
+
+  MYSQL_ENABLED=false
+  PG_ENABLED=false
+  grep -q '^MYSQL_ROOT_URL=' "$ENV_FILE" && MYSQL_ENABLED=true
+  grep -q '^POSTGRES_ROOT_URL=' "$ENV_FILE" && PG_ENABLED=true
+
+  SERVERS_PHP=""
+  if $MYSQL_ENABLED; then
+    M_PASS_ESC="${MYSQL_PASS//\'/\\\'}"
+    SERVERS_PHP+="    'MySQL' => ['driver' => 'server', 'server' => '${MYSQL_HOST}:${MYSQL_PORT}', 'username' => '${MYSQL_USER}', 'password' => '${M_PASS_ESC}'],"$'\n'
+  fi
+  if $PG_ENABLED; then
+    P_PASS_ESC="${PG_PASS//\'/\\\'}"
+    SERVERS_PHP+="    'PostgreSQL' => ['driver' => 'pgsql', 'server' => '${PG_HOST}:${PG_PORT}', 'username' => '${PG_USER}', 'password' => '${P_PASS_ESC}'],"$'\n'
+  fi
+
+  cat > "$ADMINER_DIR/index.php" <<ADMEOF
+<?php
+\$hostctl_servers = [
+${SERVERS_PHP}];
+
+function adminer_object() {
+    class HostctlAdminer extends Adminer\Adminer {
+        function loginForm() {
+            global \$hostctl_servers;
+            \$driver = 'server';
+            if (isset(\$_GET['pgsql'])) {
+                \$driver = 'pgsql';
+            }
+            \$target = null;
+            foreach (\$hostctl_servers as \$s) {
+                if (\$s['driver'] === \$driver) {
+                    \$target = \$s;
+                    break;
+                }
+            }
+            if (!\$target) {
+                \$target = reset(\$hostctl_servers);
+            }
+            if (!\$target) {
+                echo '<p>No database servers configured.</p>';
+                return;
+            }
+            echo '<input type="hidden" name="auth[driver]" value="' . \$target['driver'] . '">';
+            echo '<input type="hidden" name="auth[server]" value="">';
+            echo '<input type="hidden" name="auth[username]" value="hostctl">';
+            echo '<input type="hidden" name="auth[password]" value="hostctl">';
+            echo '<input type="hidden" name="auth[db]" value="">';
+            if (empty(\$_POST)) {
+                echo '<p style="margin:2em 0;color:#888">Connecting to database server&hellip;</p>';
+                echo '<script ' . Adminer\nonce() . '>document.addEventListener("DOMContentLoaded",function(){document.querySelector("form").submit()});</script>';
+                echo '<noscript><input type="submit" value="Connect"></noscript>';
+            } else {
+                echo '<p style="color:#c00;margin:1em 0">Auto-login failed &mdash; the database server may be unreachable.</p>';
+                echo '<input type="submit" value="Retry">';
+            }
+        }
+
+        function credentials() {
+            global \$hostctl_servers;
+            foreach (\$hostctl_servers as \$s) {
+                if (\$s['driver'] === 'pgsql' && isset(\$_GET['pgsql'])) {
+                    return [\$s['server'], \$s['username'], \$s['password']];
+                }
+                if (\$s['driver'] === 'server' && isset(\$_GET['server'])) {
+                    return [\$s['server'], \$s['username'], \$s['password']];
+                }
+            }
+            \$first = reset(\$hostctl_servers);
+            return [\$first['server'], \$first['username'], \$first['password']];
+        }
+
+        function login(\$login, \$password) {
+            return true;
+        }
+    }
+    return new HostctlAdminer;
+}
+
+include './adminer.php';
+ADMEOF
+  chown www-data:www-data "$ADMINER_DIR/index.php"
+  echo "[post_deploy] Adminer auto-login wrapper regenerated"
+fi

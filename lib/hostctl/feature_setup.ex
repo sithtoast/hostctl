@@ -144,26 +144,6 @@ defmodule Hostctl.FeatureSetup do
       setup_fn: :setup_spamassassin
     },
     %{
-      key: "phpmyadmin",
-      label: "phpMyAdmin",
-      description:
-        "Web-based MySQL/MariaDB administration tool. Browse tables, run queries, and manage users from the browser at /phpmyadmin.",
-      icon: "hero-circle-stack",
-      packages: [
-        "phpmyadmin",
-        "apache2",
-        "libapache2-mod-php",
-        "php-mysql",
-        "php-mbstring",
-        "php-zip",
-        "php-gd",
-        "php-json",
-        "php-curl"
-      ],
-      services: [],
-      setup_fn: :setup_phpmyadmin
-    },
-    %{
       key: "adminer",
       label: "Adminer",
       description:
@@ -1115,73 +1095,6 @@ defmodule Hostctl.FeatureSetup do
     case System.cmd("systemctl", ["list-unit-files", "#{name}.service"], stderr_to_stdout: true) do
       {output, _} -> String.contains?(output, "#{name}.service")
     end
-  end
-
-  @doc false
-  def setup_phpmyadmin(key) do
-    broadcast(key, :log, "Configuring phpMyAdmin...")
-
-    mysql_config = Application.get_env(:hostctl, :database_server, [])
-    host = Keyword.get(mysql_config, :hostname, "localhost")
-    port = Keyword.get(mysql_config, :port, 3306)
-    user = Keyword.get(mysql_config, :username, "root")
-    pass = Keyword.get(mysql_config, :password, "")
-
-    blowfish_secret = :crypto.strong_rand_bytes(32) |> Base.encode64() |> binary_part(0, 32)
-
-    # Use auth_type 'config' for auto-login — the proxy plug already
-    # restricts /phpmyadmin to admin users, so no additional login is needed.
-    config = """
-    <?php
-    $cfg['blowfish_secret'] = '#{blowfish_secret}';
-    $cfg['Servers'][1]['auth_type'] = 'config';
-    $cfg['Servers'][1]['host'] = '#{php_escape(host)}';
-    $cfg['Servers'][1]['port'] = '#{port}';
-    $cfg['Servers'][1]['user'] = '#{php_escape(user)}';
-    $cfg['Servers'][1]['password'] = '#{php_escape(pass)}';
-    $cfg['Servers'][1]['AllowNoPassword'] = true;
-    $cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
-    """
-
-    with :ok <- setup_apache_port(key),
-         :ok <- write_file_via_sudo(key, "/etc/phpmyadmin/config.inc.php", config),
-         :ok <- run_cmd(key, "mkdir", ["-p", "/var/lib/phpmyadmin/tmp"]),
-         :ok <- run_cmd(key, "chown", ["-R", "www-data:www-data", "/var/lib/phpmyadmin/tmp"]),
-         :ok <- write_phpmyadmin_apache_conf(key),
-         :ok <- enable_apache_conf(key, "phpmyadmin") do
-      broadcast(key, :log, "phpMyAdmin configuration complete.")
-      broadcast(key, :log, "phpMyAdmin is available at /phpmyadmin")
-      :ok
-    end
-  end
-
-  defp write_phpmyadmin_apache_conf(key) do
-    broadcast(key, :log, "Writing Apache config for phpMyAdmin...")
-
-    conf = """
-    Alias /phpmyadmin /usr/share/phpmyadmin
-
-    <Directory /usr/share/phpmyadmin>
-        Options SymLinksIfOwnerMatch
-        DirectoryIndex index.php
-        AllowOverride All
-        Require all granted
-
-        <FilesMatch "\\.php$">
-            SetHandler application/x-httpd-php
-        </FilesMatch>
-    </Directory>
-
-    <Directory /usr/share/phpmyadmin/templates>
-        Require all denied
-    </Directory>
-
-    <Directory /usr/share/phpmyadmin/libraries>
-        Require all denied
-    </Directory>
-    """
-
-    write_file_via_sudo(key, "/etc/apache2/conf-available/phpmyadmin.conf", conf)
   end
 
   @doc false
