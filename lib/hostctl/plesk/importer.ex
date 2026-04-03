@@ -478,7 +478,12 @@ defmodule Hostctl.Plesk.Importer do
   defp restore_category("databases", domain, _subscription, inventory, restore_opts) do
     dbs = Map.get(inventory, "databases", [])
     ssh_opts = Map.get(restore_opts, :ssh_opts)
-    do_restore_items(dbs, fn item -> restore_database(domain, item, ssh_opts) end)
+
+    if ssh_opts != nil and dbs != [] do
+      restore_databases_via_pleskbackup(domain, dbs, ssh_opts)
+    else
+      do_restore_items(dbs, fn item -> restore_database(domain, item) end)
+    end
   end
 
   defp restore_category("db_users", domain, _subscription, inventory, _restore_opts) do
@@ -767,7 +772,7 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_database(domain, item, ssh_opts) do
+  defp restore_database(domain, item) do
     db_type = Map.get(item, :db_type, "mysql")
 
     existing =
@@ -775,39 +780,253 @@ defmodule Hostctl.Plesk.Importer do
       |> Hosting.list_databases()
       |> Enum.find(&(&1.name == item.name))
 
-    {db, status} =
-      case existing do
-        nil ->
-          case Hosting.create_database(domain, %{name: item.name, db_type: db_type}) do
-            {:ok, db} -> {db, :created}
-            {:error, cs} -> {nil, {:failed, "#{item.name}: #{changeset_error_summary(cs)}"}}
-          end
-
-        db ->
-          {db, :exists}
-      end
-
-    case {db, ssh_opts} do
-      {nil, _} ->
-        status
-
-      {_db, nil} ->
-        # No SSH opts — just create the empty database
-        if status == :created, do: :created, else: :skipped
-
-      {_db, _} ->
-        # Dump remote database and import locally
-        case dump_and_import_database(item.name, db_type, ssh_opts) do
-          :ok ->
-            :created
-
-          {:error, reason} ->
-            if status == :created do
-              {:failed, "#{item.name}: created but data import failed - #{reason}"}
-            else
-              {:failed, "#{item.name}: data import failed - #{reason}"}
-            end
+    case existing do
+      nil ->
+        case Hosting.create_database(domain, %{name: item.name, db_type: db_type}) do
+          {:ok, _db} -> :created
+          {:error, cs} -> {:failed, "#{item.name}: #{changeset_error_summary(cs)}"}
         end
+
+      _db ->
+        :skipped
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # pleskbackup-based database import
+  # ---------------------------------------------------------------------------
+  # Runs `pleskbackup` on the remote Plesk server (which has its own DB creds),
+  # downloads the backup tar via SCP, extracts SQL dumps, and imports each one
+  # into the corresponding local database.
+  # ---------------------------------------------------------------------------
+
+  defp restore_databases_via_pleskbackup(domain, dbs, ssh_opts) do
+    # Step 1: Create all database entries in hostctl
+    db_statuses =
+      Enum.map(dbs, fn item ->
+        {item, restore_database(domain, item)}
+      end)
+
+    # Step 2: Run pleskbackup, download, extract, and import
+    case download_plesk_db_backup(domain.name, ssh_opts) do
+      {:ok, extract_dir} ->
+        results =
+          Enum.map(db_statuses, fn
+            {_item, {:failed, _} = status} ->
+              status
+
+            {item, create_status} ->
+              db_type = Map.get(item, :db_type, "mysql")
+
+              case find_and_import_dump(extract_dir, item.name, db_type) do
+                :ok ->
+                  :created
+
+                :not_found ->
+                  if create_status == :created, do: :created, else: :skipped
+
+                {:error, reason} ->
+                  label = if create_status == :created, do: "created but ", else: ""
+                  {:failed, "#{item.name}: #{label}data import failed - #{reason}"}
+              end
+          end)
+
+        File.rm_rf(extract_dir)
+        tally_restore_results(results)
+
+      {:error, reason} ->
+        # Backup failed — report database creation results + backup error
+        results =
+          Enum.map(db_statuses, fn
+            {_item, {:failed, _} = status} ->
+              status
+
+            {item, :created} ->
+              {:failed, "#{item.name}: created but backup failed - #{reason}"}
+
+            {item, _} ->
+              {:failed, "#{item.name}: backup failed - #{reason}"}
+          end)
+
+        tally_restore_results(results)
+    end
+  end
+
+  defp tally_restore_results(results) do
+    Enum.reduce(results, %{created: 0, skipped: 0, failed: 0, errors: []}, fn
+      :created, acc -> %{acc | created: acc.created + 1}
+      :skipped, acc -> %{acc | skipped: acc.skipped + 1}
+      {:failed, reason}, acc -> %{acc | failed: acc.failed + 1, errors: [reason | acc.errors]}
+    end)
+  end
+
+  defp download_plesk_db_backup(domain_name, ssh_opts) do
+    rand = :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false) |> String.slice(0, 8)
+    remote_tar = "/tmp/hostctl_dbexport_#{rand}.tar"
+    local_dir = Path.join(System.tmp_dir!(), "hostctl_dbexport_#{rand}")
+    local_tar = Path.join(local_dir, "backup.tar")
+
+    File.mkdir_p!(local_dir)
+
+    backup_cmd =
+      "plesk bin pleskbackup --domains-name #{shell_escape(domain_name)}" <>
+        " -exclude-files -exclude-mail -exclude-logs" <>
+        " -output-file #{shell_escape(remote_tar)}"
+
+    with :ok <- ssh_exec(ssh_opts, backup_cmd),
+         :ok <- scp_download(ssh_opts, remote_tar, local_tar),
+         _ <- ssh_exec(ssh_opts, "rm -f #{shell_escape(remote_tar)}"),
+         :ok <- extract_backup_archives(local_dir) do
+      {:ok, local_dir}
+    else
+      {:error, reason} ->
+        File.rm_rf(local_dir)
+        # Try to clean up remote tar too
+        ssh_exec(ssh_opts, "rm -f #{shell_escape(remote_tar)}")
+        {:error, reason}
+    end
+  end
+
+  defp ssh_exec(ssh_opts, command) do
+    host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
+    port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
+    username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
+
+    with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts(ssh_opts) do
+      args = ["-p", port] ++ auth_args ++ ["#{username}@#{host}", command]
+
+      full_cmd =
+        String.trim("#{sshpass_prefix} ssh #{Enum.map_join(args, " ", &shell_escape/1)}")
+
+      case System.cmd("/bin/sh", ["-c", full_cmd], stderr_to_stdout: true, env: env) do
+        {_, 0} -> :ok
+        {output, _} -> {:error, String.trim(output)}
+      end
+    end
+  end
+
+  defp scp_download(ssh_opts, remote_path, local_path) do
+    host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
+    port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
+    username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
+
+    with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts(ssh_opts) do
+      # SCP uses -P (uppercase) for port
+      args = ["-P", port] ++ auth_args ++ ["#{username}@#{host}:#{remote_path}", local_path]
+
+      full_cmd =
+        String.trim("#{sshpass_prefix} scp #{Enum.map_join(args, " ", &shell_escape/1)}")
+
+      case System.cmd("/bin/sh", ["-c", full_cmd], stderr_to_stdout: true, env: env) do
+        {_, 0} -> :ok
+        {output, _} -> {:error, "scp download failed: #{String.trim(output)}"}
+      end
+    end
+  end
+
+  defp ssh_auth_parts(ssh_opts) do
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    password =
+      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+
+    case auth_method do
+      "password" ->
+        case find_cmd(["sshpass"]) do
+          nil ->
+            {:error, "sshpass not found — install with: apt install sshpass"}
+
+          sshpass ->
+            env =
+              if is_binary(password) and password != "" do
+                [{"SSHPASS", password}]
+              else
+                []
+              end
+
+            {:ok, "#{sshpass} -e", ["-o", "StrictHostKeyChecking=accept-new"], env}
+        end
+
+      _ ->
+        private_key_path =
+          ssh_opts
+          |> Map.get(:private_key_path, Map.get(ssh_opts, "private_key_path"))
+          |> normalize_string()
+          |> expand_tilde_path()
+
+        {:ok, "",
+         [
+           "-o",
+           "BatchMode=yes",
+           "-o",
+           "StrictHostKeyChecking=accept-new",
+           "-i",
+           private_key_path
+         ], []}
+    end
+  end
+
+  defp extract_backup_archives(dir) do
+    # Extract the main backup tar
+    tar_files = Path.wildcard("#{dir}/*.tar")
+
+    case tar_files do
+      [] ->
+        {:error, "no backup tar found"}
+
+      _ ->
+        Enum.each(tar_files, fn tar ->
+          System.cmd("tar", ["xf", tar, "-C", dir], stderr_to_stdout: true)
+        end)
+
+        # Extract any nested tars (Plesk backups may nest domain data in sub-tars)
+        nested = Path.wildcard("#{dir}/**/*.tar") ++ Path.wildcard("#{dir}/**/*.tar.gz")
+        already = MapSet.new(tar_files)
+
+        Enum.each(nested, fn nested_tar ->
+          unless MapSet.member?(already, nested_tar) do
+            System.cmd("tar", ["xf", nested_tar, "-C", Path.dirname(nested_tar)],
+              stderr_to_stdout: true
+            )
+          end
+        end)
+
+        :ok
+    end
+  end
+
+  defp find_and_import_dump(extract_dir, db_name, db_type) do
+    # Search for SQL dump files matching the database name
+    # Plesk backups store dumps in various locations, so search broadly
+    all_sql_files =
+      Path.wildcard("#{extract_dir}/**/*.sql") ++
+        Path.wildcard("#{extract_dir}/**/*.sql.gz")
+
+    # Find a file whose basename contains the database name
+    match =
+      Enum.find(all_sql_files, fn path ->
+        basename = Path.basename(path) |> String.downcase()
+        String.contains?(basename, String.downcase(db_name))
+      end)
+
+    case match do
+      nil -> :not_found
+      dump_file -> import_sql_file(dump_file, db_name, db_type)
+    end
+  end
+
+  defp import_sql_file(dump_file, db_name, db_type) do
+    with {:ok, import_cmd} <- local_import_command(db_name, db_type) do
+      cat_cmd =
+        if String.ends_with?(dump_file, ".gz"), do: "zcat", else: "cat"
+
+      full_cmd = "#{cat_cmd} #{shell_escape(dump_file)} | #{import_cmd}"
+
+      case System.cmd("/bin/sh", ["-c", full_cmd], stderr_to_stdout: true) do
+        {_, 0} -> :ok
+        {output, _} -> {:error, String.trim(output)}
+      end
     end
   end
 
@@ -833,78 +1052,6 @@ defmodule Hostctl.Plesk.Importer do
           {:error, cs} -> {:failed, "#{item.login}: #{changeset_error_summary(cs)}"}
         end
     end
-  end
-
-  defp dump_and_import_database(db_name, db_type, ssh_opts) do
-    host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
-    port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
-    username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
-
-    auth_method =
-      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
-
-    password =
-      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
-
-    with {:ok, import_cmd} <- local_import_command(db_name, db_type),
-         {:ok, ssh_prefix, ssh_key_args, env} <-
-           ssh_command_parts(auth_method, password, ssh_opts) do
-      dump_cmd = remote_dump_command(db_name, db_type)
-
-      # SSH into remote, run dump, pipe into local import command
-      ssh_args = ["-p", port] ++ ssh_key_args ++ ["#{username}@#{host}", dump_cmd]
-
-      full_shell =
-        "#{ssh_prefix} #{Enum.map_join(ssh_args, " ", &shell_escape/1)} | #{import_cmd}"
-
-      case System.cmd("/bin/sh", ["-c", full_shell], stderr_to_stdout: true, env: env) do
-        {_, 0} -> :ok
-        {output, _} -> {:error, String.trim(output)}
-      end
-    end
-  end
-
-  defp ssh_command_parts("password", password, _ssh_opts) do
-    case find_cmd(["sshpass"]) do
-      nil ->
-        {:error, "sshpass not found — install with: apt install sshpass"}
-
-      sshpass ->
-        env =
-          if is_binary(password) and password != "" do
-            [{"SSHPASS", password}]
-          else
-            []
-          end
-
-        {:ok, "#{sshpass} -e ssh", ["-o", "StrictHostKeyChecking=accept-new"], env}
-    end
-  end
-
-  defp ssh_command_parts(_key, _password, ssh_opts) do
-    private_key_path =
-      ssh_opts
-      |> Map.get(:private_key_path, Map.get(ssh_opts, "private_key_path"))
-      |> normalize_string()
-      |> expand_tilde_path()
-
-    {:ok, "ssh",
-     [
-       "-o",
-       "BatchMode=yes",
-       "-o",
-       "StrictHostKeyChecking=accept-new",
-       "-i",
-       private_key_path
-     ], []}
-  end
-
-  defp remote_dump_command(db_name, "postgres") do
-    "pg_dump -U postgres --no-owner --no-privileges #{shell_escape(db_name)}"
-  end
-
-  defp remote_dump_command(db_name, _mysql) do
-    "mysqldump --single-transaction --routines --triggers --events #{shell_escape(db_name)}"
   end
 
   defp local_import_command(db_name, "postgres") do
