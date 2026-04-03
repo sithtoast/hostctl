@@ -1769,6 +1769,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     %{
       "subdomains" => subscription |> Map.get(:subdomains, []) |> length(),
       "dns" => 0,
+      "web_files" => 0,
       "mail_accounts" => 0,
       "mail_content" => 0,
       "databases" => 0,
@@ -1785,7 +1786,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
     %{
       "subdomains" => subscription |> Map.get(:subdomains, []) |> length(),
-      "dns" => inv |> Map.get("dns", []) |> Enum.count(&(&1.domain == domain)),
+      "dns" => inv |> Map.get("dns_records", []) |> Enum.count(&(&1.domain == domain)),
+      "web_files" => inv |> Map.get("web_files", []) |> Enum.count(&(&1.domain == domain)),
       "mail_accounts" =>
         inv |> Map.get("mail_accounts", []) |> Enum.count(&(&1.domain == domain)),
       "mail_content" => inv |> Map.get("mail_content", []) |> Enum.count(&(&1.domain == domain)),

@@ -430,23 +430,24 @@ defmodule Hostctl.Plesk.Importer do
         r.domain == domain.name and MapSet.member?(supported_types, r.type)
       end)
 
+    # Always ensure a DNS zone exists for this domain
+    zone =
+      case Hosting.get_dns_zone_for_domain(domain) do
+        nil ->
+          {:ok, zone} =
+            %Hostctl.Hosting.DnsZone{domain_id: domain.id}
+            |> Hostctl.Hosting.DnsZone.changeset(%{})
+            |> Hostctl.Repo.insert()
+
+          zone
+
+        existing_zone ->
+          existing_zone
+      end
+
     if domain_records == [] do
       %{created: 0, skipped: 0, failed: 0, errors: []}
     else
-      # Ensure a DNS zone exists for this domain
-      zone =
-        case Hosting.get_dns_zone_for_domain(domain) do
-          nil ->
-            {:ok, zone} =
-              %Hostctl.Hosting.DnsZone{domain_id: domain.id}
-              |> Hostctl.Hosting.DnsZone.changeset(%{})
-              |> Hostctl.Repo.insert()
-
-            zone
-
-          existing_zone ->
-            existing_zone
-        end
 
       # Get existing records to avoid duplicates
       existing_records =
@@ -1076,8 +1077,13 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp extract_backup_archives(dir) do
-    # Extract the main backup tar
-    tar_files = Path.wildcard("#{dir}/*.tar")
+    # Extract the main backup archive (Plesk may use tar, tar.gz, or zstd-compressed tar)
+    tar_files =
+      Path.wildcard("#{dir}/*.tar") ++
+        Path.wildcard("#{dir}/*.tar.gz") ++
+        Path.wildcard("#{dir}/*.tgz") ++
+        Path.wildcard("#{dir}/*.tar.zst") ++
+        Path.wildcard("#{dir}/*.tzst")
 
     case tar_files do
       [] ->
@@ -1085,7 +1091,7 @@ defmodule Hostctl.Plesk.Importer do
 
       _ ->
         Enum.each(tar_files, fn tar ->
-          System.cmd("tar", ["xf", tar, "-C", dir], stderr_to_stdout: true)
+          extract_tar(tar, dir)
         end)
 
         # Recursively extract nested tars — Plesk backups can nest 3+ levels deep
@@ -1099,7 +1105,9 @@ defmodule Hostctl.Plesk.Importer do
     nested =
       (Path.wildcard("#{dir}/**/*.tar") ++
          Path.wildcard("#{dir}/**/*.tar.gz") ++
-         Path.wildcard("#{dir}/**/*.tgz"))
+         Path.wildcard("#{dir}/**/*.tgz") ++
+         Path.wildcard("#{dir}/**/*.tar.zst") ++
+         Path.wildcard("#{dir}/**/*.tzst"))
       |> Enum.reject(&MapSet.member?(already_extracted, &1))
 
     if nested == [] do
@@ -1107,15 +1115,35 @@ defmodule Hostctl.Plesk.Importer do
     else
       newly_extracted =
         Enum.reduce(nested, already_extracted, fn nested_tar, acc ->
-          System.cmd("tar", ["xf", nested_tar, "-C", Path.dirname(nested_tar)],
-            stderr_to_stdout: true
-          )
-
+          extract_tar(nested_tar, Path.dirname(nested_tar))
           MapSet.put(acc, nested_tar)
         end)
 
       # Recurse to handle any newly revealed archives
       extract_nested_archives(dir, newly_extracted)
+    end
+  end
+
+  defp extract_tar(tar_path, dest_dir) do
+    cond do
+      String.ends_with?(tar_path, ".zst") or String.ends_with?(tar_path, ".tzst") ->
+        # zstd-compressed tar — use --zstd flag (GNU tar) or pipe through zstd
+        case System.cmd("tar", ["--zstd", "-xf", tar_path, "-C", dest_dir],
+               stderr_to_stdout: true
+             ) do
+          {_, 0} ->
+            :ok
+
+          _ ->
+            # Fallback: pipe through zstd -d
+            System.cmd("/bin/sh", ["-c", "zstd -d -c #{shell_escape(tar_path)} | tar xf - -C #{shell_escape(dest_dir)}"],
+              stderr_to_stdout: true
+            )
+        end
+
+      true ->
+        # tar can auto-detect gz/bz2 compression with xf
+        System.cmd("tar", ["xf", tar_path, "-C", dest_dir], stderr_to_stdout: true)
     end
   end
 
