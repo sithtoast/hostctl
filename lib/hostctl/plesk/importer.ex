@@ -1035,31 +1035,67 @@ defmodule Hostctl.Plesk.Importer do
 
     File.mkdir_p!(local_dir)
 
-    # Use sudo -u postgres for peer auth on Unix socket — no PG password needed.
-    # We build the sudo prefix from ssh_opts (handles password-based sudo)
-    # and add -u postgres to run pg_dump as the postgres system user.
+    sudo = sudo_prefix(ssh_opts)
+
+    # Locate pg_dump on the remote — it may not be in sudo's secure_path
+    # (e.g. on Debian/Ubuntu it lives in /usr/lib/postgresql/*/bin/)
+    find_pg_dump_cmd =
+      "#{sudo}bash -c 'command -v pg_dump 2>/dev/null " <>
+        "|| find /usr/lib/postgresql /usr/pgsql-* -name pg_dump -type f 2>/dev/null | head -1'"
+
+    pg_dump_bin =
+      case ssh_exec_output(ssh_opts, find_pg_dump_cmd) do
+        {:ok, path} ->
+          trimmed = String.trim(path)
+          if trimmed != "", do: trimmed, else: "pg_dump"
+
+        _ ->
+          "pg_dump"
+      end
+
+    Logger.info("[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH (pg_dump=#{pg_dump_bin})")
+
+    # Build sudo -u postgres prefix for peer auth on Unix socket.
     auth_method =
       normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
 
     password =
       normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
 
-    sudo_cmd =
+    sudo_pg =
       if auth_method == "password" and password != "" do
         "echo #{shell_escape(password)} | sudo -S -u postgres"
       else
         "sudo -u postgres"
       end
 
+    # --no-owner / --no-acl: skip OWNER and GRANT/REVOKE statements which
+    # reference Plesk-specific users that don't exist on the local server.
     dump_cmd =
-      "#{sudo_cmd} pg_dump #{shell_escape(db_name)} > #{shell_escape(remote_dump)}"
-
-    Logger.info("[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH pg_dump")
+      "#{sudo_pg} #{shell_escape(pg_dump_bin)} --no-owner --no-acl " <>
+        "#{shell_escape(db_name)} > #{shell_escape(remote_dump)}"
 
     with :ok <- ssh_exec(ssh_opts, dump_cmd),
          :ok <- scp_download(ssh_opts, remote_dump, local_dump),
          _ <- ssh_exec(ssh_opts, "rm -f #{shell_escape(remote_dump)}") do
-      {:ok, local_dir, local_dump}
+      # Verify dump has meaningful content (pg_dump always emits headers ≥ ~200 bytes)
+      case File.stat(local_dump) do
+        {:ok, %{size: size}} when size > 100 ->
+          Logger.info("[Importer] Downloaded PG dump for '#{db_name}': #{size} bytes")
+          {:ok, local_dir, local_dump}
+
+        {:ok, %{size: size}} ->
+          Logger.warning(
+            "[Importer] PG dump for '#{db_name}' is suspiciously small: #{size} bytes"
+          )
+
+          File.rm_rf(local_dir)
+          {:error, "pg_dump produced empty or near-empty output (#{size} bytes)"}
+
+        {:error, reason} ->
+          File.rm_rf(local_dir)
+          {:error, "dump file not found after download: #{inspect(reason)}"}
+      end
     else
       {:error, reason} ->
         File.rm_rf(local_dir)
@@ -1415,7 +1451,7 @@ defmodule Hostctl.Plesk.Importer do
 
         {:ok,
          "PGPASSWORD=#{shell_escape(Keyword.get(config, :password, ""))} " <>
-           "#{cmd} -h #{shell_escape(host)} -p #{port} -U #{shell_escape(user)} #{shell_escape(db_name)}"}
+           "#{cmd} -v ON_ERROR_STOP=1 -h #{shell_escape(host)} -p #{port} -U #{shell_escape(user)} #{shell_escape(db_name)}"}
     end
   end
 
