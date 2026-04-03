@@ -767,9 +767,11 @@ defmodule Hostctl.Plesk.Importer do
     username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
     timeout = Keyword.get(opts, :timeout, 300)
 
-    # Build the remote rsync path with sudo (password-aware)
-    remote_sudo = sudo_prefix(ssh_opts)
-    rsync_path = "#{remote_sudo}rsync"
+    # Build the remote rsync-path with sudo.
+    # For password auth: feed the password to sudo -S via printf, then
+    # forward the remaining stdin (rsync protocol data) with cat.
+    # -p '' suppresses the sudo prompt which would corrupt the rsync stream.
+    rsync_path = remote_rsync_path(ssh_opts)
 
     with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts(ssh_opts) do
       # Ensure remote_path ends with / for rsync directory sync
@@ -996,6 +998,27 @@ defmodule Hostctl.Plesk.Importer do
       "echo #{shell_escape(password)} | sudo -S "
     else
       "sudo "
+    end
+  end
+
+  # Builds the --rsync-path value for running rsync as root on the remote.
+  # Unlike sudo_prefix (which is for one-shot commands), this must preserve
+  # stdin for the rsync protocol. With password auth we feed the password to
+  # sudo via printf, then `cat` forwards the rsync protocol data.
+  defp remote_rsync_path(ssh_opts) do
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    password =
+      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+
+    if auth_method == "password" and password != "" do
+      # printf feeds the password line, cat forwards remaining stdin (rsync protocol)
+      # -S reads password from stdin, -p '' suppresses the prompt
+      escaped = String.replace(password, "'", "'\\''")
+      "(printf '#{escaped}\\n'; cat) | sudo -S -p '' rsync"
+    else
+      "sudo rsync"
     end
   end
 
