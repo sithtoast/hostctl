@@ -8,6 +8,8 @@ defmodule Hostctl.Plesk.Importer do
   - It supports dry-run previews before writing anything.
   """
 
+  require Logger
+
   alias Hostctl.Accounts.Scope
   alias Hostctl.Hosting
 
@@ -901,7 +903,18 @@ defmodule Hostctl.Plesk.Importer do
                   :created
 
                 :not_found ->
-                  if create_status == :created, do: :created, else: :skipped
+                  all_files =
+                    Path.wildcard("#{extract_dir}/**/*")
+                    |> Enum.reject(&File.dir?/1)
+                    |> Enum.map(&String.replace_leading(&1, extract_dir <> "/", ""))
+
+                  Logger.warning(
+                    "[Importer] No SQL dump found for DB '#{item.name}'. " <>
+                      "Files in backup: #{inspect(all_files)}"
+                  )
+
+                  label = if create_status == :created, do: "created but ", else: ""
+                  {:failed, "#{item.name}: #{label}no SQL dump found in backup"}
 
                 {:error, reason} ->
                   label = if create_status == :created, do: "created but ", else: ""
@@ -1077,19 +1090,34 @@ defmodule Hostctl.Plesk.Importer do
           System.cmd("tar", ["xf", tar, "-C", dir], stderr_to_stdout: true)
         end)
 
-        # Extract any nested tars (Plesk backups may nest domain data in sub-tars)
-        nested = Path.wildcard("#{dir}/**/*.tar") ++ Path.wildcard("#{dir}/**/*.tar.gz")
-        already = MapSet.new(tar_files)
-
-        Enum.each(nested, fn nested_tar ->
-          unless MapSet.member?(already, nested_tar) do
-            System.cmd("tar", ["xf", nested_tar, "-C", Path.dirname(nested_tar)],
-              stderr_to_stdout: true
-            )
-          end
-        end)
+        # Recursively extract nested tars — Plesk backups can nest 3+ levels deep
+        extract_nested_archives(dir, MapSet.new(tar_files))
 
         :ok
+    end
+  end
+
+  defp extract_nested_archives(dir, already_extracted) do
+    nested =
+      (Path.wildcard("#{dir}/**/*.tar") ++
+         Path.wildcard("#{dir}/**/*.tar.gz") ++
+         Path.wildcard("#{dir}/**/*.tgz"))
+      |> Enum.reject(&MapSet.member?(already_extracted, &1))
+
+    if nested == [] do
+      :ok
+    else
+      newly_extracted =
+        Enum.reduce(nested, already_extracted, fn nested_tar, acc ->
+          System.cmd("tar", ["xf", nested_tar, "-C", Path.dirname(nested_tar)],
+            stderr_to_stdout: true
+          )
+
+          MapSet.put(acc, nested_tar)
+        end)
+
+      # Recurse to handle any newly revealed archives
+      extract_nested_archives(dir, newly_extracted)
     end
   end
 
@@ -1100,12 +1128,26 @@ defmodule Hostctl.Plesk.Importer do
       Path.wildcard("#{extract_dir}/**/*.sql") ++
         Path.wildcard("#{extract_dir}/**/*.sql.gz")
 
-    # Find a file whose basename contains the database name
+    db_name_lower = String.downcase(db_name)
+
+    # Try matching by basename first (e.g. "mysql.mydb.2024.sql.gz")
     match =
       Enum.find(all_sql_files, fn path ->
         basename = Path.basename(path) |> String.downcase()
-        String.contains?(basename, String.downcase(db_name))
+        String.contains?(basename, db_name_lower)
       end)
+
+    # Fall back to matching by any component in the path (e.g. ".../databases/mysql/mydb/dump.sql")
+    match =
+      match ||
+        Enum.find(all_sql_files, fn path ->
+          path |> String.downcase() |> String.contains?(db_name_lower)
+        end)
+
+    Logger.info(
+      "[Importer] DB dump search for '#{db_name}': found #{length(all_sql_files)} SQL file(s), " <>
+        "match=#{inspect(match && Path.relative_to(match, extract_dir))}"
+    )
 
     case match do
       nil -> :not_found

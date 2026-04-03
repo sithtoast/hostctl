@@ -414,42 +414,42 @@ defmodule HostctlWeb.DnsLive.Index do
             <h2 class="text-base font-semibold text-gray-900 dark:text-white">DNS Records</h2>
             <span class="text-sm text-gray-500 dark:text-gray-400">TTL: {@zone.ttl}s</span>
           </div>
-          <%= if @zone.dns_records == [] do %>
-            <div class="flex items-center justify-center py-12 text-sm text-gray-400">
-              No DNS records yet. Add your first record above.
-            </div>
-          <% else %>
-            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-800">
-              <thead>
-                <tr class="bg-gray-50 dark:bg-gray-800/50">
-                  <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-16">
-                    Type
+          <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-800">
+            <thead>
+              <tr class="bg-gray-50 dark:bg-gray-800/50">
+                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-16">
+                  Type
+                </th>
+                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Name
+                </th>
+                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Value
+                </th>
+                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-20">
+                  TTL
+                </th>
+                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-20">
+                  Priority
+                </th>
+                <%= if cloudflare_enabled?(@dns_setting) && @zone.cloudflare_zone_id do %>
+                  <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-24">
+                    Sync
                   </th>
-                  <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                    Name
-                  </th>
-                  <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                    Value
-                  </th>
-                  <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-20">
-                    TTL
-                  </th>
-                  <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-20">
-                    Priority
-                  </th>
-                  <%= if cloudflare_enabled?(@dns_setting) && @zone.cloudflare_zone_id do %>
-                    <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-24">
-                      Sync
-                    </th>
-                  <% end %>
-                  <th class="relative px-4 py-3 w-24"><span class="sr-only">Actions</span></th>
-                </tr>
-              </thead>
-              <tbody
-                id="dns-records"
-                phx-update="stream"
-                class="divide-y divide-gray-100 dark:divide-gray-800"
-              >
+                <% end %>
+                <th class="relative px-4 py-3 w-24"><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody
+              id="dns-records"
+              phx-update="stream"
+              class="divide-y divide-gray-100 dark:divide-gray-800"
+            >
+              <tr class="hidden only:table-row">
+                <td colspan="7" class="px-4 py-12 text-center text-sm text-gray-400">
+                  No DNS records yet. Add your first record above.
+                </td>
+              </tr>
                 <tr
                   :for={{dom_id, record} <- @streams.dns_records}
                   id={dom_id}
@@ -566,7 +566,6 @@ defmodule HostctlWeb.DnsLive.Index do
                 </tr>
               </tbody>
             </table>
-          <% end %>
         </div>
 
         <%!-- Cloudflare footer (zone is linked) --%>
