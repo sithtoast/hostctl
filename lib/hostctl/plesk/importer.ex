@@ -740,11 +740,10 @@ defmodule Hostctl.Plesk.Importer do
       :ok ->
         case do_rsync(ssh_opts, remote_path, local_base_path,
                timeout: 3600,
-               excludes: @plesk_rsync_excludes
+               excludes: @plesk_rsync_excludes,
+               chown: "www-data:www-data"
              ) do
           :ok ->
-            Logger.info("[Importer] chown -R www-data:www-data #{local_base_path}")
-            Hostctl.WebServer.chown_to_www_data(local_base_path)
             :created
 
           {:error, reason} ->
@@ -779,7 +778,7 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp fix_maildir_ownership(path) do
-    args = ["chown", "-R", "5000:5000", path]
+    args = ["/usr/bin/chown", "-R", "5000:5000", path]
 
     System.cmd("sudo", ["systemd-run", "--pipe", "--wait", "--collect", "--quiet" | args],
       stderr_to_stdout: true
@@ -787,7 +786,7 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp rsync_maildir(ssh_opts, remote_path, local_path) do
-    do_rsync(ssh_opts, remote_path, local_path, timeout: 60)
+    do_rsync(ssh_opts, remote_path, local_path, timeout: 60, chown: "5000:5000")
   end
 
   defp do_rsync(ssh_opts, remote_path, local_path, opts) do
@@ -796,6 +795,7 @@ defmodule Hostctl.Plesk.Importer do
     username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))
     timeout = Keyword.get(opts, :timeout, 300)
     excludes = Keyword.get(opts, :excludes, [])
+    chown = Keyword.get(opts, :chown)
 
     # Build the remote rsync-path with sudo.
     # For password auth: feed the password to sudo -S via printf, then
@@ -822,6 +822,7 @@ defmodule Hostctl.Plesk.Importer do
         end)
 
       exclude_args = Enum.map(excludes, fn pattern -> "--exclude=#{pattern}" end)
+      chown_args = if chown, do: ["--chown=#{chown}"], else: []
 
       args =
         ["systemd-run", "--pipe", "--wait", "--collect", "--quiet"] ++
@@ -833,6 +834,7 @@ defmodule Hostctl.Plesk.Importer do
             "--timeout=#{timeout}",
             "--rsync-path=#{rsync_path}"
           ] ++
+          chown_args ++
           exclude_args ++
           [
             "-e",
