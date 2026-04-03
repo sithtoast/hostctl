@@ -489,10 +489,19 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_category("web_files", domain, _subscription, inventory, restore_opts) do
-    items = Map.get(inventory, "web_files", [])
+  defp restore_category("web_files", domain, subscription, inventory, restore_opts) do
+    all_items = Map.get(inventory, "web_files", [])
     ssh_opts = Map.get(restore_opts, :ssh_opts)
     web_files_path = Map.get(restore_opts, :web_files_path)
+
+    # Only process the parent domain entry — subdomain folders live inside
+    # /var/www/vhosts/{domain}/{sub.domain}/ and are included in the parent rsync.
+    subdomain_names =
+      subscription
+      |> Map.get(:subdomains, [])
+      |> MapSet.new(& &1.full_name)
+
+    items = Enum.reject(all_items, fn item -> MapSet.member?(subdomain_names, item.domain) end)
 
     cond do
       items == [] ->
@@ -689,32 +698,21 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp restore_web_files(_domain, item, ssh_opts, local_base_path) do
-    remote_path = item.document_root
+    # Rsync the entire domain directory, not just the document root
+    remote_path = "/var/www/vhosts/#{item.domain}"
 
-    if is_nil(remote_path) || remote_path == "" do
-      :skipped
-    else
-      # If the document root is a relative path (e.g. "httpdocs"), construct the full Plesk path
-      remote_path =
-        if String.starts_with?(remote_path, "/") do
-          remote_path
-        else
-          "/var/www/vhosts/#{item.domain}/#{remote_path}"
+    case ensure_local_directory(local_base_path) do
+      :ok ->
+        case rsync_files(ssh_opts, remote_path, local_base_path) do
+          :ok ->
+            :created
+
+          {:error, reason} ->
+            {:failed, "#{item.domain}: rsync failed - #{reason}"}
         end
 
-      case ensure_local_directory(local_base_path) do
-        :ok ->
-          case rsync_files(ssh_opts, remote_path, local_base_path) do
-            :ok ->
-              :created
-
-            {:error, reason} ->
-              {:failed, "#{item.domain}: rsync failed - #{reason}"}
-          end
-
-        {:error, reason} ->
-          {:failed, "#{item.domain}: #{reason}"}
-      end
+      {:error, reason} ->
+        {:failed, "#{item.domain}: #{reason}"}
     end
   end
 
