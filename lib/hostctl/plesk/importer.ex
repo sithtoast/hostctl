@@ -1067,7 +1067,13 @@ defmodule Hostctl.Plesk.Importer do
     escaped_pg_dump = shell_escape(pg_dump_bin)
     escaped_db = shell_escape(db_name)
     escaped_out = shell_escape(remote_dump)
+    remote_err = "/tmp/hostctl_pgdump_err_#{rand}.log"
+    escaped_err = shell_escape(remote_err)
 
+    # cd /tmp first so sudo -u postgres doesn't try to cd to the calling
+    # user's home dir (which it can't access → "could not change directory"
+    # warning that was previously contaminating the SQL dump via 2>&1).
+    # stderr goes to a separate file so it never mixes with the SQL dump.
     dump_cmd =
       if auth_method == "password" and password != "" do
         escaped_pass = String.replace(password, "'", "'\\''")
@@ -1076,13 +1082,17 @@ defmodule Hostctl.Plesk.Importer do
         "AP=#{askpass}; " <>
           "printf '#!/bin/sh\\necho '\"'\"'#{escaped_pass}'\"'\"'\\n' > $AP && " <>
           "chmod 700 $AP && " <>
+          "cd /tmp && " <>
           "SUDO_ASKPASS=$AP sudo -A -u postgres " <>
-          "#{escaped_pg_dump} --no-owner --no-acl #{escaped_db} > #{escaped_out} 2>&1; " <>
+          "#{escaped_pg_dump} --no-owner --no-acl #{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
           "RC=$?; rm -f $AP; " <>
-          "if [ $RC -ne 0 ]; then cat #{escaped_out} >&2; fi; exit $RC"
+          "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
+          "rm -f #{escaped_err}; exit $RC"
       else
-        "sudo -u postgres #{escaped_pg_dump} --no-owner --no-acl " <>
-          "#{escaped_db} > #{escaped_out} 2>&1"
+        "cd /tmp && sudo -u postgres #{escaped_pg_dump} --no-owner --no-acl " <>
+          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
+          "RC=$?; if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
+          "rm -f #{escaped_err}; exit $RC"
       end
 
     with {:ok, output} <- ssh_exec_output(ssh_opts, dump_cmd) do
