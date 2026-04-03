@@ -1083,8 +1083,9 @@ defmodule Hostctl.Plesk.SSHProbe do
 
   defp normalize_db_type(value) when is_binary(value) do
     case value |> String.trim() |> String.downcase() do
-      "postgresql" -> "postgres"
-      "postgres" -> "postgres"
+      "postgresql" -> "postgresql"
+      "postgres" -> "postgresql"
+      "pgsql" -> "postgresql"
       "" -> "mysql"
       other -> other
     end

@@ -850,7 +850,9 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp restore_database(domain, item) do
-    db_type = Map.get(item, :db_type, "mysql")
+    db_type =
+      (Map.get(item, :db_type) || Map.get(item, "db_type") || "mysql")
+      |> normalize_db_type()
 
     existing =
       domain
@@ -893,7 +895,9 @@ defmodule Hostctl.Plesk.Importer do
               status
 
             {item, create_status} ->
-              db_type = Map.get(item, :db_type, "mysql")
+              db_type =
+                (Map.get(item, :db_type) || Map.get(item, "db_type") || "mysql")
+                |> normalize_db_type()
 
               case find_and_import_dump(extract_dir, item.name, db_type) do
                 :ok ->
@@ -1273,7 +1277,7 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp local_import_command(db_name, "postgres") do
+  defp local_import_command(db_name, "postgresql") do
     config = Application.get_env(:hostctl, :postgres_server, [])
 
     case find_cmd(["psql"]) do
@@ -1453,6 +1457,18 @@ defmodule Hostctl.Plesk.Importer do
 
   defp normalize_string(value) when is_binary(value), do: String.trim(value)
   defp normalize_string(_), do: ""
+
+  defp normalize_db_type(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "postgresql" -> "postgresql"
+      "postgres" -> "postgresql"
+      "pgsql" -> "postgresql"
+      "" -> "mysql"
+      other -> other
+    end
+  end
+
+  defp normalize_db_type(_), do: "mysql"
 
   defp expand_tilde_path("~" <> rest), do: Path.expand("~" <> rest)
   defp expand_tilde_path(path), do: path
