@@ -419,9 +419,12 @@ defmodule Hostctl.Plesk.Importer do
     do_restore_items(subs, fn sub -> restore_subdomain(domain, sub) end)
   end
 
-  defp restore_category("dns", domain, _subscription, inventory, _restore_opts) do
+  defp restore_category("dns", domain, _subscription, inventory, restore_opts) do
     records = Map.get(inventory, "dns_records", [])
     supported_types = Hostctl.Hosting.DnsRecord.valid_types() |> MapSet.new()
+
+    # Build IP replacement map: old Plesk server IPs → new server IPs
+    ip_replacements = build_ip_replacements(restore_opts)
 
     # Filter records belonging to this domain and with supported types
     domain_records =
@@ -461,7 +464,9 @@ defmodule Hostctl.Plesk.Importer do
       existing_set = MapSet.new(existing_records)
 
       Enum.reduce(domain_records, %{created: 0, skipped: 0, failed: 0, errors: []}, fn rec, acc ->
-        key = {rec.type, rec.name, rec.value}
+        # Replace old host IPs with new server IPs in A/AAAA records
+        value = maybe_replace_ip(rec.type, rec.value, ip_replacements)
+        key = {rec.type, rec.name, value}
 
         if MapSet.member?(existing_set, key) do
           %{acc | skipped: acc.skipped + 1}
@@ -469,7 +474,7 @@ defmodule Hostctl.Plesk.Importer do
           attrs = %{
             type: rec.type,
             name: rec.name,
-            value: rec.value,
+            value: value,
             priority: rec.priority
           }
 
@@ -1295,6 +1300,75 @@ defmodule Hostctl.Plesk.Importer do
   defp shell_escape(value) do
     "'" <> String.replace(value, "'", "'\\''") <> "'"
   end
+
+  # Build a map of old Plesk server IPs to new server IPs for DNS record replacement.
+  defp build_ip_replacements(restore_opts) do
+    ssh_opts = Map.get(restore_opts, :ssh_opts)
+
+    if ssh_opts do
+      host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
+      old_ips = resolve_host_ips(host)
+      {new_ipv4, new_ipv6} = Hostctl.Settings.server_ips()
+
+      replacements =
+        Enum.reduce(old_ips, %{}, fn old_ip, acc ->
+          if String.contains?(old_ip, ":") do
+            # IPv6
+            if new_ipv6 != "", do: Map.put(acc, old_ip, new_ipv6), else: acc
+          else
+            # IPv4
+            if new_ipv4 != "", do: Map.put(acc, old_ip, new_ipv4), else: acc
+          end
+        end)
+
+      if replacements != %{} do
+        Logger.info(
+          "[Importer] DNS IP replacements: #{inspect(replacements)}"
+        )
+      end
+
+      replacements
+    else
+      %{}
+    end
+  end
+
+  # Resolve a hostname to its IP addresses. If already an IP, returns it as-is.
+  defp resolve_host_ips(host) when is_binary(host) and host != "" do
+    charlist = String.to_charlist(host)
+
+    # Check if it's already an IP address
+    case :inet.parse_address(charlist) do
+      {:ok, _} ->
+        [host]
+
+      {:error, _} ->
+        # It's a hostname — resolve it
+        ipv4s =
+          case :inet.getaddrs(charlist, :inet) do
+            {:ok, addrs} -> Enum.map(addrs, &:inet.ntoa/1) |> Enum.map(&to_string/1)
+            _ -> []
+          end
+
+        ipv6s =
+          case :inet.getaddrs(charlist, :inet6) do
+            {:ok, addrs} -> Enum.map(addrs, &:inet.ntoa/1) |> Enum.map(&to_string/1)
+            _ -> []
+          end
+
+        Enum.uniq(ipv4s ++ ipv6s)
+    end
+  end
+
+  defp resolve_host_ips(_), do: []
+
+  # Replace A/AAAA record values that match old host IPs with new server IPs.
+  defp maybe_replace_ip(type, value, replacements)
+       when type in ["A", "AAAA"] and map_size(replacements) > 0 do
+    Map.get(replacements, value, value)
+  end
+
+  defp maybe_replace_ip(_type, value, _replacements), do: value
 
   defp restore_ftp_account(domain, item) do
     existing =

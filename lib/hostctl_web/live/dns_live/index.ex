@@ -6,7 +6,15 @@ defmodule HostctlWeb.DnsLive.Index do
   alias Hostctl.Settings
 
   def mount(%{"domain_id" => domain_id}, _session, socket) do
-    domain = Hosting.get_domain!(socket.assigns.current_scope, domain_id)
+    scope = socket.assigns.current_scope
+    is_admin = scope.user.role == "admin"
+
+    domain =
+      if is_admin do
+        Hosting.get_domain_for_admin!(domain_id)
+      else
+        Hosting.get_domain!(scope, domain_id)
+      end
 
     zone =
       case Hosting.get_dns_zone_for_domain(domain) do
