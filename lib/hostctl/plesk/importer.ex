@@ -743,7 +743,8 @@ defmodule Hostctl.Plesk.Importer do
                excludes: @plesk_rsync_excludes
              ) do
           :ok ->
-            chown_web_files(local_base_path)
+            Logger.info("[Importer] chown -R www-data:www-data #{local_base_path}")
+            Hostctl.WebServer.chown_to_www_data(local_base_path)
             :created
 
           {:error, reason} ->
@@ -752,28 +753,6 @@ defmodule Hostctl.Plesk.Importer do
 
       {:error, reason} ->
         {:failed, "#{item.domain}: #{reason}"}
-    end
-  end
-
-  defp chown_web_files(path) do
-    args = [
-      "systemd-run", "--pipe", "--wait", "--collect", "--quiet",
-      "chown", "-R", "www-data:www-data", path
-    ]
-
-    Logger.info("[Importer] chown -R www-data:www-data #{path}")
-
-    case System.cmd("sudo", args, stderr_to_stdout: true) do
-      {_, 0} ->
-        Logger.info("[Importer] chown completed for #{path}")
-        :ok
-
-      {output, code} ->
-        Logger.warning(
-          "[Importer] chown failed for #{path} (exit #{code}): #{String.trim(output)}"
-        )
-
-        {:error, String.trim(output)}
     end
   end
 
