@@ -798,9 +798,7 @@ defmodule Hostctl.Plesk.Importer do
     chown = Keyword.get(opts, :chown)
 
     # Build the remote rsync-path with sudo.
-    # For password auth: feed the password to sudo -S via printf, then
-    # forward the remaining stdin (rsync protocol data) with cat.
-    # -p '' suppresses the sudo prompt which would corrupt the rsync stream.
+    # For password auth we use SUDO_ASKPASS so stdin stays free for rsync.
     rsync_path = remote_rsync_path(ssh_opts)
 
     with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts(ssh_opts) do
@@ -1052,10 +1050,21 @@ defmodule Hostctl.Plesk.Importer do
       normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
 
     if auth_method == "password" and password != "" do
-      # printf feeds the password line, cat forwards remaining stdin (rsync protocol)
-      # -S reads password from stdin, -p '' suppresses the prompt
+      # Write a tiny SUDO_ASKPASS helper script on the remote that echoes
+      # the password, run sudo -A (which calls the askpass script instead of
+      # reading from stdin), then clean up. This keeps stdin completely free
+      # for rsync's protocol data — the previous (printf; cat) | sudo -S
+      # approach caused cat to hang after rsync finished because it kept
+      # waiting for more data on stdin.
       escaped = String.replace(password, "'", "'\\''")
-      "(printf '#{escaped}\\n'; cat) | sudo -S -p '' rsync"
+
+      "sh -c '" <>
+        "AP=/tmp/.rsync_askpass_$$; " <>
+        "printf \"#!/bin/sh\\necho " <> "'\"'\"'" <> escaped <> "'\"'\"'" <> "\\n\" > $AP; " <>
+        "chmod 700 $AP; " <>
+        "SUDO_ASKPASS=$AP sudo -A rsync \"$@\"; " <>
+        "RC=$?; rm -f $AP; exit $RC" <>
+        "' rsync"
     else
       "sudo rsync"
     end
