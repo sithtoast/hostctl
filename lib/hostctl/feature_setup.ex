@@ -1121,15 +1121,25 @@ defmodule Hostctl.FeatureSetup do
   def setup_phpmyadmin(key) do
     broadcast(key, :log, "Configuring phpMyAdmin...")
 
+    mysql_config = Application.get_env(:hostctl, :database_server, [])
+    host = Keyword.get(mysql_config, :hostname, "localhost")
+    port = Keyword.get(mysql_config, :port, 3306)
+    user = Keyword.get(mysql_config, :username, "root")
+    pass = Keyword.get(mysql_config, :password, "")
+
     blowfish_secret = :crypto.strong_rand_bytes(32) |> Base.encode64() |> binary_part(0, 32)
 
+    # Use auth_type 'config' for auto-login — the proxy plug already
+    # restricts /phpmyadmin to admin users, so no additional login is needed.
     config = """
     <?php
     $cfg['blowfish_secret'] = '#{blowfish_secret}';
-    $cfg['Servers'][1]['auth_type'] = 'cookie';
-    $cfg['Servers'][1]['host'] = 'localhost';
-    $cfg['Servers'][1]['compress'] = false;
-    $cfg['Servers'][1]['AllowNoPassword'] = false;
+    $cfg['Servers'][1]['auth_type'] = 'config';
+    $cfg['Servers'][1]['host'] = '#{php_escape(host)}';
+    $cfg['Servers'][1]['port'] = '#{port}';
+    $cfg['Servers'][1]['user'] = '#{php_escape(user)}';
+    $cfg['Servers'][1]['password'] = '#{php_escape(pass)}';
+    $cfg['Servers'][1]['AllowNoPassword'] = true;
     $cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
     """
 
@@ -1183,6 +1193,7 @@ defmodule Hostctl.FeatureSetup do
     with :ok <- setup_apache_port(key),
          :ok <- run_cmd(key, "mkdir", ["-p", install_dir]),
          :ok <- download_adminer(key, install_dir),
+         :ok <- write_adminer_autologin(key, install_dir),
          :ok <- run_cmd(key, "chown", ["-R", "www-data:www-data", install_dir]),
          :ok <- write_adminer_apache_conf(key),
          :ok <- enable_apache_conf(key, "adminer") do
@@ -1199,7 +1210,7 @@ defmodule Hostctl.FeatureSetup do
 
     case escaped_cmd(
            "sh",
-           ["-c", "curl -fsSL -o '#{install_dir}/index.php' '#{url}'"],
+           ["-c", "curl -fsSL -o '#{install_dir}/adminer.php' '#{url}'"],
            stderr_to_stdout: true
          ) do
       {_, 0} ->
@@ -1210,6 +1221,106 @@ defmodule Hostctl.FeatureSetup do
         broadcast(key, :log, "Download failed (exit #{code}): #{output}")
         {:error, {:download_failed, code}}
     end
+  end
+
+  defp write_adminer_autologin(key, install_dir) do
+    broadcast(key, :log, "Writing Adminer auto-login wrapper...")
+
+    # Build server entries from configured database servers
+    mysql_config = Application.get_env(:hostctl, :database_server, [])
+    pg_config = Application.get_env(:hostctl, :postgres_server, [])
+
+    servers = []
+
+    servers =
+      if Keyword.get(mysql_config, :enabled, false) do
+        host = Keyword.get(mysql_config, :hostname, "localhost")
+        port = Keyword.get(mysql_config, :port, 3306)
+        user = Keyword.get(mysql_config, :username, "root")
+        pass = Keyword.get(mysql_config, :password, "")
+
+        servers ++
+          [
+            ~s|    'MySQL' => ['driver' => 'server', 'server' => '#{host}:#{port}', 'username' => '#{php_escape(user)}', 'password' => '#{php_escape(pass)}'],|
+          ]
+      else
+        servers
+      end
+
+    servers =
+      if Keyword.get(pg_config, :enabled, false) do
+        host = Keyword.get(pg_config, :hostname, "localhost")
+        port = Keyword.get(pg_config, :port, 5432)
+        user = Keyword.get(pg_config, :username, "postgres")
+        pass = Keyword.get(pg_config, :password, "postgres")
+
+        servers ++
+          [
+            ~s|    'PostgreSQL' => ['driver' => 'pgsql', 'server' => '#{host}:#{port}', 'username' => '#{php_escape(user)}', 'password' => '#{php_escape(pass)}'],|
+          ]
+      else
+        servers
+      end
+
+    servers_php = Enum.join(servers, "\n")
+
+    # The index.php wrapper auto-authenticates the admin user.
+    # The proxy plug already gates /adminer to admin users only.
+    php = """
+    <?php
+    $hostctl_servers = [
+    #{servers_php}
+    ];
+
+    function adminer_object() {
+        class HostctlAdminer extends Adminer {
+            function loginForm() {
+                global $hostctl_servers;
+                echo '<select name="auth[driver]">';
+                foreach ($hostctl_servers as $name => $s) {
+                    $selected = (isset($_GET['pgsql']) && $s['driver'] === 'pgsql') ||
+                                (isset($_GET['server']) && $s['driver'] === 'server')
+                                ? ' selected' : '';
+                    echo '<option value="' . $s['driver'] . '"' . $selected . '>' . htmlspecialchars($name) . '</option>';
+                }
+                echo '</select>';
+                echo '<input type="hidden" name="auth[server]" value="">';
+                echo '<input type="hidden" name="auth[username]" value="">';
+                echo '<input type="hidden" name="auth[password]" value="">';
+                echo '<input type="hidden" name="auth[db]" value="">';
+                echo '<input type="submit" value="Login">';
+            }
+
+            function credentials() {
+                global $hostctl_servers;
+                $driver = $_GET['pgsql'] ?? ($_GET['server'] ?? null);
+                foreach ($hostctl_servers as $s) {
+                    $d = ($s['driver'] === 'pgsql') ? 'pgsql' : 'server';
+                    if ($driver === null || isset($_GET[$d])) {
+                        return [$s['server'], $s['username'], $s['password']];
+                    }
+                }
+                $first = reset($hostctl_servers);
+                return [$first['server'], $first['username'], $first['password']];
+            }
+
+            function login($login, $password) {
+                return true;
+            }
+        }
+        return new HostctlAdminer;
+    }
+
+    include './adminer.php';
+    """
+
+    write_file_via_sudo(key, install_dir <> "/index.php", php)
+  end
+
+  defp php_escape(str) when is_binary(str) do
+    str
+    |> String.replace("\\", "\\\\")
+    |> String.replace("'", "\\'")
   end
 
   defp write_adminer_apache_conf(key) do

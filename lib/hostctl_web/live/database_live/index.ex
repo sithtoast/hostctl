@@ -20,7 +20,7 @@ defmodule HostctlWeb.DatabaseLive.Index do
      |> assign(:db_users, [])
      |> assign(:db_user_form, nil)
      |> assign(:dbs_empty?, all_databases == [])
-     |> assign(:db_admin_links, db_admin_links())
+     |> assign(:db_admin_links, db_admin_links(socket.assigns.current_scope))
      |> assign_db_form()
      |> stream(:databases, all_databases)}
   end
@@ -180,12 +180,16 @@ defmodule HostctlWeb.DatabaseLive.Index do
     end
   end
 
-  defp db_admin_links do
-    [
-      {"phpmyadmin", "phpMyAdmin", "/phpmyadmin", "hero-circle-stack", "MySQL"},
-      {"adminer", "Adminer", "/adminer", "hero-circle-stack", "PostgreSQL & MySQL"}
-    ]
-    |> Enum.filter(fn {key, _, _, _, _} -> Settings.feature_enabled?(key) end)
+  defp db_admin_links(current_scope) do
+    if current_scope && current_scope.user && current_scope.user.role == "admin" do
+      [
+        {"phpmyadmin", "phpMyAdmin", "/phpmyadmin", "hero-circle-stack", "MySQL"},
+        {"adminer", "Adminer", "/adminer", "hero-circle-stack", "PostgreSQL & MySQL"}
+      ]
+      |> Enum.filter(fn {key, _, _, _, _} -> Settings.feature_enabled?(key) end)
+    else
+      []
+    end
   end
 
   def render(assigns) do

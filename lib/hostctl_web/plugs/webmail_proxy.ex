@@ -3,23 +3,68 @@ defmodule HostctlWeb.Plugs.WebmailProxy do
   Reverse proxy plug that forwards `/roundcube`, `/snappymail`, `/phpmyadmin`,
   and `/adminer` requests to the local Apache instance on port 8080, so these
   tools are accessible on the main port without exposing 8080 externally.
+
+  `/phpmyadmin` and `/adminer` are restricted to admin users. The session cookie
+  is verified inline since this plug runs before `Plug.Session` in the endpoint.
   """
 
   @behaviour Plug
 
   import Plug.Conn
 
+  alias Hostctl.Accounts
+
   @proxy_prefixes ["roundcube", "snappymail", "phpmyadmin", "adminer"]
+  @admin_only_prefixes ["phpmyadmin", "adminer"]
 
   @impl true
   def init(opts), do: opts
 
   @impl true
   def call(%Plug.Conn{path_info: [prefix | _]} = conn, _opts) when prefix in @proxy_prefixes do
-    proxy_request(conn)
+    if prefix in @admin_only_prefixes do
+      case get_current_user(conn) do
+        %{role: "admin"} -> proxy_request(conn)
+        _ -> reject_unauthorized(conn)
+      end
+    else
+      proxy_request(conn)
+    end
   end
 
   def call(conn, _opts), do: conn
+
+  # Read the session cookie manually (this plug runs before Plug.Session)
+  # and verify the user token to check admin status.
+  defp get_current_user(conn) do
+    conn = fetch_cookies(conn)
+    cookie = conn.cookies["_hostctl_key"]
+
+    with cookie when is_binary(cookie) <- cookie,
+         secret_key_base = HostctlWeb.Endpoint.config(:secret_key_base),
+         signing_key =
+           Plug.Crypto.KeyGenerator.generate(secret_key_base, "jhfCBqbP",
+             iterations: 1000,
+             length: 32,
+             digest: :sha256,
+             cache: Plug.Keys
+           ),
+         {:ok, binary} <- Plug.Crypto.MessageVerifier.verify(cookie, signing_key),
+         session_data <- Plug.Crypto.non_executable_binary_to_term(binary),
+         %{"user_token" => token} <- session_data,
+         {user, _inserted_at} <- Accounts.get_user_by_session_token(token) do
+      user
+    else
+      _ -> nil
+    end
+  end
+
+  defp reject_unauthorized(conn) do
+    conn
+    |> put_resp_content_type("text/plain")
+    |> send_resp(403, "Forbidden — admin access required")
+    |> halt()
+  end
 
   defp proxy_request(conn) do
     # Read the full request body for POST/PUT
