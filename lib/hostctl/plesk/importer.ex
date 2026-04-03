@@ -1035,27 +1035,28 @@ defmodule Hostctl.Plesk.Importer do
 
     File.mkdir_p!(local_dir)
 
-    sudo = sudo_prefix(ssh_opts)
-
-    # Locate pg_dump on the remote — it may not be in sudo's secure_path
-    # (e.g. on Debian/Ubuntu it lives in /usr/lib/postgresql/*/bin/)
+    # Locate pg_dump on the remote — no sudo needed to find the binary path.
+    # Check common locations: /bin, /usr/bin, /usr/local/bin, and distro-specific
+    # paths like /usr/lib/postgresql/*/bin/ (Debian/Ubuntu).
     find_pg_dump_cmd =
-      "#{sudo}bash -c 'command -v pg_dump 2>/dev/null " <>
-        "|| find /usr/lib/postgresql /usr/pgsql-* -name pg_dump -type f 2>/dev/null | head -1'"
+      "command -v pg_dump 2>/dev/null " <>
+        "|| for d in /bin /usr/bin /usr/local/bin /usr/lib/postgresql/*/bin /usr/pgsql-*/bin; do " <>
+        "[ -x \"$d/pg_dump\" ] && echo \"$d/pg_dump\" && break; done"
 
     pg_dump_bin =
       case ssh_exec_output(ssh_opts, find_pg_dump_cmd) do
         {:ok, path} ->
           trimmed = String.trim(path)
-          if trimmed != "", do: trimmed, else: "pg_dump"
+          if trimmed != "", do: trimmed, else: "/usr/bin/pg_dump"
 
         _ ->
-          "pg_dump"
+          "/usr/bin/pg_dump"
       end
 
     Logger.info("[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH (pg_dump=#{pg_dump_bin})")
 
     # Build sudo -u postgres prefix for peer auth on Unix socket.
+    # -p '' suppresses the password prompt so it doesn't contaminate output.
     auth_method =
       normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
 
@@ -1064,7 +1065,7 @@ defmodule Hostctl.Plesk.Importer do
 
     sudo_pg =
       if auth_method == "password" and password != "" do
-        "echo #{shell_escape(password)} | sudo -S -u postgres"
+        "echo #{shell_escape(password)} | sudo -S -p '' -u postgres"
       else
         "sudo -u postgres"
       end
