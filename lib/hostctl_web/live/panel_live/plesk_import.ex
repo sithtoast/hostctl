@@ -560,12 +560,22 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   # Restore progress update from importer
   @impl true
   def handle_info({:restore_progress, domain, category, index, total, status}, socket) do
+    current = Map.get(socket.assigns.restore_progress, domain, %{completed: %{}})
+    completed = Map.get(current, :completed, %{})
+
+    # When status is a result map (not :in_progress), this category is done
+    completed =
+      if is_map(status),
+        do: Map.put(completed, category, status),
+        else: completed
+
     progress =
       Map.put(socket.assigns.restore_progress, domain, %{
         category: category,
         index: index,
         total: total,
-        status: status
+        status: status,
+        completed: completed
       })
 
     {:noreply, assign(socket, :restore_progress, progress)}
@@ -1510,19 +1520,50 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
           <%!-- Restore progress --%>
           <%= if restoring do %>
+            <% completed = Map.get(progress, :completed, %{}) %>
             <div class="mt-3 rounded-lg px-4 py-3 bg-indigo-50 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/40">
-              <div class="flex items-center justify-between mb-2">
-                <p class="text-xs font-medium text-indigo-800 dark:text-indigo-200">
+              <%!-- Completed categories --%>
+              <%= for {cat, cat_result} <- completed do %>
+                <div class="flex items-center gap-1.5 mb-1">
+                  <.icon name="hero-check-circle-solid" class={[
+                    "w-3.5 h-3.5 shrink-0",
+                    if(cat_result.failed > 0,
+                      do: "text-amber-500",
+                      else: "text-emerald-500"
+                    )
+                  ]} />
+                  <span class="text-xs text-gray-600 dark:text-gray-400">
+                    {category_display_name(cat)}
+                    <span class="text-[10px] text-gray-400 dark:text-gray-500 ml-1">
+                      {cat_result.created} created{if(cat_result.skipped > 0, do: ", #{cat_result.skipped} skipped", else: "")}{if(cat_result.failed > 0, do: ", #{cat_result.failed} failed", else: "")}
+                    </span>
+                  </span>
+                </div>
+              <% end %>
+
+              <%!-- Current category --%>
+              <div class="flex items-center gap-1.5 mb-2">
+                <svg
+                  class="w-3.5 h-3.5 shrink-0 animate-spin text-indigo-500"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+                <span class="text-xs font-medium text-indigo-800 dark:text-indigo-200">
                   <%= if progress.category do %>
-                    Restoring {category_display_name(progress.category)}...
+                    {category_display_name(progress.category)}...
                   <% else %>
-                    Starting restore...
+                    Starting...
                   <% end %>
-                </p>
-                <span class="text-[10px] text-indigo-500 dark:text-indigo-400">
+                </span>
+                <span class="text-[10px] text-indigo-500 dark:text-indigo-400 ml-auto">
                   {progress.index}/{progress.total}
                 </span>
               </div>
+
               <div class="h-1.5 w-full rounded-full bg-indigo-100 dark:bg-indigo-900/40 overflow-hidden">
                 <div
                   class="h-full rounded-full bg-indigo-500 transition-all duration-500 ease-out"
