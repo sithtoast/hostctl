@@ -1106,23 +1106,52 @@ defmodule Hostctl.Plesk.Importer do
       _ -> :ok
     end
 
-    tables_cmd =
-      "#{diag_prefix}psql -p #{pg_port} -d #{shell_escape(db_name)} " <>
-        "-c '\\dt *.*' 2>&1; #{cleanup_askpass(ssh_opts, rand)}"
+    # List ALL databases on the server
+    list_dbs_cmd =
+      "#{diag_prefix}psql -p #{pg_port} " <>
+        "-c '\\l' 2>&1; #{cleanup_askpass(ssh_opts, rand)}"
 
-    case ssh_exec_output(ssh_opts, tables_cmd) do
+    case ssh_exec_output(ssh_opts, list_dbs_cmd) do
       {:ok, output} ->
-        Logger.info("[Importer] Tables in '#{db_name}' (port #{pg_port}):\n#{String.trim(output)}")
+        Logger.info("[Importer] All PG databases on remote (port #{pg_port}):\n#{String.trim(output)}")
       _ -> :ok
     end
 
-    schemas_cmd =
-      "#{diag_prefix}psql -p #{pg_port} -d #{shell_escape(db_name)} " <>
-        "-c '\\dn' 2>&1; #{cleanup_askpass(ssh_opts, rand)}"
+    # List user tables in the public schema of target database
+    tables_cmd =
+      "cd /tmp && #{diag_prefix}psql -p #{pg_port} -d #{shell_escape(db_name)} " <>
+        "-c \"SELECT schemaname, tablename, tableowner FROM pg_tables WHERE schemaname = 'public'\" 2>&1; " <>
+        "#{cleanup_askpass(ssh_opts, rand)}"
 
-    case ssh_exec_output(ssh_opts, schemas_cmd) do
+    case ssh_exec_output(ssh_opts, tables_cmd) do
       {:ok, output} ->
-        Logger.info("[Importer] Schemas in '#{db_name}' (port #{pg_port}):\n#{String.trim(output)}")
+        Logger.info("[Importer] Public tables in '#{db_name}' (port #{pg_port}):\n#{String.trim(output)}")
+      _ -> :ok
+    end
+
+    # Also check if there are tables in ANY schema (excluding system schemas)
+    all_user_tables_cmd =
+      "cd /tmp && #{diag_prefix}psql -p #{pg_port} -d #{shell_escape(db_name)} " <>
+        "-c \"SELECT schemaname, tablename, tableowner FROM pg_tables " <>
+        "WHERE schemaname NOT IN ('pg_catalog', 'information_schema')\" 2>&1; " <>
+        "#{cleanup_askpass(ssh_opts, rand)}"
+
+    case ssh_exec_output(ssh_opts, all_user_tables_cmd) do
+      {:ok, output} ->
+        Logger.info("[Importer] All user tables in '#{db_name}' (port #{pg_port}):\n#{String.trim(output)}")
+      _ -> :ok
+    end
+
+    # List databases with sizes (helps identify which DB has actual data)
+    db_sizes_cmd =
+      "cd /tmp && #{diag_prefix}psql -p #{pg_port} " <>
+        "-c \"SELECT datname, pg_size_pretty(pg_database_size(datname)) as size " <>
+        "FROM pg_database WHERE datistemplate = false ORDER BY pg_database_size(datname) DESC\" 2>&1; " <>
+        "#{cleanup_askpass(ssh_opts, rand)}"
+
+    case ssh_exec_output(ssh_opts, db_sizes_cmd) do
+      {:ok, output} ->
+        Logger.info("[Importer] Database sizes on remote (port #{pg_port}):\n#{String.trim(output)}")
       _ -> :ok
     end
 
