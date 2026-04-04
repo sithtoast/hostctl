@@ -1841,14 +1841,31 @@ defmodule Hostctl.Plesk.Importer do
       Path.wildcard("#{extract_dir}/**/backup_info_*.xml") ++
         Path.wildcard("#{extract_dir}/**/dump.xml")
 
+    Logger.info(
+      "[Importer] Found #{length(xml_files)} XML file(s) for credential extraction: #{inspect(Enum.map(xml_files, &Path.relative_to(&1, extract_dir)))}"
+    )
+
     credentials =
       Enum.reduce(
         xml_files,
-        %{db_passwords: %{}, mail_passwords: %{}, sysuser_passwords: %{}},
+        %{db_passwords: %{}, mail_passwords: %{}, sysuser_passwords: %{}, client_passwords: %{}},
         fn xml_file, acc ->
           case File.read(xml_file) do
-            {:ok, content} -> merge_credentials(acc, extract_credentials_from_xml(content))
-            {:error, _} -> acc
+            {:ok, content} ->
+              creds = extract_credentials_from_xml(content)
+
+              Logger.info(
+                "[Importer] #{Path.relative_to(xml_file, extract_dir)}: " <>
+                  "#{map_size(creds.db_passwords)} DB, " <>
+                  "#{map_size(creds.mail_passwords)} mail, " <>
+                  "#{map_size(creds.sysuser_passwords)} sysuser, " <>
+                  "#{map_size(creds.client_passwords)} client/reseller password(s)"
+              )
+
+              merge_credentials(acc, creds)
+
+            {:error, _} ->
+              acc
           end
         end
       )
@@ -1857,7 +1874,8 @@ defmodule Hostctl.Plesk.Importer do
       "[Importer] Parsed backup credentials: " <>
         "#{map_size(credentials.db_passwords)} DB user(s), " <>
         "#{map_size(credentials.mail_passwords)} mail account(s), " <>
-        "#{map_size(credentials.sysuser_passwords)} system user(s)"
+        "#{map_size(credentials.sysuser_passwords)} system user(s), " <>
+        "#{map_size(credentials.client_passwords)} client/reseller(s)"
     )
 
     credentials
@@ -1867,6 +1885,7 @@ defmodule Hostctl.Plesk.Importer do
     db_passwords = extract_db_passwords(content)
     mail_passwords = extract_mail_passwords(content)
     sysuser_passwords = extract_sysuser_passwords(content)
+    client_passwords = extract_client_passwords(content)
 
     # Count total password elements vs plain-text for diagnostics
     total_mail_users = length(Regex.scan(~r/<mailuser\s/, content))
@@ -1886,7 +1905,8 @@ defmodule Hostctl.Plesk.Importer do
     %{
       db_passwords: db_passwords,
       mail_passwords: mail_passwords,
-      sysuser_passwords: sysuser_passwords
+      sysuser_passwords: sysuser_passwords,
+      client_passwords: client_passwords
     }
   end
 
@@ -1948,6 +1968,38 @@ defmodule Hostctl.Plesk.Importer do
     |> Map.new()
   end
 
+  # Extract client/reseller passwords from <client> and <reseller> elements.
+  # In Plesk server backups, each client/reseller has its own password:
+  #   <client name="clientlogin" ...>
+  #     <password type="plain">thepassword</password>
+  #     ...
+  #   </client>
+  # These are keyed by the client/reseller login name which corresponds
+  # to the subscription's owner_login field from the SSH probe.
+  defp extract_client_passwords(content) do
+    clients =
+      ~r/<client\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/client>/s
+      |> Regex.scan(content)
+      |> Enum.flat_map(fn [_full, name, block] ->
+        case extract_plain_password(block) do
+          nil -> []
+          password -> [{name, password}]
+        end
+      end)
+
+    resellers =
+      ~r/<reseller\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/reseller>/s
+      |> Regex.scan(content)
+      |> Enum.flat_map(fn [_full, name, block] ->
+        case extract_plain_password(block) do
+          nil -> []
+          password -> [{name, password}]
+        end
+      end)
+
+    Map.new(clients ++ resellers)
+  end
+
   # Extract a plaintext password from an XML block.
   # Prefers <password type="plain">, falls back to untyped <password>.
   # Skips hashed passwords (type="crypt", type="sym", etc.) to avoid
@@ -1970,7 +2022,9 @@ defmodule Hostctl.Plesk.Importer do
       db_passwords: Map.merge(acc.db_passwords, new.db_passwords),
       mail_passwords: Map.merge(acc.mail_passwords, new.mail_passwords),
       sysuser_passwords:
-        Map.merge(Map.get(acc, :sysuser_passwords, %{}), Map.get(new, :sysuser_passwords, %{}))
+        Map.merge(Map.get(acc, :sysuser_passwords, %{}), Map.get(new, :sysuser_passwords, %{})),
+      client_passwords:
+        Map.merge(Map.get(acc, :client_passwords, %{}), Map.get(new, :client_passwords, %{}))
     }
   end
 

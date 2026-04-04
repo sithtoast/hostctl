@@ -278,11 +278,12 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     subscriptions = socket.assigns.subscriptions
     existing_emails = MapSet.new(socket.assigns.accounts, & &1.email)
 
-    # System user passwords from server config backup (if downloaded)
-    sysuser_passwords =
+    # System user and client/reseller passwords from server config backup
+    {sysuser_passwords, client_passwords} =
       case socket.assigns.server_credentials do
-        %{sysuser_passwords: passwords} -> passwords
-        _ -> %{}
+        %{sysuser_passwords: sys, client_passwords: cli} -> {sys, cli}
+        %{sysuser_passwords: sys} -> {sys, %{}}
+        _ -> {%{}, %{}}
       end
 
     # Group domains by owner identity (prefer owner_email, fall back to owner_login)
@@ -320,15 +321,22 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
             {created, skipped + 1, configs}
           else
-            # Look up the Plesk system user password when available.
-            # Passwords must be >= 8 chars to pass our validation.
-            plesk_password = Map.get(sysuser_passwords, system_user)
+            # Look up the Plesk password: try system user first, then
+            # client/reseller login name (which matches owner_login).
+            owner_login = Map.get(sample, :owner_login)
+
+            plesk_password =
+              Map.get(sysuser_passwords, system_user) ||
+                Map.get(client_passwords, owner_login) ||
+                Map.get(client_passwords, system_user)
 
             Logger.info(
               "[PleskImport] Auto-create account #{email}: " <>
                 "system_user=#{inspect(system_user)}, " <>
+                "owner_login=#{inspect(owner_login)}, " <>
                 "password_found=#{is_binary(plesk_password)}, " <>
-                "sysuser_keys=#{inspect(Map.keys(sysuser_passwords))}"
+                "sysuser_keys=#{inspect(Map.keys(sysuser_passwords))}, " <>
+                "client_keys=#{inspect(Map.keys(client_passwords))}"
             )
 
             user_attrs =
@@ -611,17 +619,19 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         db_count = map_size(credentials.db_passwords)
         mail_count = map_size(credentials.mail_passwords)
         sys_count = map_size(credentials.sysuser_passwords)
+        cli_count = map_size(Map.get(credentials, :client_passwords, %{}))
 
         socket =
           socket
           |> assign(:server_credentials, credentials)
           |> put_flash(
             :info,
-            "Server credentials loaded: #{db_count} DB, #{mail_count} mail, #{sys_count} system user password(s)."
+            "Server credentials loaded: #{db_count} DB, #{mail_count} mail, " <>
+              "#{sys_count} system user, #{cli_count} client/reseller password(s)."
           )
 
         socket =
-          if mail_count == 0 and sys_count == 0 do
+          if mail_count == 0 and sys_count == 0 and cli_count == 0 do
             put_flash(
               socket,
               :warning,
