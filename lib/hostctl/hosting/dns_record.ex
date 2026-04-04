@@ -25,7 +25,6 @@ defmodule Hostctl.Hosting.DnsRecord do
     |> validate_required([:type, :name, :value])
     |> validate_inclusion(:type, @valid_types, message: "must be a valid DNS record type")
     |> validate_length(:name, max: 255)
-    |> validate_length(:value, max: 512)
     |> validate_number(:ttl, greater_than: 0)
   end
 
