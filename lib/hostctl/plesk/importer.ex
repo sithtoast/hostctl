@@ -730,11 +730,20 @@ defmodule Hostctl.Plesk.Importer do
   ]
 
   defp restore_web_files(_domain, item, ssh_opts, local_base_path) do
-    # Rsync the entire domain directory, not just the document root.
-    # Plesk stores web files under /var/www/vhosts/{domain}/ with httpdocs/
-    # as the docroot. Our default domain docroot is also httpdocs/, so the
-    # rsynced structure maps directly with no rename needed.
-    remote_path = "/var/www/vhosts/#{item.domain}"
+    # Derive the actual remote domain directory from the Plesk document_root.
+    # Plesk nests domains belonging to the same system user under the primary
+    # domain's home directory. For example, if system user "megaplushie" has
+    # home at /var/www/vhosts/bakalair.com, then omgwtf.moe lives at
+    # /var/www/vhosts/bakalair.com/omgwtf.moe/ instead of /var/www/vhosts/omgwtf.moe/.
+    # The document_root from the probe (h.www_root) gives us the actual path,
+    # e.g. /var/www/vhosts/bakalair.com/omgwtf.moe/httpdocs — we go up one
+    # level to get the domain's root directory for rsync.
+    remote_path =
+      if is_binary(item.document_root) and item.document_root != "" do
+        Path.dirname(item.document_root)
+      else
+        "/var/www/vhosts/#{item.domain}"
+      end
 
     case ensure_local_directory(local_base_path) do
       :ok ->
