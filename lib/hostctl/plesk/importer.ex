@@ -1137,24 +1137,65 @@ defmodule Hostctl.Plesk.Importer do
           "/usr/bin/pg_dump"
       end
 
-    Logger.info(
-      "[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH " <>
-        "(pg_dump=#{pg_dump_bin}, host=#{pg_creds.host}, port=#{pg_creds.port}, " <>
-        "user=#{pg_creds.admin_login} via TCP)"
-    )
-
     escaped_pg_dump = shell_escape(pg_dump_bin)
     escaped_db = shell_escape(db_name)
     escaped_out = shell_escape(remote_dump)
-    escaped_host = shell_escape(pg_creds.host)
-    escaped_user = shell_escape(pg_creds.admin_login)
     remote_err = "/tmp/hostctl_pgdump_err_#{rand}.log"
     escaped_err = shell_escape(remote_err)
 
-    # Connect via TCP with Plesk admin credentials.
-    # The PG server may be on a separate host from Plesk (e.g., 199.x.x.x != 192.x.x.x).
-    # --no-owner / --no-acl: skip OWNER and GRANT/REVOKE for Plesk-specific users.
+    # Strategy 1: Try TCP with PGPASSWORD (works for remote PG servers and
+    # servers with md5/scram auth in pg_hba.conf).
+    tcp_result = try_pg_dump_tcp(ssh_opts, pg_creds, db_name, escaped_pg_dump,
+      escaped_db, escaped_out, escaped_err, remote_err, rand)
+
+    result =
+      case tcp_result do
+        {:ok, _} ->
+          tcp_result
+
+        {:error, tcp_reason} ->
+          # Strategy 2: Fall back to sudo -u postgres (peer auth via Unix socket).
+          # This works when PG is local and pg_hba.conf uses ident for TCP.
+          Logger.warning(
+            "[Importer] TCP pg_dump failed for '#{db_name}': #{tcp_reason}. " <>
+              "Falling back to sudo -u postgres (peer auth)..."
+          )
+
+          try_pg_dump_peer(ssh_opts, pg_creds, db_name, pg_dump_bin, escaped_pg_dump,
+            escaped_db, escaped_out, escaped_err, remote_err, rand)
+      end
+
+    case result do
+      {:ok, _output} ->
+        case scp_download(ssh_opts, remote_dump, local_dump) do
+          :ok ->
+            ssh_exec(ssh_opts, "rm -f #{escaped_out}")
+            validate_pg_dump(local_dir, local_dump, db_name)
+
+          {:error, reason} ->
+            File.rm_rf(local_dir)
+            ssh_exec(ssh_opts, "rm -f #{escaped_out}")
+            {:error, "SCP download failed: #{reason}"}
+        end
+
+      {:error, reason} ->
+        File.rm_rf(local_dir)
+        ssh_exec(ssh_opts, "rm -f #{escaped_out}")
+        {:error, reason}
+    end
+  end
+
+  # TCP connection with PGPASSWORD
+  defp try_pg_dump_tcp(ssh_opts, pg_creds, db_name, escaped_pg_dump,
+         escaped_db, escaped_out, escaped_err, _remote_err, _rand) do
+    escaped_host = shell_escape(pg_creds.host)
+    escaped_user = shell_escape(pg_creds.admin_login)
     escaped_pg_pass = shell_escape(pg_creds.admin_password)
+
+    Logger.info(
+      "[Importer] Trying pg_dump for '#{db_name}' via TCP " <>
+        "(host=#{pg_creds.host}, port=#{pg_creds.port}, user=#{pg_creds.admin_login})"
+    )
 
     dump_cmd =
       "cd /tmp && " <>
@@ -1163,28 +1204,52 @@ defmodule Hostctl.Plesk.Importer do
         "-h #{escaped_host} -p #{pg_creds.port} -U #{escaped_user} " <>
         "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
         "RC=$?; " <>
-        "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
-        "rm -f #{escaped_err}; exit $RC"
+        "ERR=$(cat #{escaped_err} 2>/dev/null); rm -f #{escaped_err}; " <>
+        "if [ $RC -ne 0 ]; then echo \"$ERR\" >&2; exit $RC; fi"
 
-    with {:ok, output} <- ssh_exec_output(ssh_opts, dump_cmd) do
-      if output != "", do: Logger.info("[Importer] pg_dump output for '#{db_name}': #{output}")
+    ssh_exec_output(ssh_opts, dump_cmd)
+  end
 
-      case scp_download(ssh_opts, remote_dump, local_dump) do
-        :ok ->
-          ssh_exec(ssh_opts, "rm -f #{escaped_out}")
-          validate_pg_dump(local_dir, local_dump, db_name)
+  # Peer auth via sudo -u postgres (Unix socket, no -h flag)
+  defp try_pg_dump_peer(ssh_opts, pg_creds, db_name, _pg_dump_bin, escaped_pg_dump,
+         escaped_db, escaped_out, escaped_err, _remote_err, rand) do
+    Logger.info(
+      "[Importer] Trying pg_dump for '#{db_name}' via peer auth " <>
+        "(sudo -u postgres, port=#{pg_creds.port})"
+    )
 
-        {:error, reason} ->
-          File.rm_rf(local_dir)
-          ssh_exec(ssh_opts, "rm -f #{escaped_out}")
-          {:error, "SCP download failed: #{reason}"}
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    password =
+      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+
+    dump_cmd =
+      if auth_method == "password" and password != "" do
+        escaped_pass = String.replace(password, "'", "'\\''")
+        askpass = "/tmp/hostctl_pgask_#{rand}"
+
+        "AP=#{askpass}; " <>
+          "printf '#!/bin/sh\\necho '\"'\"'#{escaped_pass}'\"'\"'\\n' > $AP && " <>
+          "chmod 700 $AP && " <>
+          "cd /tmp && " <>
+          "SUDO_ASKPASS=$AP sudo -A -u postgres " <>
+          "#{escaped_pg_dump} --no-owner --no-acl -p #{pg_creds.port} " <>
+          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
+          "RC=$?; rm -f $AP; " <>
+          "ERR=$(cat #{escaped_err} 2>/dev/null); rm -f #{escaped_err}; " <>
+          "if [ $RC -ne 0 ]; then echo \"$ERR\" >&2; exit $RC; fi"
+      else
+        "cd /tmp && " <>
+          "sudo -u postgres " <>
+          "#{escaped_pg_dump} --no-owner --no-acl -p #{pg_creds.port} " <>
+          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
+          "RC=$?; " <>
+          "ERR=$(cat #{escaped_err} 2>/dev/null); rm -f #{escaped_err}; " <>
+          "if [ $RC -ne 0 ]; then echo \"$ERR\" >&2; exit $RC; fi"
       end
-    else
-      {:error, reason} ->
-        File.rm_rf(local_dir)
-        ssh_exec(ssh_opts, "rm -f #{escaped_out}")
-        {:error, reason}
-    end
+
+    ssh_exec_output(ssh_opts, dump_cmd)
   end
 
   defp validate_pg_dump(local_dir, local_dump, db_name) do
