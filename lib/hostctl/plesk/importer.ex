@@ -1065,6 +1065,64 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
+  # Find the correct PG Unix socket directory. Plesk servers may have multiple
+  # PostgreSQL installations with sockets in different directories (e.g. /tmp,
+  # /var/run/postgresql). We test each to find the one that has user tables.
+  defp find_pg_socket_dir(ssh_opts, rand, db_name, pg_port) do
+    diag_prefix = build_sudo_pg_prefix(ssh_opts, rand)
+
+    # Find all PG socket files for the target port
+    find_cmd =
+      "find /tmp /var/run/postgresql /run/postgresql /var/lib/pgsql " <>
+        "-name '.s.PGSQL.#{pg_port}' -type s 2>/dev/null | head -10"
+
+    socket_dirs =
+      case ssh_exec_output(ssh_opts, find_cmd) do
+        {:ok, output} ->
+          output
+          |> String.trim()
+          |> String.split("\n", trim: true)
+          |> Enum.map(&Path.dirname(String.trim(&1)))
+          |> Enum.uniq()
+
+        _ ->
+          []
+      end
+
+    Logger.info("[Importer] Found PG socket dirs for port #{pg_port}: #{inspect(socket_dirs)}")
+
+    if socket_dirs == [] do
+      # No sockets found, fall back to default (no -h flag)
+      nil
+    else
+      # Test each socket dir to find the one with user tables in our target DB
+      escaped_db = shell_escape(db_name)
+
+      Enum.find(socket_dirs, fn dir ->
+        test_cmd =
+          "cd /tmp && #{diag_prefix}psql -h #{shell_escape(dir)} -p #{pg_port} " <>
+            "-d #{escaped_db} -At " <>
+            "-c \"SELECT count(*) FROM pg_tables WHERE schemaname = 'public'\" " <>
+            "2>/dev/null; #{cleanup_askpass(ssh_opts, rand)}"
+
+        case ssh_exec_output(ssh_opts, test_cmd) do
+          {:ok, output} ->
+            count_str = String.trim(output)
+            Logger.info("[Importer] Socket dir #{dir}: #{count_str} public tables in '#{db_name}'")
+
+            case Integer.parse(count_str) do
+              {count, _} when count > 0 -> true
+              _ -> false
+            end
+
+          _ ->
+            Logger.info("[Importer] Socket dir #{dir}: could not query")
+            false
+        end
+      end)
+    end
+  end
+
   defp dump_pg_database_via_ssh(db_name, ssh_opts, pg_port) do
     rand =
       :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false) |> String.slice(0, 8)
@@ -1096,64 +1154,14 @@ defmodule Hostctl.Plesk.Importer do
         "(pg_dump=#{pg_dump_bin}, port=#{pg_port}, user=postgres via peer auth)"
     )
 
-    # Pre-dump diagnostics: list PG clusters and tables in the target database
-    diag_prefix = build_sudo_pg_prefix(ssh_opts, rand)
+    # Find the correct PG socket directory. Plesk servers may have multiple
+    # PostgreSQL instances – one on a Unix socket (system default, often empty)
+    # and one listening on TCP (Plesk-managed, has user data). pg_dump without
+    # -h uses the default socket dir which may hit the wrong instance.
+    # We discover all socket dirs and test which one has the target DB's tables.
+    socket_dir = find_pg_socket_dir(ssh_opts, rand, db_name, pg_port)
 
-    cluster_cmd = "pg_lsclusters 2>/dev/null || echo '(pg_lsclusters not available)'"
-    case ssh_exec_output(ssh_opts, cluster_cmd) do
-      {:ok, output} ->
-        Logger.info("[Importer] PG clusters on remote:\n#{String.trim(output)}")
-      _ -> :ok
-    end
-
-    # List ALL databases on the server
-    list_dbs_cmd =
-      "#{diag_prefix}psql -p #{pg_port} " <>
-        "-c '\\l' 2>&1; #{cleanup_askpass(ssh_opts, rand)}"
-
-    case ssh_exec_output(ssh_opts, list_dbs_cmd) do
-      {:ok, output} ->
-        Logger.info("[Importer] All PG databases on remote (port #{pg_port}):\n#{String.trim(output)}")
-      _ -> :ok
-    end
-
-    # List user tables in the public schema of target database
-    tables_cmd =
-      "cd /tmp && #{diag_prefix}psql -p #{pg_port} -d #{shell_escape(db_name)} " <>
-        "-c \"SELECT schemaname, tablename, tableowner FROM pg_tables WHERE schemaname = 'public'\" 2>&1; " <>
-        "#{cleanup_askpass(ssh_opts, rand)}"
-
-    case ssh_exec_output(ssh_opts, tables_cmd) do
-      {:ok, output} ->
-        Logger.info("[Importer] Public tables in '#{db_name}' (port #{pg_port}):\n#{String.trim(output)}")
-      _ -> :ok
-    end
-
-    # Also check if there are tables in ANY schema (excluding system schemas)
-    all_user_tables_cmd =
-      "cd /tmp && #{diag_prefix}psql -p #{pg_port} -d #{shell_escape(db_name)} " <>
-        "-c \"SELECT schemaname, tablename, tableowner FROM pg_tables " <>
-        "WHERE schemaname NOT IN ('pg_catalog', 'information_schema')\" 2>&1; " <>
-        "#{cleanup_askpass(ssh_opts, rand)}"
-
-    case ssh_exec_output(ssh_opts, all_user_tables_cmd) do
-      {:ok, output} ->
-        Logger.info("[Importer] All user tables in '#{db_name}' (port #{pg_port}):\n#{String.trim(output)}")
-      _ -> :ok
-    end
-
-    # List databases with sizes (helps identify which DB has actual data)
-    db_sizes_cmd =
-      "cd /tmp && #{diag_prefix}psql -p #{pg_port} " <>
-        "-c \"SELECT datname, pg_size_pretty(pg_database_size(datname)) as size " <>
-        "FROM pg_database WHERE datistemplate = false ORDER BY pg_database_size(datname) DESC\" 2>&1; " <>
-        "#{cleanup_askpass(ssh_opts, rand)}"
-
-    case ssh_exec_output(ssh_opts, db_sizes_cmd) do
-      {:ok, output} ->
-        Logger.info("[Importer] Database sizes on remote (port #{pg_port}):\n#{String.trim(output)}")
-      _ -> :ok
-    end
+    Logger.info("[Importer] Using PG socket dir: #{socket_dir || "(default)"}")
 
     escaped_pg_dump = shell_escape(pg_dump_bin)
     escaped_db = shell_escape(db_name)
@@ -1161,11 +1169,14 @@ defmodule Hostctl.Plesk.Importer do
     remote_err = "/tmp/hostctl_pgdump_err_#{rand}.log"
     escaped_err = shell_escape(remote_err)
 
-    # Use sudo -u postgres for peer auth on Unix socket (no -h flag).
+    # Use sudo -u postgres for peer auth on Unix socket.
+    # Pass -h <socket_dir> if we found the correct one (avoids hitting wrong PG instance).
     # Pass -p <port> to connect to the correct PG cluster that Plesk uses.
     # --no-owner / --no-acl: skip OWNER and GRANT/REVOKE for Plesk-specific users.
     # cd /tmp: avoid "could not change directory" warning.
     # Use SUDO_ASKPASS for password-based SSH sudo (same proven pattern as rsync).
+    host_flag = if socket_dir, do: "-h #{shell_escape(socket_dir)} ", else: ""
+
     auth_method =
       normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
 
@@ -1182,7 +1193,7 @@ defmodule Hostctl.Plesk.Importer do
           "chmod 700 $AP && " <>
           "cd /tmp && " <>
           "SUDO_ASKPASS=$AP sudo -A -u postgres " <>
-          "#{escaped_pg_dump} --no-owner --no-acl -p #{pg_port} " <>
+          "#{escaped_pg_dump} --no-owner --no-acl #{host_flag}-p #{pg_port} " <>
           "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
           "RC=$?; rm -f $AP; " <>
           "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
@@ -1190,7 +1201,7 @@ defmodule Hostctl.Plesk.Importer do
       else
         "cd /tmp && " <>
           "sudo -u postgres " <>
-          "#{escaped_pg_dump} --no-owner --no-acl -p #{pg_port} " <>
+          "#{escaped_pg_dump} --no-owner --no-acl #{host_flag}-p #{pg_port} " <>
           "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
           "RC=$?; " <>
           "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
