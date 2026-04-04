@@ -1001,8 +1001,14 @@ defmodule Hostctl.Plesk.Importer do
   # ---------------------------------------------------------------------------
 
   defp restore_pg_databases_via_ssh(domain, dbs, ssh_opts) do
-    # Get the PG port from Plesk so we connect to the right cluster
-    pg_port = get_plesk_pg_port(ssh_opts)
+    # Get the PG server connection info from Plesk's DatabaseServers table.
+    # Plesk may host PG on a separate server (different IP from the Plesk box).
+    pg_creds = get_plesk_pg_credentials(ssh_opts)
+
+    Logger.info(
+      "[Importer] Plesk PG server: host=#{pg_creds.host}, port=#{pg_creds.port}, " <>
+        "admin=#{pg_creds.admin_login}, password=#{if pg_creds.admin_password != "", do: "(set)", else: "(empty)"}"
+    )
 
     results =
       Enum.map(dbs, fn item ->
@@ -1013,7 +1019,7 @@ defmodule Hostctl.Plesk.Importer do
             status
 
           _ ->
-            case dump_pg_database_via_ssh(item.name, ssh_opts, pg_port) do
+            case dump_pg_database_via_ssh(item.name, ssh_opts, pg_creds) do
               {:ok, local_dir, dump_file} ->
                 result = import_sql_file(dump_file, item.name, "postgresql")
                 File.rm_rf(local_dir)
@@ -1037,93 +1043,75 @@ defmodule Hostctl.Plesk.Importer do
     tally_restore_results(results)
   end
 
-  defp get_plesk_pg_port(ssh_opts) do
+  defp get_plesk_pg_credentials(ssh_opts) do
     sudo = sudo_prefix(ssh_opts)
 
-    # Query Plesk's internal MySQL DB for the PostgreSQL server port
+    # Query Plesk's internal MySQL DB for the PostgreSQL server connection info.
+    # The DatabaseServers table contains host, port, admin_login, admin_password
+    # for each database server type (mysql, postgresql).
     query_cmd =
       "#{sudo}plesk db " <>
-        "-Ne \"SELECT port FROM DatabaseServers " <>
-        "WHERE type='postgresql' LIMIT 1\" 2>/dev/null"
+        "-Ne \"SELECT host, port, admin_login, admin_password " <>
+        "FROM DatabaseServers WHERE type='postgresql' LIMIT 1\" 2>/dev/null"
 
-    case ssh_exec_output(ssh_opts, query_cmd) do
-      {:ok, output} ->
-        trimmed = String.trim(output)
-
-        case Integer.parse(trimmed) do
-          {port, _} ->
-            Logger.info("[Importer] Plesk PG port: #{port}")
-            port
-
-          :error ->
-            Logger.info("[Importer] Could not determine Plesk PG port, using 5432")
-            5432
-        end
-
-      _ ->
-        5432
-    end
-  end
-
-  # Find the correct PG Unix socket directory. Plesk servers may have multiple
-  # PostgreSQL installations with sockets in different directories (e.g. /tmp,
-  # /var/run/postgresql). We test each to find the one that has user tables.
-  defp find_pg_socket_dir(ssh_opts, rand, db_name, pg_port) do
-    diag_prefix = build_sudo_pg_prefix(ssh_opts, rand)
-
-    # Find all PG socket files for the target port
-    find_cmd =
-      "find /tmp /var/run/postgresql /run/postgresql /var/lib/pgsql " <>
-        "-name '.s.PGSQL.#{pg_port}' -type s 2>/dev/null | head -10"
-
-    socket_dirs =
-      case ssh_exec_output(ssh_opts, find_cmd) do
+    creds =
+      case ssh_exec_output(ssh_opts, query_cmd) do
         {:ok, output} ->
-          output
-          |> String.trim()
-          |> String.split("\n", trim: true)
-          |> Enum.map(&Path.dirname(String.trim(&1)))
-          |> Enum.uniq()
+          trimmed = String.trim(output)
+
+          case String.split(trimmed, "\t", parts: 4) do
+            [host, port_str, admin_login, admin_password] ->
+              port =
+                case Integer.parse(port_str) do
+                  {p, _} -> p
+                  :error -> 5432
+                end
+
+              %{
+                host: String.trim(host),
+                port: port,
+                admin_login: String.trim(admin_login),
+                admin_password: String.trim(admin_password)
+              }
+
+            _ ->
+              Logger.warning(
+                "[Importer] Could not parse PG credentials from DatabaseServers: #{inspect(trimmed)}"
+              )
+
+              nil
+          end
 
         _ ->
-          []
+          nil
       end
 
-    Logger.info("[Importer] Found PG socket dirs for port #{pg_port}: #{inspect(socket_dirs)}")
-
-    if socket_dirs == [] do
-      # No sockets found, fall back to default (no -h flag)
-      nil
+    # If we got credentials with a password, use them
+    if creds && creds.admin_password != "" do
+      creds
     else
-      # Test each socket dir to find the one with user tables in our target DB
-      escaped_db = shell_escape(db_name)
-
-      Enum.find(socket_dirs, fn dir ->
-        test_cmd =
-          "cd /tmp && #{diag_prefix}psql -h #{shell_escape(dir)} -p #{pg_port} " <>
-            "-d #{escaped_db} -At " <>
-            "-c \"SELECT count(*) FROM pg_tables WHERE schemaname = 'public'\" " <>
-            "2>/dev/null; #{cleanup_askpass(ssh_opts, rand)}"
-
-        case ssh_exec_output(ssh_opts, test_cmd) do
-          {:ok, output} ->
-            count_str = String.trim(output)
-            Logger.info("[Importer] Socket dir #{dir}: #{count_str} public tables in '#{db_name}'")
-
-            case Integer.parse(count_str) do
-              {count, _} when count > 0 -> true
-              _ -> false
-            end
-
-          _ ->
-            Logger.info("[Importer] Socket dir #{dir}: could not query")
-            false
+      # Fallback: try reading PG admin password from /etc/psa/private/pgsql.passwd
+      passwd =
+        case ssh_exec_output(ssh_opts, "#{sudo}cat /etc/psa/private/pgsql.passwd 2>/dev/null") do
+          {:ok, output} -> String.trim(output)
+          _ -> ""
         end
-      end)
+
+      base =
+        creds ||
+          %{host: "localhost", port: 5432, admin_login: "postgres", admin_password: ""}
+
+      if passwd != "" do
+        Logger.info("[Importer] Using PG password from /etc/psa/private/pgsql.passwd")
+        %{base | admin_password: passwd}
+      else
+        Logger.warning("[Importer] No PG admin password found — pg_dump may fail")
+        base
+      end
     end
   end
 
-  defp dump_pg_database_via_ssh(db_name, ssh_opts, pg_port) do
+  defp dump_pg_database_via_ssh(db_name, ssh_opts, pg_creds) do
     rand =
       :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false) |> String.slice(0, 8)
 
@@ -1151,62 +1139,32 @@ defmodule Hostctl.Plesk.Importer do
 
     Logger.info(
       "[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH " <>
-        "(pg_dump=#{pg_dump_bin}, port=#{pg_port}, user=postgres via peer auth)"
+        "(pg_dump=#{pg_dump_bin}, host=#{pg_creds.host}, port=#{pg_creds.port}, " <>
+        "user=#{pg_creds.admin_login} via TCP)"
     )
-
-    # Find the correct PG socket directory. Plesk servers may have multiple
-    # PostgreSQL instances – one on a Unix socket (system default, often empty)
-    # and one listening on TCP (Plesk-managed, has user data). pg_dump without
-    # -h uses the default socket dir which may hit the wrong instance.
-    # We discover all socket dirs and test which one has the target DB's tables.
-    socket_dir = find_pg_socket_dir(ssh_opts, rand, db_name, pg_port)
-
-    Logger.info("[Importer] Using PG socket dir: #{socket_dir || "(default)"}")
 
     escaped_pg_dump = shell_escape(pg_dump_bin)
     escaped_db = shell_escape(db_name)
     escaped_out = shell_escape(remote_dump)
+    escaped_host = shell_escape(pg_creds.host)
+    escaped_user = shell_escape(pg_creds.admin_login)
     remote_err = "/tmp/hostctl_pgdump_err_#{rand}.log"
     escaped_err = shell_escape(remote_err)
 
-    # Use sudo -u postgres for peer auth on Unix socket.
-    # Pass -h <socket_dir> if we found the correct one (avoids hitting wrong PG instance).
-    # Pass -p <port> to connect to the correct PG cluster that Plesk uses.
+    # Connect via TCP with Plesk admin credentials.
+    # The PG server may be on a separate host from Plesk (e.g., 199.x.x.x != 192.x.x.x).
     # --no-owner / --no-acl: skip OWNER and GRANT/REVOKE for Plesk-specific users.
-    # cd /tmp: avoid "could not change directory" warning.
-    # Use SUDO_ASKPASS for password-based SSH sudo (same proven pattern as rsync).
-    host_flag = if socket_dir, do: "-h #{shell_escape(socket_dir)} ", else: ""
-
-    auth_method =
-      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
-
-    password =
-      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+    escaped_pg_pass = shell_escape(pg_creds.admin_password)
 
     dump_cmd =
-      if auth_method == "password" and password != "" do
-        escaped_pass = String.replace(password, "'", "'\\''")
-        askpass = "/tmp/hostctl_pgask_#{rand}"
-
-        "AP=#{askpass}; " <>
-          "printf '#!/bin/sh\\necho '\"'\"'#{escaped_pass}'\"'\"'\\n' > $AP && " <>
-          "chmod 700 $AP && " <>
-          "cd /tmp && " <>
-          "SUDO_ASKPASS=$AP sudo -A -u postgres " <>
-          "#{escaped_pg_dump} --no-owner --no-acl #{host_flag}-p #{pg_port} " <>
-          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
-          "RC=$?; rm -f $AP; " <>
-          "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
-          "rm -f #{escaped_err}; exit $RC"
-      else
-        "cd /tmp && " <>
-          "sudo -u postgres " <>
-          "#{escaped_pg_dump} --no-owner --no-acl #{host_flag}-p #{pg_port} " <>
-          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
-          "RC=$?; " <>
-          "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
-          "rm -f #{escaped_err}; exit $RC"
-      end
+      "cd /tmp && " <>
+        "PGPASSWORD=#{escaped_pg_pass} " <>
+        "#{escaped_pg_dump} --no-owner --no-acl " <>
+        "-h #{escaped_host} -p #{pg_creds.port} -U #{escaped_user} " <>
+        "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
+        "RC=$?; " <>
+        "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
+        "rm -f #{escaped_err}; exit $RC"
 
     with {:ok, output} <- ssh_exec_output(ssh_opts, dump_cmd) do
       if output != "", do: Logger.info("[Importer] pg_dump output for '#{db_name}': #{output}")
@@ -1282,43 +1240,6 @@ defmodule Hostctl.Plesk.Importer do
       {:error, reason} ->
         File.rm_rf(local_dir)
         {:error, "dump file not found after download: #{inspect(reason)}"}
-    end
-  end
-
-  # Builds a sudo prefix to run psql/pg_dump as the postgres user.
-  # For password-based SSH auth, uses SUDO_ASKPASS; otherwise plain sudo.
-  defp build_sudo_pg_prefix(ssh_opts, rand) do
-    auth_method =
-      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
-
-    password =
-      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
-
-    if auth_method == "password" and password != "" do
-      escaped_pass = String.replace(password, "'", "'\\''")
-      askpass = "/tmp/hostctl_pgask_diag_#{rand}"
-
-      "AP=#{askpass}; " <>
-        "printf '#!/bin/sh\\necho '\"'\"'#{escaped_pass}'\"'\"'\\n' > $AP && " <>
-        "chmod 700 $AP && " <>
-        "SUDO_ASKPASS=$AP sudo -A -u postgres "
-    else
-      "sudo -u postgres "
-    end
-  end
-
-  # Cleanup command for the diagnostic askpass script
-  defp cleanup_askpass(ssh_opts, rand) do
-    auth_method =
-      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
-
-    password =
-      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
-
-    if auth_method == "password" and password != "" do
-      "rm -f /tmp/hostctl_pgask_diag_#{rand}"
-    else
-      "true"
     end
   end
 
