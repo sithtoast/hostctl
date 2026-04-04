@@ -123,3 +123,14 @@ ADMEOF
   chown www-data:www-data "$ADMINER_DIR/index.php"
   echo "[post_deploy] Adminer auto-login wrapper regenerated"
 fi
+
+# ----- Nginx server_names_hash_bucket_size -----------------------------------
+NGINX_MAIN="/etc/nginx/nginx.conf"
+if [[ -f "$NGINX_MAIN" ]]; then
+  if ! grep -q 'server_names_hash_bucket_size' "$NGINX_MAIN"; then
+    # Insert inside the http { } block, right after the opening line
+    sed -i '/http\s*{/a\    server_names_hash_bucket_size  128;' "$NGINX_MAIN"
+    echo "[post_deploy] Added server_names_hash_bucket_size to nginx.conf"
+    nginx -t && systemctl reload nginx
+  fi
+fi

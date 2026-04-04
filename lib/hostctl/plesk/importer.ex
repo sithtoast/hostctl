@@ -501,24 +501,21 @@ defmodule Hostctl.Plesk.Importer do
     ssh_opts = Map.get(restore_opts, :ssh_opts)
     web_files_path = Map.get(restore_opts, :web_files_path)
 
-    # Only process the parent domain entry — subdomain folders live inside
-    # /var/www/vhosts/{domain}/{sub.domain}/ and are included in the parent rsync.
-    subdomain_names =
-      subscription
-      |> Map.get(:subdomains, [])
-      |> MapSet.new(& &1.full_name)
-
-    items = Enum.reject(all_items, fn item -> MapSet.member?(subdomain_names, item.domain) end)
+    # Find the parent domain web_files item (the one matching our domain name).
+    # Subdomain WEB entries also exist in inventory but are filtered by
+    # filter_inventory_for_domain to only include the parent domain.
+    parent_item = Enum.find(all_items, fn item -> item.domain == domain.name end)
+    subdomains = Map.get(subscription, :subdomains, [])
 
     cond do
-      items == [] ->
+      is_nil(parent_item) and all_items == [] ->
         %{created: 0, skipped: 0, failed: 0, errors: []}
 
       is_nil(ssh_opts) ->
         %{
           created: 0,
           skipped: 0,
-          failed: length(items),
+          failed: 1,
           errors: ["SSH connection details required to transfer web files"],
           note: "Provide SSH credentials to enable web files rsync"
         }
@@ -527,15 +524,14 @@ defmodule Hostctl.Plesk.Importer do
         %{
           created: 0,
           skipped: 0,
-          failed: length(items),
+          failed: 1,
           errors: ["No destination path specified for web files"],
           note: "Set a destination path for web files"
         }
 
       true ->
-        do_restore_items(items, fn item ->
-          restore_web_files(domain, item, ssh_opts, web_files_path)
-        end)
+        item = parent_item || List.first(all_items)
+        restore_web_files_restructured(domain, item, subdomains, ssh_opts, web_files_path)
     end
   end
 
@@ -731,47 +727,113 @@ defmodule Hostctl.Plesk.Importer do
 
   @plesk_docroot_dirs ~w(httpdocs htdocs public public_html)
 
-  defp restore_web_files(_domain, item, ssh_opts, local_base_path) do
-    # Derive the actual remote domain directory from the Plesk document_root.
-    # Plesk nests domains belonging to the same system user under the primary
-    # domain's home directory. For example, if system user "megaplushie" has
-    # home at /var/www/vhosts/bakalair.com, then omgwtf.moe lives at
-    # /var/www/vhosts/bakalair.com/omgwtf.moe/ instead of /var/www/vhosts/omgwtf.moe/.
+  defp restore_web_files_restructured(domain, item, subdomains, ssh_opts, local_base_path) do
+    # Plesk groups all domains for a system user under one home directory.
+    # Example: megaplushie has home /var/www/vhosts/bakalair.com, so omgwtf.moe
+    # lives at /var/www/vhosts/bakalair.com/omgwtf.moe/ with its subdomains
+    # alongside it (mimi.omgwtf.moe/, toast.omgwtf.moe/, etc.).
     #
-    # The document_root from the probe (h.www_root) tells us where Plesk
-    # serves files from. We only strip the last component if it's a known
-    # docroot dir (httpdocs, public, etc.). Otherwise the document_root IS
-    # the domain directory and we use it directly.
-    remote_path =
+    # We restructure into our flat layout:
+    #   /var/www/{domain}/httpdocs/     ← domain document root
+    #   /var/www/{domain}/{sub}.{domain}/ ← each subdomain directory
+    #
+    # Strategy:
+    #   1) Determine the remote "home dir" that contains this domain's files
+    #   2) Rsync the docroot dir → local httpdocs/
+    #   3) For each subdomain, rsync its dir → local {sub}.{domain}/
+
+    domain_name = domain.name
+
+    # Determine the remote document root and home directory.
+    # document_root examples:
+    #   /var/www/vhosts/bakalair.com/httpdocs         → primary domain
+    #   /var/www/vhosts/bakalair.com/omgwtf.moe       → additional domain (no docroot subdir)
+    #   /var/www/vhosts/bakalair.com/omgwtf.moe/httpdocs → additional domain with docroot subdir
+    {remote_docroot, remote_home_dir} =
       if is_binary(item.document_root) and item.document_root != "" do
-        basename = Path.basename(item.document_root)
+        docroot = item.document_root
+        basename = Path.basename(docroot)
 
         if basename in @plesk_docroot_dirs do
-          Path.dirname(item.document_root)
+          # e.g. /var/www/vhosts/bakalair.com/httpdocs → home is parent
+          {docroot, Path.dirname(docroot)}
         else
-          item.document_root
+          # e.g. /var/www/vhosts/bakalair.com/omgwtf.moe → docroot IS the dir
+          # Check inside for httpdocs/
+          {docroot, Path.dirname(docroot)}
         end
       else
-        "/var/www/vhosts/#{item.domain}"
+        home = "/var/www/vhosts/#{domain_name}"
+        {home <> "/httpdocs", home}
       end
 
-    case ensure_local_directory(local_base_path) do
-      :ok ->
-        case do_rsync(ssh_opts, remote_path, local_base_path,
-               timeout: 3600,
-               excludes: @plesk_rsync_excludes,
-               chown: "www-data:www-data"
-             ) do
+    Logger.info(
+      "[Importer] web_files #{domain_name}: " <>
+        "docroot=#{remote_docroot}, home_dir=#{remote_home_dir}, " <>
+        "subdomains=#{length(subdomains)}"
+    )
+
+    errors = []
+
+    # 1) Rsync the domain's document root → local httpdocs/
+    local_httpdocs = Path.join(local_base_path, "httpdocs")
+    errors =
+      case ensure_local_directory(local_httpdocs) do
+        :ok ->
+          case do_rsync(ssh_opts, remote_docroot, local_httpdocs,
+                 timeout: 3600,
+                 excludes: @plesk_rsync_excludes,
+                 chown: "www-data:www-data"
+               ) do
+            :ok ->
+              Logger.info("[Importer] web_files #{domain_name}: docroot synced")
+              errors
+
+            {:error, reason} ->
+              ["#{domain_name} docroot: rsync failed - #{reason}" | errors]
+          end
+
+        {:error, reason} ->
+          ["#{domain_name} docroot: #{reason}" | errors]
+      end
+
+    # 2) Rsync each subdomain directory
+    errors =
+      Enum.reduce(subdomains, errors, fn sub, acc ->
+        sub_dir_name = "#{sub.name}.#{domain_name}"
+        remote_sub = "#{remote_home_dir}/#{sub_dir_name}"
+        local_sub = Path.join(local_base_path, sub_dir_name)
+
+        case ensure_local_directory(local_sub) do
           :ok ->
-            :created
+            case do_rsync(ssh_opts, remote_sub, local_sub,
+                   timeout: 3600,
+                   excludes: @plesk_rsync_excludes,
+                   chown: "www-data:www-data"
+                 ) do
+              :ok ->
+                Logger.info("[Importer] web_files #{domain_name}: subdomain #{sub.full_name} synced")
+                acc
+
+              {:error, reason} ->
+                ["#{sub.full_name}: rsync failed - #{reason}" | acc]
+            end
 
           {:error, reason} ->
-            {:failed, "#{item.domain}: rsync failed - #{reason}"}
+            ["#{sub.full_name}: #{reason}" | acc]
         end
+      end)
 
-      {:error, reason} ->
-        {:failed, "#{item.domain}: #{reason}"}
-    end
+    errors = Enum.reverse(errors)
+    total = 1 + length(subdomains)
+    failed = length(errors)
+
+    %{
+      created: total - failed,
+      skipped: 0,
+      failed: failed,
+      errors: errors
+    }
   end
 
   defp ensure_local_directory(path) do
