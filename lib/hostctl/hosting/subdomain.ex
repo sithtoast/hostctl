@@ -20,8 +20,8 @@ defmodule Hostctl.Hosting.Subdomain do
     subdomain
     |> cast(attrs, [:name, :document_root, :status, :domain_name])
     |> validate_required([:name])
-    |> validate_format(:name, ~r/^[a-z0-9]([a-z0-9\-]*[a-z0-9])?$/i,
-      message: "must contain only letters, numbers, and hyphens"
+    |> validate_format(:name, ~r/^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)*$/i,
+      message: "must contain only letters, numbers, hyphens, and dots"
     )
     |> maybe_set_document_root()
     |> validate_inclusion(:status, ~w(active suspended))
@@ -35,7 +35,7 @@ defmodule Hostctl.Hosting.Subdomain do
 
     auto_generated? =
       is_nil(doc_root) or doc_root == "" or
-        Regex.match?(~r|^/var/www/[^/]+/[^/]+(/public)?$|, doc_root)
+        Regex.match?(~r|^/var/www/[^/]+/[^/]+(\.\S+)?(/public)?$|, doc_root)
 
     if is_binary(subdomain_name) and subdomain_name != "" and
          is_binary(domain_name) and domain_name != "" and auto_generated? do
