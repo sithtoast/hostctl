@@ -405,14 +405,14 @@ defmodule Hostctl.Plesk.Importer do
         ssh_opts = Map.get(restore_opts, :ssh_opts)
         has_server_creds = Map.get(restore_opts, :server_credentials) != nil
 
-        # When server-wide credentials were pre-fetched, use those for
-        # passwords and only download a per-domain backup when we actually
-        # need SQL dump files (i.e. the "databases" category is selected).
+        # Download a per-domain backup when we need SQL dumps or credentials.
+        # Even when server-wide credentials were pre-fetched, we still
+        # download a per-domain backup for mail_accounts because the server
+        # backup may not include plaintext mail passwords (depends on Plesk's
+        # plain_backups setting and exclusion flags).
         needs_backup =
           ssh_opts != nil and
-            ((!has_server_creds and
-                Enum.any?(categories, &(&1 in ~w(databases db_users mail_accounts)))) or
-               (has_server_creds and "databases" in categories))
+            Enum.any?(categories, &(&1 in ~w(databases db_users mail_accounts)))
 
         {restore_opts, extract_dir} =
           if needs_backup do
@@ -420,14 +420,20 @@ defmodule Hostctl.Plesk.Importer do
               {:ok, dir} ->
                 opts = Map.put(restore_opts, :backup_extract_dir, dir)
 
-                # Only parse per-domain credentials when no server-wide
-                # credentials were provided
+                # Always parse per-domain credentials. When server-wide
+                # credentials were downloaded, merge them so per-domain
+                # passwords fill in any gaps (e.g. mail passwords that the
+                # server backup didn't include as plaintext).
+                domain_credentials = parse_backup_credentials(dir)
+
                 opts =
                   if has_server_creds do
-                    Map.put_new(opts, :backup_credentials, restore_opts.server_credentials)
+                    merged =
+                      merge_credentials(restore_opts.server_credentials, domain_credentials)
+
+                    Map.put(opts, :backup_credentials, merged)
                   else
-                    credentials = parse_backup_credentials(dir)
-                    Map.put(opts, :backup_credentials, credentials)
+                    Map.put(opts, :backup_credentials, domain_credentials)
                   end
 
                 {opts, dir}
@@ -611,6 +617,12 @@ defmodule Hostctl.Plesk.Importer do
   defp restore_category("mail_accounts", domain, _subscription, inventory, restore_opts) do
     accounts = Map.get(inventory, "mail_accounts", [])
     mail_passwords = get_in(restore_opts, [:backup_credentials, :mail_passwords]) || %{}
+
+    Logger.info(
+      "[Importer] Restoring #{length(accounts)} mail account(s) for #{domain.name}, " <>
+        "#{map_size(mail_passwords)} password(s) available (keys: #{inspect(Map.keys(mail_passwords))})"
+    )
+
     do_restore_items(accounts, fn item -> restore_mail_account(domain, item, mail_passwords) end)
   end
 
@@ -740,12 +752,22 @@ defmodule Hostctl.Plesk.Importer do
       # Use the original password from the backup XML when available.
       # Fall back to a random password when the backup password is empty
       # or too short for our validation (min 8 chars).
-      backup_password = Map.get(mail_passwords, username)
+      # Try both local-part ("info") and full-email ("info@example.com")
+      # keys since Plesk XML format varies between backup types.
+      backup_password =
+        Map.get(mail_passwords, username) ||
+          Map.get(mail_passwords, item.address)
 
       password =
         if is_binary(backup_password) and String.length(backup_password) >= 8 do
+          Logger.info("[Importer] Using Plesk password for mail account #{item.address}")
           backup_password
         else
+          Logger.info(
+            "[Importer] No suitable Plesk password for #{item.address} " <>
+              "(found: #{inspect(is_binary(backup_password) && String.length(backup_password))}), using random"
+          )
+
           generate_random_password()
         end
 
@@ -1846,6 +1868,21 @@ defmodule Hostctl.Plesk.Importer do
     mail_passwords = extract_mail_passwords(content)
     sysuser_passwords = extract_sysuser_passwords(content)
 
+    # Count total password elements vs plain-text for diagnostics
+    total_mail_users = length(Regex.scan(~r/<mailuser\s/, content))
+    total_sys_users = length(Regex.scan(~r/<sysuser\s/, content))
+
+    if total_mail_users > map_size(mail_passwords) or
+         total_sys_users > map_size(sysuser_passwords) do
+      Logger.warning(
+        "[Importer] Some passwords may be hashed (not type=\"plain\") in backup XML. " <>
+          "Mail: #{map_size(mail_passwords)}/#{total_mail_users} plain, " <>
+          "Sysuser: #{map_size(sysuser_passwords)}/#{total_sys_users} plain. " <>
+          "Run 'plesk bin server_pref --update -plain-backups true' on the " <>
+          "Plesk server to include plaintext passwords in backups."
+      )
+    end
+
     %{
       db_passwords: db_passwords,
       mail_passwords: mail_passwords,
@@ -1868,9 +1905,9 @@ defmodule Hostctl.Plesk.Importer do
       ~r/<dbuser\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/dbuser>/s
       |> Regex.scan(db_block)
       |> Enum.flat_map(fn [_full, user_name, user_block] ->
-        case Regex.run(~r/<password[^>]*>([^<]+)<\/password>/, user_block) do
-          [_, password] -> [{{db_name, user_name}, password}]
-          _ -> []
+        case extract_plain_password(user_block) do
+          nil -> []
+          password -> [{{db_name, user_name}, password}]
         end
       end)
     end)
@@ -1887,9 +1924,9 @@ defmodule Hostctl.Plesk.Importer do
     ~r/<mailuser\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/mailuser>/s
     |> Regex.scan(content)
     |> Enum.flat_map(fn [_full, username, user_block] ->
-      case Regex.run(~r/<password[^>]*>([^<]+)<\/password>/, user_block) do
-        [_, password] -> [{username, password}]
-        _ -> []
+      case extract_plain_password(user_block) do
+        nil -> []
+        password -> [{username, password}]
       end
     end)
     |> Map.new()
@@ -1903,12 +1940,29 @@ defmodule Hostctl.Plesk.Importer do
     ~r/<sysuser\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/sysuser>/s
     |> Regex.scan(content)
     |> Enum.flat_map(fn [_full, username, user_block] ->
-      case Regex.run(~r/<password[^>]*>([^<]+)<\/password>/, user_block) do
-        [_, password] -> [{username, password}]
-        _ -> []
+      case extract_plain_password(user_block) do
+        nil -> []
+        password -> [{username, password}]
       end
     end)
     |> Map.new()
+  end
+
+  # Extract a plaintext password from an XML block.
+  # Prefers <password type="plain">, falls back to untyped <password>.
+  # Skips hashed passwords (type="crypt", type="sym", etc.) to avoid
+  # double-hashing when the password is later bcrypt-hashed on our side.
+  defp extract_plain_password(block) do
+    cond do
+      match = Regex.run(~r/<password[^>]*type="plain"[^>]*>([^<]+)<\/password>/, block) ->
+        Enum.at(match, 1)
+
+      match = Regex.run(~r/<password>([^<]+)<\/password>/, block) ->
+        Enum.at(match, 1)
+
+      true ->
+        nil
+    end
   end
 
   defp merge_credentials(acc, new) do

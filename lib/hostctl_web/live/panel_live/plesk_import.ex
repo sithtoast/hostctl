@@ -1,6 +1,8 @@
 defmodule HostctlWeb.PanelLive.PleskImport do
   use HostctlWeb, :live_view
 
+  require Logger
+
   alias Hostctl.Accounts
   alias Hostctl.Accounts.Scope
   alias Hostctl.Plesk
@@ -322,6 +324,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             # Passwords must be >= 8 chars to pass our validation.
             plesk_password = Map.get(sysuser_passwords, system_user)
 
+            Logger.info(
+              "[PleskImport] Auto-create account #{email}: " <>
+                "system_user=#{inspect(system_user)}, " <>
+                "password_found=#{is_binary(plesk_password)}, " <>
+                "sysuser_keys=#{inspect(Map.keys(sysuser_passwords))}"
+            )
+
             user_attrs =
               if is_binary(plesk_password) and String.length(plesk_password) >= 8 do
                 %{name: name, email: email, password: plesk_password}
@@ -603,13 +612,28 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         mail_count = map_size(credentials.mail_passwords)
         sys_count = map_size(credentials.sysuser_passwords)
 
-        {:noreply,
-         socket
-         |> assign(:server_credentials, credentials)
-         |> put_flash(
-           :info,
-           "Server credentials loaded: #{db_count} DB, #{mail_count} mail, #{sys_count} system user password(s)."
-         )}
+        socket =
+          socket
+          |> assign(:server_credentials, credentials)
+          |> put_flash(
+            :info,
+            "Server credentials loaded: #{db_count} DB, #{mail_count} mail, #{sys_count} system user password(s)."
+          )
+
+        socket =
+          if mail_count == 0 and sys_count == 0 do
+            put_flash(
+              socket,
+              :warning,
+              "No plaintext passwords found in server backup. " <>
+                "Run 'plesk bin server_pref --update -plain-backups true' on the Plesk server, " <>
+                "then re-download. Per-domain backups will also be tried during import."
+            )
+          else
+            socket
+          end
+
+        {:noreply, socket}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Server config backup failed: #{reason}")}
