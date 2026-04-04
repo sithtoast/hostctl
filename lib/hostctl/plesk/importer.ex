@@ -471,6 +471,29 @@ defmodule Hostctl.Plesk.Importer do
             {opts, nil}
           end
 
+        # Supplement FTP account inventory from the backup XML.
+        # The SSH probe queries the live ftp_users table, which may not
+        # exist on all Plesk versions. The backup XML is more reliable.
+        inventory =
+          if extract_dir && "ftp_accounts" in categories do
+            backup_ftp = extract_ftpuser_inventory(extract_dir)
+            existing_logins = inventory |> Map.get("ftp_accounts", []) |> MapSet.new(& &1.login)
+
+            new_ftp =
+              Enum.reject(backup_ftp, fn item -> MapSet.member?(existing_logins, item.login) end)
+
+            if new_ftp != [] do
+              Logger.info(
+                "[Importer] Found #{length(new_ftp)} additional FTP account(s) in backup XML " <>
+                  "for #{domain_name}: #{inspect(Enum.map(new_ftp, & &1.login))}"
+              )
+            end
+
+            Map.update(inventory, "ftp_accounts", new_ftp, &(&1 ++ new_ftp))
+          else
+            inventory
+          end
+
         category_results =
           categories
           |> Enum.with_index(1)
@@ -2029,6 +2052,34 @@ defmodule Hostctl.Plesk.Importer do
       end
     end)
     |> Map.new()
+  end
+
+  @doc """
+  Extracts FTP account inventory items from backup XML files in a directory.
+  Returns a list of `%{login: "username"}` maps suitable for the inventory.
+
+  This supplements the SSH probe which queries the live `ftp_users` table —
+  on some Plesk versions that table doesn't exist or uses a different schema,
+  so the backup XML is a more reliable source for FTP account names.
+  """
+  def extract_ftpuser_inventory(extract_dir) do
+    xml_files =
+      Path.wildcard("#{extract_dir}/**/backup_info_*.xml") ++
+        Path.wildcard("#{extract_dir}/**/dump.xml")
+
+    xml_files
+    |> Enum.flat_map(fn xml_file ->
+      case File.read(xml_file) do
+        {:ok, content} ->
+          ~r/<ftpuser\s[^>]*name="([^"]+)"[^>]*>/s
+          |> Regex.scan(content)
+          |> Enum.map(fn [_full, name] -> %{login: name} end)
+
+        {:error, _} ->
+          []
+      end
+    end)
+    |> Enum.uniq_by(& &1.login)
   end
 
   # Extract a plaintext password from an XML block.
