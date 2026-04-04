@@ -992,148 +992,80 @@ defmodule Hostctl.Plesk.Importer do
   # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
-  # PostgreSQL: create temp Plesk DB user, pg_dump, clean up
+  # PostgreSQL: pg_dump via sudo -u postgres over SSH
   # ---------------------------------------------------------------------------
-  # pleskbackup doesn't include PostgreSQL dumps. We use the Plesk CLI to
-  # create a temporary DB user with `-any-database` access, run pg_dump
-  # with those credentials, then remove the user.
+  # pleskbackup doesn't include PostgreSQL dumps. We run pg_dump on the
+  # remote as the `postgres` system user (peer auth via Unix socket) which
+  # has superuser access to all databases. We query Plesk for the correct
+  # PG port since Plesk may run PostgreSQL on a non-default port/cluster.
   # ---------------------------------------------------------------------------
 
   defp restore_pg_databases_via_ssh(domain, dbs, ssh_opts) do
-    sudo = sudo_prefix(ssh_opts)
+    # Get the PG port from Plesk so we connect to the right cluster
+    pg_port = get_plesk_pg_port(ssh_opts)
 
-    # Resolve the PG server host:port from Plesk
-    pg_server = get_plesk_pg_server(ssh_opts)
+    results =
+      Enum.map(dbs, fn item ->
+        create_status = restore_database(domain, item)
 
-    # Create a temporary PG user with access to all databases
-    rand =
-      :crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false) |> String.slice(0, 8)
+        case create_status do
+          {:failed, _} = status ->
+            status
 
-    tmp_user = "hostctl_tmp_#{rand}"
-    tmp_pass = :crypto.strong_rand_bytes(24) |> Base.url_encode64(padding: false)
-    domain_name = domain.name
+          _ ->
+            case dump_pg_database_via_ssh(item.name, ssh_opts, pg_port) do
+              {:ok, local_dir, dump_file} ->
+                result = import_sql_file(dump_file, item.name, "postgresql")
+                File.rm_rf(local_dir)
 
-    create_user_cmd =
-      "#{sudo}plesk bin database --create-dbuser #{shell_escape(tmp_user)} " <>
-        "-passwd #{shell_escape(tmp_pass)} " <>
-        "-domain #{shell_escape(domain_name)} " <>
-        "-server #{shell_escape(pg_server)} " <>
-        "-type postgresql " <>
-        "-any-database"
-
-    Logger.info("[Importer] Creating temp PG user '#{tmp_user}' on Plesk for pg_dump")
-
-    case ssh_exec(ssh_opts, create_user_cmd) do
-      :ok ->
-        Logger.info("[Importer] Temp PG user '#{tmp_user}' created successfully")
-
-        pg_creds = %{
-          host: pg_server |> String.split(":") |> List.first(),
-          port:
-            case pg_server |> String.split(":") |> List.last() |> Integer.parse() do
-              {p, _} -> p
-              :error -> 5432
-            end,
-          user: tmp_user,
-          password: tmp_pass
-        }
-
-        results =
-          Enum.map(dbs, fn item ->
-            create_status = restore_database(domain, item)
-
-            case create_status do
-              {:failed, _} = status ->
-                status
-
-              _ ->
-                case dump_pg_database_via_ssh(item.name, ssh_opts, pg_creds) do
-                  {:ok, local_dir, dump_file} ->
-                    result = import_sql_file(dump_file, item.name, "postgresql")
-                    File.rm_rf(local_dir)
-
-                    case result do
-                      :ok ->
-                        :created
-
-                      {:error, reason} ->
-                        label = if create_status == :created, do: "created but ", else: ""
-                        {:failed, "#{item.name}: #{label}data import failed - #{reason}"}
-                    end
+                case result do
+                  :ok ->
+                    :created
 
                   {:error, reason} ->
                     label = if create_status == :created, do: "created but ", else: ""
-                    {:failed, "#{item.name}: #{label}pg_dump failed - #{reason}"}
+                    {:failed, "#{item.name}: #{label}data import failed - #{reason}"}
                 end
+
+              {:error, reason} ->
+                label = if create_status == :created, do: "created but ", else: ""
+                {:failed, "#{item.name}: #{label}pg_dump failed - #{reason}"}
             end
-          end)
-
-        # Clean up: remove the temp user
-        remove_user_cmd =
-          "#{sudo}plesk bin database --remove-dbuser #{shell_escape(tmp_user)} " <>
-            "-server #{shell_escape(pg_server)}"
-
-        case ssh_exec(ssh_opts, remove_user_cmd) do
-          :ok ->
-            Logger.info("[Importer] Temp PG user '#{tmp_user}' removed")
-
-          {:error, reason} ->
-            Logger.warning(
-              "[Importer] Failed to remove temp PG user '#{tmp_user}': #{reason}"
-            )
         end
+      end)
 
-        tally_restore_results(results)
-
-      {:error, reason} ->
-        Logger.warning("[Importer] Failed to create temp PG user: #{reason}")
-
-        # Fall back: try creating DB entries without data import
-        results =
-          Enum.map(dbs, fn item ->
-            case restore_database(domain, item) do
-              :created ->
-                {:failed, "#{item.name}: created but pg_dump user setup failed - #{reason}"}
-
-              {:failed, _} = status ->
-                status
-
-              _ ->
-                {:failed, "#{item.name}: pg_dump user setup failed - #{reason}"}
-            end
-          end)
-
-        tally_restore_results(results)
-    end
+    tally_restore_results(results)
   end
 
-  defp get_plesk_pg_server(ssh_opts) do
+  defp get_plesk_pg_port(ssh_opts) do
     sudo = sudo_prefix(ssh_opts)
 
-    # Ask Plesk for the PG server host:port from its DatabaseServers table
+    # Query Plesk's internal MySQL DB for the PostgreSQL server port
     query_cmd =
       "#{sudo}plesk db " <>
-        "-Ne \"SELECT CONCAT(host, ':', port) FROM DatabaseServers " <>
+        "-Ne \"SELECT port FROM DatabaseServers " <>
         "WHERE type='postgresql' LIMIT 1\" 2>/dev/null"
 
     case ssh_exec_output(ssh_opts, query_cmd) do
       {:ok, output} ->
         trimmed = String.trim(output)
 
-        if trimmed != "" and String.contains?(trimmed, ":") do
-          Logger.info("[Importer] Plesk PG server: #{trimmed}")
-          trimmed
-        else
-          Logger.info("[Importer] Could not determine Plesk PG server, using localhost:5432")
-          "localhost:5432"
+        case Integer.parse(trimmed) do
+          {port, _} ->
+            Logger.info("[Importer] Plesk PG port: #{port}")
+            port
+
+          :error ->
+            Logger.info("[Importer] Could not determine Plesk PG port, using 5432")
+            5432
         end
 
       _ ->
-        "localhost:5432"
+        5432
     end
   end
 
-  defp dump_pg_database_via_ssh(db_name, ssh_opts, pg_creds) do
+  defp dump_pg_database_via_ssh(db_name, ssh_opts, pg_port) do
     rand =
       :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false) |> String.slice(0, 8)
 
@@ -1161,7 +1093,7 @@ defmodule Hostctl.Plesk.Importer do
 
     Logger.info(
       "[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH " <>
-        "(pg_dump=#{pg_dump_bin}, host=#{pg_creds.host}, port=#{pg_creds.port}, user=#{pg_creds.user})"
+        "(pg_dump=#{pg_dump_bin}, port=#{pg_port}, user=postgres via peer auth)"
     )
 
     escaped_pg_dump = shell_escape(pg_dump_bin)
@@ -1170,18 +1102,41 @@ defmodule Hostctl.Plesk.Importer do
     remote_err = "/tmp/hostctl_pgdump_err_#{rand}.log"
     escaped_err = shell_escape(remote_err)
 
-    # Run pg_dump with explicit PG credentials (no sudo -u postgres needed).
-    # cd /tmp to avoid "could not change directory" warnings.
+    # Use sudo -u postgres for peer auth on Unix socket (no -h flag).
+    # Pass -p <port> to connect to the correct PG cluster that Plesk uses.
+    # --no-owner / --no-acl: skip OWNER and GRANT/REVOKE for Plesk-specific users.
+    # cd /tmp: avoid "could not change directory" warning.
+    # Use SUDO_ASKPASS for password-based SSH sudo (same proven pattern as rsync).
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    password =
+      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+
     dump_cmd =
-      "cd /tmp && " <>
-        "PGPASSWORD=#{shell_escape(pg_creds.password)} " <>
-        "#{escaped_pg_dump} --no-owner --no-acl " <>
-        "-h #{shell_escape(pg_creds.host)} -p #{pg_creds.port} " <>
-        "-U #{shell_escape(pg_creds.user)} " <>
-        "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
-        "RC=$?; " <>
-        "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
-        "rm -f #{escaped_err}; exit $RC"
+      if auth_method == "password" and password != "" do
+        escaped_pass = String.replace(password, "'", "'\\''")
+        askpass = "/tmp/hostctl_pgask_#{rand}"
+
+        "AP=#{askpass}; " <>
+          "printf '#!/bin/sh\\necho '\"'\"'#{escaped_pass}'\"'\"'\\n' > $AP && " <>
+          "chmod 700 $AP && " <>
+          "cd /tmp && " <>
+          "SUDO_ASKPASS=$AP sudo -A -u postgres " <>
+          "#{escaped_pg_dump} --no-owner --no-acl -p #{pg_port} " <>
+          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
+          "RC=$?; rm -f $AP; " <>
+          "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
+          "rm -f #{escaped_err}; exit $RC"
+      else
+        "cd /tmp && " <>
+          "sudo -u postgres " <>
+          "#{escaped_pg_dump} --no-owner --no-acl -p #{pg_port} " <>
+          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
+          "RC=$?; " <>
+          "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
+          "rm -f #{escaped_err}; exit $RC"
+      end
 
     with {:ok, output} <- ssh_exec_output(ssh_opts, dump_cmd) do
       if output != "", do: Logger.info("[Importer] pg_dump output for '#{db_name}': #{output}")
