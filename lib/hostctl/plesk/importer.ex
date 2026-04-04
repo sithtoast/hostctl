@@ -1035,9 +1035,7 @@ defmodule Hostctl.Plesk.Importer do
 
     File.mkdir_p!(local_dir)
 
-    # Locate pg_dump on the remote — no sudo needed to find the binary path.
-    # Check common locations: /bin, /usr/bin, /usr/local/bin, and distro-specific
-    # paths like /usr/lib/postgresql/*/bin/ (Debian/Ubuntu).
+    # Locate pg_dump on the remote
     find_pg_dump_cmd =
       "command -v pg_dump 2>/dev/null " <>
         "|| for d in /bin /usr/bin /usr/local/bin /usr/lib/postgresql/*/bin /usr/pgsql-*/bin; do " <>
@@ -1053,16 +1051,16 @@ defmodule Hostctl.Plesk.Importer do
           "/usr/bin/pg_dump"
       end
 
-    Logger.info("[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH (pg_dump=#{pg_dump_bin})")
+    # Get Plesk's PostgreSQL admin credentials — Plesk stores them in its own
+    # MySQL database and in /etc/psa/private/pgsql.passwd. We need these because
+    # pg_dump via `sudo -u postgres` uses peer auth on the default Unix socket,
+    # but Plesk may run PostgreSQL on a different port/cluster.
+    pg_creds = get_plesk_pg_credentials(ssh_opts)
 
-    # Build the full dump command. Uses SUDO_ASKPASS (same proven pattern as
-    # rsync) to avoid piping the password through stdin, which can interfere
-    # with command output and cause empty dumps.
-    auth_method =
-      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
-
-    password =
-      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+    Logger.info(
+      "[Importer] Dumping PostgreSQL DB '#{db_name}' via SSH " <>
+        "(pg_dump=#{pg_dump_bin}, host=#{pg_creds.host}, port=#{pg_creds.port}, user=#{pg_creds.user})"
+    )
 
     escaped_pg_dump = shell_escape(pg_dump_bin)
     escaped_db = shell_escape(db_name)
@@ -1070,30 +1068,21 @@ defmodule Hostctl.Plesk.Importer do
     remote_err = "/tmp/hostctl_pgdump_err_#{rand}.log"
     escaped_err = shell_escape(remote_err)
 
-    # cd /tmp first so sudo -u postgres doesn't try to cd to the calling
-    # user's home dir (which it can't access → "could not change directory"
-    # warning that was previously contaminating the SQL dump via 2>&1).
-    # stderr goes to a separate file so it never mixes with the SQL dump.
-    dump_cmd =
-      if auth_method == "password" and password != "" do
-        escaped_pass = String.replace(password, "'", "'\\''")
-        askpass = "/tmp/hostctl_pgask_#{rand}"
+    # Use PGPASSWORD with explicit -h/-p/-U to connect to the correct PG
+    # instance that Plesk uses (may differ from the default Unix socket).
+    # cd /tmp to avoid "could not change directory" warnings.
+    sudo = sudo_prefix(ssh_opts)
 
-        "AP=#{askpass}; " <>
-          "printf '#!/bin/sh\\necho '\"'\"'#{escaped_pass}'\"'\"'\\n' > $AP && " <>
-          "chmod 700 $AP && " <>
-          "cd /tmp && " <>
-          "SUDO_ASKPASS=$AP sudo -A -u postgres " <>
-          "#{escaped_pg_dump} --no-owner --no-acl #{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
-          "RC=$?; rm -f $AP; " <>
-          "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
-          "rm -f #{escaped_err}; exit $RC"
-      else
-        "cd /tmp && sudo -u postgres #{escaped_pg_dump} --no-owner --no-acl " <>
-          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
-          "RC=$?; if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
-          "rm -f #{escaped_err}; exit $RC"
-      end
+    dump_cmd =
+      "cd /tmp && " <>
+        "#{sudo}env PGPASSWORD=#{shell_escape(pg_creds.password)} " <>
+        "#{escaped_pg_dump} --no-owner --no-acl " <>
+        "-h #{shell_escape(pg_creds.host)} -p #{pg_creds.port} " <>
+        "-U #{shell_escape(pg_creds.user)} " <>
+        "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
+        "RC=$?; " <>
+        "if [ $RC -ne 0 ]; then cat #{escaped_err} >&2; fi; " <>
+        "rm -f #{escaped_err}; exit $RC"
 
     with {:ok, output} <- ssh_exec_output(ssh_opts, dump_cmd) do
       if output != "", do: Logger.info("[Importer] pg_dump output for '#{db_name}': #{output}")
@@ -1113,6 +1102,76 @@ defmodule Hostctl.Plesk.Importer do
         File.rm_rf(local_dir)
         ssh_exec(ssh_opts, "rm -f #{escaped_out}")
         {:error, reason}
+    end
+  end
+
+  # Retrieve Plesk's PostgreSQL admin credentials from the remote server.
+  # Tries multiple sources in order:
+  #   1. Plesk's internal MySQL DB (most reliable — contains host/port/user/pass)
+  #   2. /etc/psa/private/pgsql.passwd (password file, assume localhost:5432)
+  #   3. Fallback: postgres user via peer auth on localhost:5432
+  defp get_plesk_pg_credentials(ssh_opts) do
+    sudo = sudo_prefix(ssh_opts)
+    defaults = %{host: "localhost", port: 5432, user: "postgres", password: ""}
+
+    # Source 1: Query Plesk's internal database
+    # Plesk stores database server info in its psa MySQL DB.
+    # Output is tab-separated: host\tport\tlogin\tpassword
+    plesk_query =
+      "#{sudo}plesk db " <>
+        "-Ne \"SELECT host, port, admin_login, admin_password " <>
+        "FROM DatabaseServers WHERE type='postgresql' LIMIT 1\" 2>/dev/null"
+
+    case ssh_exec_output(ssh_opts, plesk_query) do
+      {:ok, output} ->
+        parts = output |> String.trim() |> String.split("\t")
+
+        case parts do
+          [host, port_str, user, pass] when host != "" and user != "" ->
+            port =
+              case Integer.parse(port_str) do
+                {p, _} -> p
+                :error -> 5432
+              end
+
+            Logger.info(
+              "[Importer] Got Plesk PG credentials: host=#{host}, port=#{port}, user=#{user}"
+            )
+
+            %{host: host, port: port, user: user, password: pass}
+
+          _ ->
+            get_plesk_pg_password_fallback(ssh_opts, defaults)
+        end
+
+      _ ->
+        get_plesk_pg_password_fallback(ssh_opts, defaults)
+    end
+  end
+
+  defp get_plesk_pg_password_fallback(ssh_opts, defaults) do
+    sudo = sudo_prefix(ssh_opts)
+
+    # Source 2: Read password from Plesk's pgsql.passwd file
+    passwd_cmd = "#{sudo}cat /etc/psa/private/pgsql.passwd 2>/dev/null"
+
+    case ssh_exec_output(ssh_opts, passwd_cmd) do
+      {:ok, pass} when pass != "" ->
+        trimmed = String.trim(pass)
+
+        Logger.info(
+          "[Importer] Got Plesk PG password from /etc/psa/private/pgsql.passwd"
+        )
+
+        %{defaults | password: trimmed}
+
+      _ ->
+        Logger.warning(
+          "[Importer] Could not get Plesk PG credentials — " <>
+            "falling back to postgres peer auth on localhost:5432"
+        )
+
+        defaults
     end
   end
 
