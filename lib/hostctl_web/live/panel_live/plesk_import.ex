@@ -620,6 +620,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         mail_count = map_size(credentials.mail_passwords)
         sys_count = map_size(credentials.sysuser_passwords)
         cli_count = map_size(Map.get(credentials, :client_passwords, %{}))
+        ftp_count = map_size(Map.get(credentials, :ftpuser_passwords, %{}))
 
         socket =
           socket
@@ -627,11 +628,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           |> put_flash(
             :info,
             "Server credentials loaded: #{db_count} DB, #{mail_count} mail, " <>
-              "#{sys_count} system user, #{cli_count} client/reseller password(s)."
+              "#{sys_count} system user, #{cli_count} client/reseller, #{ftp_count} FTP password(s)."
           )
 
         socket =
-          if mail_count == 0 and sys_count == 0 and cli_count == 0 do
+          if mail_count == 0 and sys_count == 0 and cli_count == 0 and ftp_count == 0 do
             put_flash(
               socket,
               :warning,

@@ -683,14 +683,14 @@ defmodule Hostctl.Plesk.Importer do
 
   defp restore_category("ftp_accounts", domain, _subscription, inventory, restore_opts) do
     accounts = Map.get(inventory, "ftp_accounts", [])
-    sysuser_passwords = get_in(restore_opts, [:backup_credentials, :sysuser_passwords]) || %{}
+    ftpuser_passwords = get_in(restore_opts, [:backup_credentials, :ftpuser_passwords]) || %{}
 
     Logger.info(
       "[Importer] Restoring #{length(accounts)} FTP account(s) for #{domain.name}, " <>
-        "#{map_size(sysuser_passwords)} sysuser password(s) available"
+        "#{map_size(ftpuser_passwords)} FTP password(s) available (keys: #{inspect(Map.keys(ftpuser_passwords))})"
     )
 
-    do_restore_items(accounts, fn item -> restore_ftp_account(domain, item, sysuser_passwords) end)
+    do_restore_items(accounts, fn item -> restore_ftp_account(domain, item, ftpuser_passwords) end)
   end
 
   defp restore_category("ssl_certificates", _domain, _subscription, inventory, _restore_opts) do
@@ -1855,7 +1855,7 @@ defmodule Hostctl.Plesk.Importer do
     credentials =
       Enum.reduce(
         xml_files,
-        %{db_passwords: %{}, mail_passwords: %{}, sysuser_passwords: %{}, client_passwords: %{}},
+        %{db_passwords: %{}, mail_passwords: %{}, sysuser_passwords: %{}, client_passwords: %{}, ftpuser_passwords: %{}},
         fn xml_file, acc ->
           case File.read(xml_file) do
             {:ok, content} ->
@@ -1866,7 +1866,8 @@ defmodule Hostctl.Plesk.Importer do
                   "#{map_size(creds.db_passwords)} DB, " <>
                   "#{map_size(creds.mail_passwords)} mail, " <>
                   "#{map_size(creds.sysuser_passwords)} sysuser, " <>
-                  "#{map_size(creds.client_passwords)} client/reseller password(s)"
+                  "#{map_size(creds.client_passwords)} client/reseller, " <>
+                  "#{map_size(creds.ftpuser_passwords)} FTP password(s)"
               )
 
               merge_credentials(acc, creds)
@@ -1882,7 +1883,8 @@ defmodule Hostctl.Plesk.Importer do
         "#{map_size(credentials.db_passwords)} DB user(s), " <>
         "#{map_size(credentials.mail_passwords)} mail account(s), " <>
         "#{map_size(credentials.sysuser_passwords)} system user(s), " <>
-        "#{map_size(credentials.client_passwords)} client/reseller(s)"
+        "#{map_size(credentials.client_passwords)} client/reseller(s), " <>
+        "#{map_size(credentials.ftpuser_passwords)} FTP user(s)"
     )
 
     credentials
@@ -1893,6 +1895,7 @@ defmodule Hostctl.Plesk.Importer do
     mail_passwords = extract_mail_passwords(content)
     sysuser_passwords = extract_sysuser_passwords(content)
     client_passwords = extract_client_passwords(content)
+    ftpuser_passwords = extract_ftpuser_passwords(content)
 
     # Count total password elements vs plain-text for diagnostics
     total_mail_users = length(Regex.scan(~r/<mailuser\s/, content))
@@ -1913,7 +1916,8 @@ defmodule Hostctl.Plesk.Importer do
       db_passwords: db_passwords,
       mail_passwords: mail_passwords,
       sysuser_passwords: sysuser_passwords,
-      client_passwords: client_passwords
+      client_passwords: client_passwords,
+      ftpuser_passwords: ftpuser_passwords
     }
   end
 
@@ -2007,6 +2011,26 @@ defmodule Hostctl.Plesk.Importer do
     Map.new(clients ++ resellers)
   end
 
+  # Extract FTP user passwords from <ftpuser> elements.
+  # In Plesk backups, FTP users have a nested <sysuser> with the password:
+  #   <ftpuser name="username">
+  #     <sysuser name="username" home="...">
+  #       <password type="plain">thepassword</password>
+  #     </sysuser>
+  #   </ftpuser>
+  # These are keyed by the ftpuser name, which maps to item.login during restore.
+  defp extract_ftpuser_passwords(content) do
+    ~r/<ftpuser\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/ftpuser>/s
+    |> Regex.scan(content)
+    |> Enum.flat_map(fn [_full, name, block] ->
+      case extract_plain_password(block) do
+        nil -> []
+        password -> [{name, password}]
+      end
+    end)
+    |> Map.new()
+  end
+
   # Extract a plaintext password from an XML block.
   # Prefers <password type="plain">, falls back to untyped <password>.
   # Skips hashed passwords (type="crypt", type="sym", etc.) to avoid
@@ -2031,7 +2055,9 @@ defmodule Hostctl.Plesk.Importer do
       sysuser_passwords:
         Map.merge(Map.get(acc, :sysuser_passwords, %{}), Map.get(new, :sysuser_passwords, %{})),
       client_passwords:
-        Map.merge(Map.get(acc, :client_passwords, %{}), Map.get(new, :client_passwords, %{}))
+        Map.merge(Map.get(acc, :client_passwords, %{}), Map.get(new, :client_passwords, %{})),
+      ftpuser_passwords:
+        Map.merge(Map.get(acc, :ftpuser_passwords, %{}), Map.get(new, :ftpuser_passwords, %{}))
     }
   end
 
@@ -2332,7 +2358,7 @@ defmodule Hostctl.Plesk.Importer do
 
   defp maybe_replace_ip(_type, value, _replacements), do: value
 
-  defp restore_ftp_account(domain, item, sysuser_passwords) do
+  defp restore_ftp_account(domain, item, ftpuser_passwords) do
     existing =
       domain
       |> Hosting.list_ftp_accounts()
@@ -2341,7 +2367,7 @@ defmodule Hostctl.Plesk.Importer do
     if existing do
       :skipped
     else
-      password = Map.get(sysuser_passwords, item.login) || generate_random_password()
+      password = Map.get(ftpuser_passwords, item.login) || generate_random_password()
 
       case Hosting.create_ftp_account(domain, %{
              username: item.login,
