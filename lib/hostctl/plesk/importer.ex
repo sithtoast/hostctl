@@ -729,18 +729,28 @@ defmodule Hostctl.Plesk.Importer do
     ".yarnrc"
   ]
 
+  @plesk_docroot_dirs ~w(httpdocs htdocs public public_html)
+
   defp restore_web_files(_domain, item, ssh_opts, local_base_path) do
     # Derive the actual remote domain directory from the Plesk document_root.
     # Plesk nests domains belonging to the same system user under the primary
     # domain's home directory. For example, if system user "megaplushie" has
     # home at /var/www/vhosts/bakalair.com, then omgwtf.moe lives at
     # /var/www/vhosts/bakalair.com/omgwtf.moe/ instead of /var/www/vhosts/omgwtf.moe/.
-    # The document_root from the probe (h.www_root) gives us the actual path,
-    # e.g. /var/www/vhosts/bakalair.com/omgwtf.moe/httpdocs — we go up one
-    # level to get the domain's root directory for rsync.
+    #
+    # The document_root from the probe (h.www_root) tells us where Plesk
+    # serves files from. We only strip the last component if it's a known
+    # docroot dir (httpdocs, public, etc.). Otherwise the document_root IS
+    # the domain directory and we use it directly.
     remote_path =
       if is_binary(item.document_root) and item.document_root != "" do
-        Path.dirname(item.document_root)
+        basename = Path.basename(item.document_root)
+
+        if basename in @plesk_docroot_dirs do
+          Path.dirname(item.document_root)
+        else
+          item.document_root
+        end
       else
         "/var/www/vhosts/#{item.domain}"
       end
