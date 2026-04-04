@@ -490,16 +490,16 @@ defmodule Hostctl.Settings do
   # 3. Any remaining IP as fallback
   defp find_best_ip(settings, filter_fn) do
     # First try: entries where admin set an external_ip override
+    # Second try: non-private IPs (skip Docker/internal ranges)
+    # Last resort: any matching IP
     Enum.find_value(settings, fn s ->
       if is_binary(s.external_ip) and s.external_ip != "" and filter_fn.(s.external_ip) do
         s.external_ip
       end
     end) ||
-      # Second try: non-private IPs (skip Docker/internal ranges)
       Enum.find_value(settings, fn s ->
         if filter_fn.(s.ip_address) and not private_ip?(s.ip_address), do: s.ip_address
       end) ||
-      # Last resort: any matching IP
       Enum.find_value(settings, "", fn s ->
         if filter_fn.(s.ip_address), do: s.ip_address
       end)

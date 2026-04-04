@@ -36,6 +36,14 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     {"ssl_certificates", "SSL Certificates", "hero-lock-closed"}
   ]
 
+  # Categories that are discovered but not yet fully imported — show a warning
+  @limited_categories %{
+    "cron_jobs" =>
+      "Cron jobs are discovered but not yet imported. You will need to recreate them manually.",
+    "ssl_certificates" =>
+      "SSL certificate names are discovered but certificate content is not imported. Use Let's Encrypt or re-upload certificates manually."
+  }
+
   @restore_category_keys Enum.map(@restore_categories, fn {key, _, _} -> key end)
 
   @default_params %{
@@ -84,6 +92,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:new_account_form, to_form(%{"name" => "", "email" => ""}, as: :account))
      |> assign(:data_type_options, @data_type_options)
      |> assign(:restore_categories, @restore_categories)
+     |> assign(:limited_categories, @limited_categories)
      |> assign(:saved_migrations, [])
      |> assign(:show_saved, false)
      |> load_saved_migrations()}
@@ -267,6 +276,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     subscriptions = socket.assigns.subscriptions
     existing_emails = MapSet.new(socket.assigns.accounts, & &1.email)
 
+    # System user passwords from server config backup (if downloaded)
+    sysuser_passwords =
+      case socket.assigns.server_credentials do
+        %{sysuser_passwords: passwords} -> passwords
+        _ -> %{}
+      end
+
     # Group domains by owner identity (prefer owner_email, fall back to owner_login)
     owner_groups =
       subscriptions
@@ -281,6 +297,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           sample = hd(subs)
           email = Map.get(sample, :owner_email)
           name = Map.get(sample, :owner_name) || Map.get(sample, :owner_login) || "User"
+          system_user = Map.get(sample, :system_user)
 
           # Synthesize email from owner_login@first_domain if no email from Plesk
           email =
@@ -301,7 +318,18 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
             {created, skipped + 1, configs}
           else
-            case Accounts.create_panel_user(%{name: name, email: email}) do
+            # Look up the Plesk system user password when available.
+            # Passwords must be >= 8 chars to pass our validation.
+            plesk_password = Map.get(sysuser_passwords, system_user)
+
+            user_attrs =
+              if is_binary(plesk_password) and String.length(plesk_password) >= 8 do
+                %{name: name, email: email, password: plesk_password}
+              else
+                %{name: name, email: email}
+              end
+
+            case Accounts.create_panel_user(user_attrs) do
               {:ok, _user} ->
                 configs =
                   Enum.reduce(subs, configs, fn sub, acc ->
@@ -584,8 +612,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
          )}
 
       {:error, reason} ->
-        {:noreply,
-         put_flash(socket, :error, "Server config backup failed: #{reason}")}
+        {:noreply, put_flash(socket, :error, "Server config backup failed: #{reason}")}
     end
   end
 
@@ -1225,14 +1252,18 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           <button
             id="plesk-download-server-creds-btn"
             phx-click="download_server_credentials"
-            disabled={@server_creds_loading || @server_credentials != nil || @form_params["source"] != "ssh"}
+            disabled={
+              @server_creds_loading || @server_credentials != nil || @form_params["source"] != "ssh"
+            }
             class={[
               "inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
               cond do
                 @server_credentials != nil ->
                   "border-green-300 dark:border-green-700 text-green-700 dark:text-green-300 bg-green-50 dark:bg-green-900/20 cursor-default"
+
                 @server_creds_loading ->
                   "border-gray-300 dark:border-gray-600 text-gray-400 cursor-not-allowed"
+
                 true ->
                   "border-purple-300 dark:border-purple-700 text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-900/30"
               end
@@ -1493,12 +1524,14 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             <%= for {key, label, icon} <- @restore_categories do %>
               <% count = Map.get(counts, key, 0) %>
               <% selected = MapSet.member?(categories, key) %>
+              <% limited_warning = Map.get(@limited_categories, key) %>
               <button
                 type="button"
                 phx-click="toggle_category"
                 phx-value-domain={sub.domain}
                 phx-value-category={key}
                 disabled={count == 0}
+                title={limited_warning}
                 class={[
                   "flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all",
                   if(count == 0,
@@ -1519,6 +1552,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               >
                 <.icon name={icon} class="w-3.5 h-3.5 shrink-0" />
                 <span class="truncate">{label}</span>
+                <.icon
+                  :if={limited_warning && count > 0}
+                  name="hero-exclamation-triangle"
+                  class="w-3 h-3 text-amber-500 shrink-0"
+                />
                 <span class={[
                   "ml-auto text-[10px] font-semibold rounded-full px-1.5 py-0.5 shrink-0",
                   if(selected and count > 0,
@@ -1641,17 +1679,23 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               <%!-- Completed categories --%>
               <%= for {cat, cat_result} <- completed do %>
                 <div class="flex items-center gap-1.5 mb-1">
-                  <.icon name="hero-check-circle-solid" class={[
-                    "w-3.5 h-3.5 shrink-0",
-                    if(cat_result.failed > 0,
-                      do: "text-amber-500",
-                      else: "text-emerald-500"
-                    )
-                  ]} />
+                  <.icon
+                    name="hero-check-circle-solid"
+                    class={[
+                      "w-3.5 h-3.5 shrink-0",
+                      if(cat_result.failed > 0,
+                        do: "text-amber-500",
+                        else: "text-emerald-500"
+                      )
+                    ]}
+                  />
                   <span class="text-xs text-gray-600 dark:text-gray-400">
                     {category_display_name(cat)}
                     <span class="text-[10px] text-gray-400 dark:text-gray-500 ml-1">
-                      {cat_result.created} created{if(cat_result.skipped > 0, do: ", #{cat_result.skipped} skipped", else: "")}{if(cat_result.failed > 0, do: ", #{cat_result.failed} failed", else: "")}
+                      {cat_result.created} created{if(cat_result.skipped > 0,
+                        do: ", #{cat_result.skipped} skipped",
+                        else: ""
+                      )}{if(cat_result.failed > 0, do: ", #{cat_result.failed} failed", else: "")}
                     </span>
                   </span>
                 </div>
@@ -1665,8 +1709,21 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                   fill="none"
                   viewBox="0 0 24 24"
                 >
-                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                  <circle
+                    class="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    stroke-width="4"
+                  >
+                  </circle>
+                  <path
+                    class="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                  >
+                  </path>
                 </svg>
                 <span class="text-xs font-medium text-indigo-800 dark:text-indigo-200">
                   <%= if progress.category do %>

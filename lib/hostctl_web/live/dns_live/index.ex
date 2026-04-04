@@ -458,122 +458,122 @@ defmodule HostctlWeb.DnsLive.Index do
                   No DNS records yet. Add your first record above.
                 </td>
               </tr>
-                <tr
-                  :for={{dom_id, record} <- @streams.dns_records}
-                  id={dom_id}
-                  class="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
-                >
-                  <%= if @editing_record_id == record.id do %>
-                    <%!-- Inline edit row --%>
-                    <td colspan="7" class="px-4 py-3">
-                      <.form
-                        for={@edit_form}
-                        id={"edit-record-form-#{record.id}"}
-                        phx-change="validate_edit"
-                        phx-submit="save_edit"
-                        class="grid grid-cols-2 gap-3 sm:grid-cols-6"
-                      >
-                        <.input
-                          field={@edit_form[:type]}
-                          type="select"
-                          label="Type"
-                          options={DnsRecord.valid_types()}
-                        />
-                        <.input field={@edit_form[:name]} type="text" label="Name" />
-                        <div class="sm:col-span-2">
-                          <.input field={@edit_form[:value]} type="text" label="Value" />
-                        </div>
-                        <.input field={@edit_form[:ttl]} type="number" label="TTL" />
-                        <.input field={@edit_form[:priority]} type="number" label="Priority" />
-                        <div class="col-span-2 sm:col-span-6 flex items-center gap-2 pt-1">
-                          <button
-                            type="submit"
-                            class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded-lg transition-colors"
-                          >
-                            Save
-                          </button>
-                          <button
-                            type="button"
-                            phx-click="cancel_edit"
-                            class="px-3 py-1.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 text-xs font-medium transition-colors"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </.form>
-                    </td>
-                  <% else %>
-                    <%!-- Normal display row --%>
-                    <td class="px-4 py-3">
-                      <span class={[
-                        "inline-flex items-center px-2 py-0.5 rounded text-xs font-bold font-mono",
-                        cond do
-                          record.type in ~w(A AAAA) ->
-                            "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
-
-                          record.type == "MX" ->
-                            "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400"
-
-                          record.type == "CNAME" ->
-                            "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-
-                          record.type == "TXT" ->
-                            "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-
-                          true ->
-                            "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300"
-                        end
-                      ]}>
-                        {record.type}
-                      </span>
-                    </td>
-                    <td class="px-4 py-3 font-mono text-sm text-gray-900 dark:text-white">
-                      {record.name}
-                    </td>
-                    <td class="px-4 py-3 font-mono text-sm text-gray-600 dark:text-gray-300 max-w-xs truncate">
-                      {record.value}
-                    </td>
-                    <td class="px-4 py-3 text-sm text-gray-500">{record.ttl}</td>
-                    <td class="px-4 py-3 text-sm text-gray-500">{record.priority || "—"}</td>
-                    <%= if cloudflare_enabled?(@dns_setting) && @zone.cloudflare_zone_id do %>
-                      <td class="px-4 py-3">
-                        <%= if record.cloudflare_record_id do %>
-                          <span
-                            title={"CF: #{record.cloudflare_record_id}"}
-                            class="inline-flex items-center gap-1 text-xs text-orange-600 dark:text-orange-400 font-medium"
-                          >
-                            <.icon name="hero-check-circle" class="w-3.5 h-3.5" /> Synced
-                          </span>
-                        <% else %>
-                          <span class="inline-flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500">
-                            <.icon name="hero-minus-circle" class="w-3.5 h-3.5" /> Local
-                          </span>
-                        <% end %>
-                      </td>
-                    <% end %>
-                    <td class="px-4 py-3 text-right">
-                      <div class="flex items-center justify-end gap-3">
+              <tr
+                :for={{dom_id, record} <- @streams.dns_records}
+                id={dom_id}
+                class="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+              >
+                <%= if @editing_record_id == record.id do %>
+                  <%!-- Inline edit row --%>
+                  <td colspan="7" class="px-4 py-3">
+                    <.form
+                      for={@edit_form}
+                      id={"edit-record-form-#{record.id}"}
+                      phx-change="validate_edit"
+                      phx-submit="save_edit"
+                      class="grid grid-cols-2 gap-3 sm:grid-cols-6"
+                    >
+                      <.input
+                        field={@edit_form[:type]}
+                        type="select"
+                        label="Type"
+                        options={DnsRecord.valid_types()}
+                      />
+                      <.input field={@edit_form[:name]} type="text" label="Name" />
+                      <div class="sm:col-span-2">
+                        <.input field={@edit_form[:value]} type="text" label="Value" />
+                      </div>
+                      <.input field={@edit_form[:ttl]} type="number" label="TTL" />
+                      <.input field={@edit_form[:priority]} type="number" label="Priority" />
+                      <div class="col-span-2 sm:col-span-6 flex items-center gap-2 pt-1">
                         <button
-                          phx-click="edit"
-                          phx-value-id={record.id}
-                          class="text-xs text-indigo-500 hover:text-indigo-600 font-medium"
+                          type="submit"
+                          class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded-lg transition-colors"
                         >
-                          Edit
+                          Save
                         </button>
                         <button
-                          phx-click="delete"
-                          phx-value-id={record.id}
-                          data-confirm="Delete this DNS record?"
-                          class="text-xs text-red-500 hover:text-red-600"
+                          type="button"
+                          phx-click="cancel_edit"
+                          class="px-3 py-1.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 text-xs font-medium transition-colors"
                         >
-                          Delete
+                          Cancel
                         </button>
                       </div>
+                    </.form>
+                  </td>
+                <% else %>
+                  <%!-- Normal display row --%>
+                  <td class="px-4 py-3">
+                    <span class={[
+                      "inline-flex items-center px-2 py-0.5 rounded text-xs font-bold font-mono",
+                      cond do
+                        record.type in ~w(A AAAA) ->
+                          "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+
+                        record.type == "MX" ->
+                          "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400"
+
+                        record.type == "CNAME" ->
+                          "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+
+                        record.type == "TXT" ->
+                          "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+
+                        true ->
+                          "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300"
+                      end
+                    ]}>
+                      {record.type}
+                    </span>
+                  </td>
+                  <td class="px-4 py-3 font-mono text-sm text-gray-900 dark:text-white">
+                    {record.name}
+                  </td>
+                  <td class="px-4 py-3 font-mono text-sm text-gray-600 dark:text-gray-300 max-w-xs truncate">
+                    {record.value}
+                  </td>
+                  <td class="px-4 py-3 text-sm text-gray-500">{record.ttl}</td>
+                  <td class="px-4 py-3 text-sm text-gray-500">{record.priority || "—"}</td>
+                  <%= if cloudflare_enabled?(@dns_setting) && @zone.cloudflare_zone_id do %>
+                    <td class="px-4 py-3">
+                      <%= if record.cloudflare_record_id do %>
+                        <span
+                          title={"CF: #{record.cloudflare_record_id}"}
+                          class="inline-flex items-center gap-1 text-xs text-orange-600 dark:text-orange-400 font-medium"
+                        >
+                          <.icon name="hero-check-circle" class="w-3.5 h-3.5" /> Synced
+                        </span>
+                      <% else %>
+                        <span class="inline-flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500">
+                          <.icon name="hero-minus-circle" class="w-3.5 h-3.5" /> Local
+                        </span>
+                      <% end %>
                     </td>
                   <% end %>
-                </tr>
-              </tbody>
-            </table>
+                  <td class="px-4 py-3 text-right">
+                    <div class="flex items-center justify-end gap-3">
+                      <button
+                        phx-click="edit"
+                        phx-value-id={record.id}
+                        class="text-xs text-indigo-500 hover:text-indigo-600 font-medium"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        phx-click="delete"
+                        phx-value-id={record.id}
+                        data-confirm="Delete this DNS record?"
+                        class="text-xs text-red-500 hover:text-red-600"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                <% end %>
+              </tr>
+            </tbody>
+          </table>
         </div>
 
         <%!-- Cloudflare footer (zone is linked) --%>

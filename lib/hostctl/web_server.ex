@@ -203,10 +203,11 @@ defmodule Hostctl.WebServer do
     # Use sudo to create the directory tree — /var/www/<domain> may be
     # owned by root (e.g. after an rsync import) and the app user cannot
     # create nested directories inside it.
-    case System.cmd("sudo",
-           ["systemd-run", "--pipe", "--wait", "--collect", "--quiet",
-            "mkdir", "-p", path],
-           stderr_to_stdout: true) do
+    case System.cmd(
+           "sudo",
+           ["systemd-run", "--pipe", "--wait", "--collect", "--quiet", "mkdir", "-p", path],
+           stderr_to_stdout: true
+         ) do
       {_, 0} ->
         # Chown the entire domain directory tree to www-data so FTP users
         # (mapped to www-data via vsftpd guest_username) can read/write/delete.
@@ -222,7 +223,9 @@ defmodule Hostctl.WebServer do
         end
 
       {output, code} ->
-        Logger.warning("[WebServer] Could not create webroot #{path} (exit #{code}): #{String.trim(output)}")
+        Logger.warning(
+          "[WebServer] Could not create webroot #{path} (exit #{code}): #{String.trim(output)}"
+        )
     end
   end
 

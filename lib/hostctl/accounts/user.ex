@@ -36,12 +36,21 @@ defmodule Hostctl.Accounts.User do
   Captures name and email, sets role to "client".
   """
   def panel_user_changeset(user, attrs, opts \\ []) do
-    user
-    |> cast(attrs, [:name, :email])
-    |> validate_required([:name])
-    |> validate_length(:name, min: 2, max: 100)
-    |> validate_email(opts)
-    |> put_change(:role, "client")
+    changeset =
+      user
+      |> cast(attrs, [:name, :email, :password])
+      |> validate_required([:name])
+      |> validate_length(:name, min: 2, max: 100)
+      |> validate_email(opts)
+      |> put_change(:role, "client")
+
+    if get_change(changeset, :password) do
+      changeset
+      |> validate_password(opts)
+      |> put_change(:confirmed_at, DateTime.utc_now(:second))
+    else
+      changeset
+    end
   end
 
   @doc """
@@ -113,7 +122,7 @@ defmodule Hostctl.Accounts.User do
   defp validate_password(changeset, opts) do
     changeset
     |> validate_required([:password])
-    |> validate_length(:password, min: 12, max: 72)
+    |> validate_length(:password, min: 8, max: 72)
     # Examples of additional password validation:
     # |> validate_format(:password, ~r/[a-z]/, message: "at least one lower case character")
     # |> validate_format(:password, ~r/[A-Z]/, message: "at least one upper case character")

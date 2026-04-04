@@ -6,13 +6,23 @@ defmodule HostctlWeb.EmailLive.Index do
   alias Hostctl.Settings
 
   def mount(_params, _session, socket) do
-    domains = Hosting.list_domains(socket.assigns.current_scope)
+    scope = socket.assigns.current_scope
+    is_admin = scope.user.role == "admin"
+
+    domains =
+      if is_admin do
+        Hosting.list_all_domains_with_users()
+      else
+        Hosting.list_domains(scope)
+      end
+
     all_accounts = Enum.flat_map(domains, &Hosting.list_email_accounts/1)
 
     {:ok,
      socket
      |> assign(:page_title, "Email Accounts")
      |> assign(:active_tab, :email)
+     |> assign(:is_admin?, is_admin)
      |> assign(:domains, domains)
      |> assign(:selected_domain_id, nil)
      |> assign(:accounts_empty?, all_accounts == [])
@@ -26,7 +36,7 @@ defmodule HostctlWeb.EmailLive.Index do
 
     accounts =
       if domain_id do
-        domain = Hosting.get_domain!(socket.assigns.current_scope, domain_id)
+        domain = find_domain!(socket, domain_id)
         Hosting.list_email_accounts(domain)
       else
         Enum.flat_map(socket.assigns.domains, &Hosting.list_email_accounts/1)
@@ -50,7 +60,7 @@ defmodule HostctlWeb.EmailLive.Index do
 
   def handle_event("save", %{"email_account" => params}, socket) do
     domain_id = socket.assigns.selected_domain_id || get_first_domain_id(socket)
-    domain = Hosting.get_domain!(socket.assigns.current_scope, domain_id)
+    domain = find_domain!(socket, domain_id)
 
     case Hosting.create_email_account(domain, params) do
       {:ok, account} ->
@@ -92,6 +102,14 @@ defmodule HostctlWeb.EmailLive.Index do
     case socket.assigns.domains do
       [domain | _] -> domain.id
       [] -> nil
+    end
+  end
+
+  defp find_domain!(socket, domain_id) do
+    if socket.assigns.is_admin? do
+      Hosting.get_domain_for_admin!(domain_id)
+    else
+      Hosting.get_domain!(socket.assigns.current_scope, domain_id)
     end
   end
 

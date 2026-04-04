@@ -20,7 +20,9 @@ defmodule Hostctl.Hosting.Subdomain do
     subdomain
     |> cast(attrs, [:name, :document_root, :status, :domain_name])
     |> validate_required([:name])
-    |> validate_format(:name, ~r/^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)*$/i,
+    |> validate_format(
+      :name,
+      ~r/^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)*$/i,
       message: "must contain only letters, numbers, hyphens, and dots"
     )
     |> maybe_set_document_root()
@@ -39,7 +41,11 @@ defmodule Hostctl.Hosting.Subdomain do
 
     if is_binary(subdomain_name) and subdomain_name != "" and
          is_binary(domain_name) and domain_name != "" and auto_generated? do
-      put_change(changeset, :document_root, "/var/www/#{domain_name}/#{subdomain_name}.#{domain_name}")
+      put_change(
+        changeset,
+        :document_root,
+        "/var/www/#{domain_name}/#{subdomain_name}.#{domain_name}"
+      )
     else
       changeset
     end

@@ -410,7 +410,8 @@ defmodule Hostctl.Plesk.Importer do
         # need SQL dump files (i.e. the "databases" category is selected).
         needs_backup =
           ssh_opts != nil and
-            ((!has_server_creds and Enum.any?(categories, &(&1 in ~w(databases db_users mail_accounts)))) or
+            ((!has_server_creds and
+                Enum.any?(categories, &(&1 in ~w(databases db_users mail_accounts)))) or
                (has_server_creds and "databases" in categories))
 
         {restore_opts, extract_dir} =
@@ -441,7 +442,11 @@ defmodule Hostctl.Plesk.Importer do
                 # be used for db_users/mail_accounts
                 opts =
                   if has_server_creds do
-                    Map.put_new(restore_opts, :backup_credentials, restore_opts.server_credentials)
+                    Map.put_new(
+                      restore_opts,
+                      :backup_credentials,
+                      restore_opts.server_credentials
+                    )
                   else
                     restore_opts
                   end
@@ -514,7 +519,6 @@ defmodule Hostctl.Plesk.Importer do
     if domain_records == [] do
       %{created: 0, skipped: 0, failed: 0, errors: []}
     else
-
       # Get existing records to avoid duplicates
       existing_records =
         Hostctl.Repo.all(
@@ -570,17 +574,18 @@ defmodule Hostctl.Plesk.Importer do
     subdomains = Map.get(subscription, :subdomains, [])
 
     cond do
-      is_nil(parent_item) and all_items == [] ->
-        %{created: 0, skipped: 0, failed: 0, errors: []}
-
       is_nil(ssh_opts) ->
-        %{
-          created: 0,
-          skipped: 0,
-          failed: 1,
-          errors: ["SSH connection details required to transfer web files"],
-          note: "Provide SSH credentials to enable web files rsync"
-        }
+        if parent_item == nil and all_items == [] do
+          %{created: 0, skipped: 0, failed: 0, errors: []}
+        else
+          %{
+            created: 0,
+            skipped: 0,
+            failed: 1,
+            errors: ["SSH connection details required to transfer web files"],
+            note: "Provide SSH credentials to enable web files rsync"
+          }
+        end
 
       is_nil(web_files_path) || web_files_path == "" ->
         %{
@@ -592,7 +597,13 @@ defmodule Hostctl.Plesk.Importer do
         }
 
       true ->
-        item = parent_item || List.first(all_items)
+        # When no web_files entry exists in inventory, build a synthetic item
+        # using the default Plesk path so we still attempt to rsync.
+        item =
+          parent_item ||
+            List.first(all_items) ||
+            %{domain: domain.name, system_user: nil, document_root: nil}
+
         restore_web_files_restructured(domain, item, subdomains, ssh_opts, web_files_path)
     end
   end
@@ -726,8 +737,17 @@ defmodule Hostctl.Plesk.Importer do
     if existing do
       :skipped
     else
-      # Use the original password from the backup XML when available
-      password = Map.get(mail_passwords, username, generate_random_password())
+      # Use the original password from the backup XML when available.
+      # Fall back to a random password when the backup password is empty
+      # or too short for our validation (min 8 chars).
+      backup_password = Map.get(mail_passwords, username)
+
+      password =
+        if is_binary(backup_password) and String.length(backup_password) >= 8 do
+          backup_password
+        else
+          generate_random_password()
+        end
 
       case Hosting.create_email_account(domain, %{
              username: username,
@@ -842,6 +862,7 @@ defmodule Hostctl.Plesk.Importer do
 
     # 1) Rsync the domain's document root → local httpdocs/
     local_httpdocs = Path.join(local_base_path, "httpdocs")
+
     errors =
       case ensure_local_directory(local_httpdocs) do
         :ok ->
@@ -877,7 +898,10 @@ defmodule Hostctl.Plesk.Importer do
                    chown: "www-data:www-data"
                  ) do
               :ok ->
-                Logger.info("[Importer] web_files #{domain_name}: subdomain #{sub.full_name} synced")
+                Logger.info(
+                  "[Importer] web_files #{domain_name}: subdomain #{sub.full_name} synced"
+                )
+
                 acc
 
               {:error, reason} ->
@@ -1308,8 +1332,16 @@ defmodule Hostctl.Plesk.Importer do
 
           dump_result =
             do_pg_dump_tcp(
-              ssh_opts, pg_creds.host, pg_creds.port, tmp_user, tmp_pass,
-              db_name, escaped_pg_dump, escaped_db, escaped_out, escaped_err
+              ssh_opts,
+              pg_creds.host,
+              pg_creds.port,
+              tmp_user,
+              tmp_pass,
+              db_name,
+              escaped_pg_dump,
+              escaped_db,
+              escaped_out,
+              escaped_err
             )
 
           # Always clean up the temp user
@@ -1325,9 +1357,16 @@ defmodule Hostctl.Plesk.Importer do
 
           # Fallback: try with admin credentials from DatabaseServers
           do_pg_dump_tcp(
-            ssh_opts, pg_creds.host, pg_creds.port,
-            pg_creds.admin_login, pg_creds.admin_password,
-            db_name, escaped_pg_dump, escaped_db, escaped_out, escaped_err
+            ssh_opts,
+            pg_creds.host,
+            pg_creds.port,
+            pg_creds.admin_login,
+            pg_creds.admin_password,
+            db_name,
+            escaped_pg_dump,
+            escaped_db,
+            escaped_out,
+            escaped_err
           )
       end
 
@@ -1403,8 +1442,18 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   # Run pg_dump via TCP with explicit credentials
-  defp do_pg_dump_tcp(ssh_opts, host, port, username, password,
-         db_name, escaped_pg_dump, escaped_db, escaped_out, escaped_err) do
+  defp do_pg_dump_tcp(
+         ssh_opts,
+         host,
+         port,
+         username,
+         password,
+         db_name,
+         escaped_pg_dump,
+         escaped_db,
+         escaped_out,
+         escaped_err
+       ) do
     # Force 127.0.0.1 for localhost to guarantee TCP (avoid Unix socket ident auth)
     tcp_host = if host in ["localhost", "localhost.localdomain"], do: "127.0.0.1", else: host
     escaped_host = shell_escape(tcp_host)
@@ -1435,13 +1484,15 @@ defmodule Hostctl.Plesk.Importer do
         head =
           case File.open(local_dump, [:read, :utf8]) do
             {:ok, file} ->
-              lines = Enum.reduce_while(1..15, [], fn _, acc ->
-                case IO.read(file, :line) do
-                  :eof -> {:halt, acc}
-                  {:error, _} -> {:halt, acc}
-                  line -> {:cont, [line | acc]}
-                end
-              end)
+              lines =
+                Enum.reduce_while(1..15, [], fn _, acc ->
+                  case IO.read(file, :line) do
+                    :eof -> {:halt, acc}
+                    {:error, _} -> {:halt, acc}
+                    line -> {:cont, [line | acc]}
+                  end
+                end)
+
               File.close(file)
               Enum.reverse(lines)
 
@@ -1466,14 +1517,15 @@ defmodule Hostctl.Plesk.Importer do
         if has_tables? do
           {:ok, local_dir, local_dump}
         else
-          Logger.warning("[Importer] PG dump for '#{db_name}' has no CREATE TABLE or COPY statements")
+          Logger.warning(
+            "[Importer] PG dump for '#{db_name}' has no CREATE TABLE or COPY statements"
+          )
+
           {:ok, local_dir, local_dump}
         end
 
       {:ok, %{size: size}} ->
-        Logger.warning(
-          "[Importer] PG dump for '#{db_name}' is suspiciously small: #{size} bytes"
-        )
+        Logger.warning("[Importer] PG dump for '#{db_name}' is suspiciously small: #{size} bytes")
 
         File.rm_rf(local_dir)
         {:error, "pg_dump produced empty or near-empty output (#{size} bytes)"}
@@ -1648,7 +1700,11 @@ defmodule Hostctl.Plesk.Importer do
 
       "sh -c '" <>
         "AP=/tmp/.rsync_askpass_$$; " <>
-        "printf \"#!/bin/sh\\necho " <> "'\"'\"'" <> escaped <> "'\"'\"'" <> "\\n\" > $AP; " <>
+        "printf \"#!/bin/sh\\necho " <>
+        "'\"'\"'" <>
+        escaped <>
+        "'\"'\"'" <>
+        "\\n\" > $AP; " <>
         "chmod 700 $AP; " <>
         "SUDO_ASKPASS=$AP sudo -A rsync \"$@\"; " <>
         "RC=$?; rm -f $AP; exit $RC" <>
@@ -1789,7 +1845,12 @@ defmodule Hostctl.Plesk.Importer do
     db_passwords = extract_db_passwords(content)
     mail_passwords = extract_mail_passwords(content)
     sysuser_passwords = extract_sysuser_passwords(content)
-    %{db_passwords: db_passwords, mail_passwords: mail_passwords, sysuser_passwords: sysuser_passwords}
+
+    %{
+      db_passwords: db_passwords,
+      mail_passwords: mail_passwords,
+      sysuser_passwords: sysuser_passwords
+    }
   end
 
   # Extract DB user passwords from <database>...<dbuser> elements
@@ -1854,7 +1915,8 @@ defmodule Hostctl.Plesk.Importer do
     %{
       db_passwords: Map.merge(acc.db_passwords, new.db_passwords),
       mail_passwords: Map.merge(acc.mail_passwords, new.mail_passwords),
-      sysuser_passwords: Map.merge(Map.get(acc, :sysuser_passwords, %{}), Map.get(new, :sysuser_passwords, %{}))
+      sysuser_passwords:
+        Map.merge(Map.get(acc, :sysuser_passwords, %{}), Map.get(new, :sysuser_passwords, %{}))
     }
   end
 
@@ -1870,9 +1932,12 @@ defmodule Hostctl.Plesk.Importer do
 
           _ ->
             # Fallback: pipe through zstd -d
-            System.cmd("/bin/sh", ["-c", "zstd -d -c #{shell_escape(tar_path)} | tar xf - -C #{shell_escape(dest_dir)}"],
-              stderr_to_stdout: true
-            )
+            System.cmd(
+              "/bin/sh",
+              [
+                "-c",
+                "zstd -d -c #{shell_escape(tar_path)} | tar xf - -C #{shell_escape(dest_dir)}"
+              ], stderr_to_stdout: true)
         end
 
       true ->
@@ -1930,9 +1995,14 @@ defmodule Hostctl.Plesk.Importer do
     with {:ok, import_cmd} <- local_import_command(db_name, db_type) do
       cat_cmd =
         cond do
-          String.ends_with?(dump_file, ".gz") -> "zcat"
-          String.ends_with?(dump_file, ".zst") or String.ends_with?(dump_file, ".tzst") -> "zstd -d -c"
-          true -> "cat"
+          String.ends_with?(dump_file, ".gz") ->
+            "zcat"
+
+          String.ends_with?(dump_file, ".zst") or String.ends_with?(dump_file, ".tzst") ->
+            "zstd -d -c"
+
+          true ->
+            "cat"
         end
 
       full_cmd = "#{cat_cmd} #{shell_escape(dump_file)} | #{import_cmd}"
@@ -1942,13 +2012,18 @@ defmodule Hostctl.Plesk.Importer do
       case System.cmd("/bin/sh", ["-c", full_cmd], stderr_to_stdout: true) do
         {output, 0} ->
           if output != "" do
-            Logger.info("[Importer] DB import output for '#{db_name}': #{String.slice(String.trim(output), 0, 2000)}")
+            Logger.info(
+              "[Importer] DB import output for '#{db_name}': #{String.slice(String.trim(output), 0, 2000)}"
+            )
           end
 
           :ok
 
         {output, code} ->
-          Logger.warning("[Importer] DB import failed for '#{db_name}' (exit #{code}): #{String.trim(output)}")
+          Logger.warning(
+            "[Importer] DB import failed for '#{db_name}' (exit #{code}): #{String.trim(output)}"
+          )
+
           {:error, String.trim(output)}
       end
     end
@@ -1968,8 +2043,16 @@ defmodule Hostctl.Plesk.Importer do
       true ->
         # Use the original password from the backup XML when available.
         # The key is {db_name, username} as parsed from the <database>/<dbuser> XML.
+        # Fall back to a random password when the backup password is empty
+        # or too short for our validation (min 8 chars).
+        backup_password = Map.get(db_passwords, {item.database, item.login})
+
         password =
-          Map.get(db_passwords, {item.database, item.login}, generate_random_password())
+          if is_binary(backup_password) and String.length(backup_password) >= 8 do
+            backup_password
+          else
+            generate_random_password()
+          end
 
         case Hosting.create_db_user(target_db, %{
                username: item.login,
@@ -2058,7 +2141,10 @@ defmodule Hostctl.Plesk.Importer do
             ips
 
           {:error, reason} ->
-            Logger.info("[Importer] Could not query remote IPs via SSH (#{reason}), falling back to DNS resolution")
+            Logger.info(
+              "[Importer] Could not query remote IPs via SSH (#{reason}), falling back to DNS resolution"
+            )
+
             resolve_host_ips(host)
         end
 
@@ -2080,9 +2166,7 @@ defmodule Hostctl.Plesk.Importer do
         end)
 
       if replacements != %{} do
-        Logger.info(
-          "[Importer] DNS IP replacements: #{inspect(replacements)}"
-        )
+        Logger.info("[Importer] DNS IP replacements: #{inspect(replacements)}")
       else
         Logger.warning(
           "[Importer] DNS IP replacement: no replacements built (old IPs may not match or server IPs not configured)"
