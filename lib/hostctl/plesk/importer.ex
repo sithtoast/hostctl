@@ -412,7 +412,7 @@ defmodule Hostctl.Plesk.Importer do
         # plain_backups setting and exclusion flags).
         needs_backup =
           ssh_opts != nil and
-            Enum.any?(categories, &(&1 in ~w(databases db_users mail_accounts)))
+            Enum.any?(categories, &(&1 in ~w(databases db_users mail_accounts ftp_accounts)))
 
         {restore_opts, extract_dir} =
           if needs_backup do
@@ -681,9 +681,16 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_category("ftp_accounts", domain, _subscription, inventory, _restore_opts) do
+  defp restore_category("ftp_accounts", domain, _subscription, inventory, restore_opts) do
     accounts = Map.get(inventory, "ftp_accounts", [])
-    do_restore_items(accounts, fn item -> restore_ftp_account(domain, item) end)
+    sysuser_passwords = get_in(restore_opts, [:backup_credentials, :sysuser_passwords]) || %{}
+
+    Logger.info(
+      "[Importer] Restoring #{length(accounts)} FTP account(s) for #{domain.name}, " <>
+        "#{map_size(sysuser_passwords)} sysuser password(s) available"
+    )
+
+    do_restore_items(accounts, fn item -> restore_ftp_account(domain, item, sysuser_passwords) end)
   end
 
   defp restore_category("ssl_certificates", _domain, _subscription, inventory, _restore_opts) do
@@ -2325,7 +2332,7 @@ defmodule Hostctl.Plesk.Importer do
 
   defp maybe_replace_ip(_type, value, _replacements), do: value
 
-  defp restore_ftp_account(domain, item) do
+  defp restore_ftp_account(domain, item, sysuser_passwords) do
     existing =
       domain
       |> Hosting.list_ftp_accounts()
@@ -2334,7 +2341,7 @@ defmodule Hostctl.Plesk.Importer do
     if existing do
       :skipped
     else
-      password = generate_random_password()
+      password = Map.get(sysuser_passwords, item.login) || generate_random_password()
 
       case Hosting.create_ftp_account(domain, %{
              username: item.login,
