@@ -484,7 +484,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         subscriptions: serialize_subscriptions(socket.assigns.subscriptions),
         inventory: serialize_inventory(socket.assigns.ssh_discovery),
         domain_configs: serialize_domain_configs(socket.assigns.domain_configs),
-        restore_results: serialize_restore_results(socket.assigns.restore_results)
+        restore_results: serialize_restore_results(socket.assigns.restore_results),
+        server_credentials: serialize_server_credentials(socket.assigns.server_credentials)
       }
 
       case Plesk.create_migration(socket.assigns.current_scope, attrs) do
@@ -513,6 +514,23 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     # Restore source params (sans passwords)
     form_params = Map.merge(@default_params, migration.source_params)
 
+    # Restore server credentials if saved
+    server_credentials = deserialize_server_credentials(migration.server_credentials)
+
+    creds_flash =
+      if server_credentials do
+        db_count = map_size(server_credentials.db_passwords)
+        mail_count = map_size(server_credentials.mail_passwords)
+        sys_count = map_size(server_credentials.sysuser_passwords)
+        cli_count = map_size(Map.get(server_credentials, :client_passwords, %{}))
+        ftp_count = map_size(Map.get(server_credentials, :ftpuser_passwords, %{}))
+
+        "Loaded migration \"#{migration.name}\" with #{db_count} DB, #{mail_count} mail, " <>
+          "#{sys_count} system user, #{cli_count} client/reseller, #{ftp_count} FTP password(s)."
+      else
+        "Loaded migration \"#{migration.name}\"."
+      end
+
     {:noreply,
      socket
      |> assign(:phase, :restore)
@@ -522,7 +540,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:subscriptions, subscriptions)
      |> assign(:domain_configs, domain_configs)
      |> assign(:restore_results, restore_results)
-     |> put_flash(:info, "Loaded migration \"#{migration.name}\".")}
+     |> assign(:server_credentials, server_credentials)
+     |> put_flash(:info, creds_flash)}
   end
 
   @impl true
@@ -548,7 +567,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     attrs = %{
       status: migration_status(socket.assigns.restore_results, socket.assigns.subscriptions),
       domain_configs: serialize_domain_configs(socket.assigns.domain_configs),
-      restore_results: serialize_restore_results(socket.assigns.restore_results)
+      restore_results: serialize_restore_results(socket.assigns.restore_results),
+      server_credentials: serialize_server_credentials(socket.assigns.server_credentials)
     }
 
     case Plesk.update_migration(migration, attrs) do
@@ -2352,6 +2372,50 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   defp migration_status_class(_),
     do: "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"
+
+  defp serialize_server_credentials(nil), do: %{}
+
+  defp serialize_server_credentials(credentials) do
+    # Convert atom-keyed credential maps to string keys for JSON storage.
+    # Tuple keys like {db_name, user_name} in db_passwords are serialized
+    # as "db_name:user_name" strings.
+    %{
+      "db_passwords" =>
+        Map.new(credentials.db_passwords, fn
+          {{db, user}, pass} -> {"#{db}:#{user}", pass}
+          {key, pass} -> {to_string(key), pass}
+        end),
+      "mail_passwords" => ensure_string_keys(credentials.mail_passwords),
+      "sysuser_passwords" => ensure_string_keys(Map.get(credentials, :sysuser_passwords, %{})),
+      "client_passwords" => ensure_string_keys(Map.get(credentials, :client_passwords, %{})),
+      "ftpuser_passwords" => ensure_string_keys(Map.get(credentials, :ftpuser_passwords, %{}))
+    }
+  end
+
+  defp deserialize_server_credentials(nil), do: nil
+  defp deserialize_server_credentials(creds) when creds == %{}, do: nil
+
+  defp deserialize_server_credentials(creds) do
+    # Restore atom-keyed credential maps from JSON string keys.
+    # db_passwords keys like "db_name:user_name" are restored to {db, user} tuples.
+    db_passwords =
+      creds
+      |> Map.get("db_passwords", %{})
+      |> Map.new(fn {key, pass} ->
+        case String.split(key, ":", parts: 2) do
+          [db, user] -> {{db, user}, pass}
+          _ -> {key, pass}
+        end
+      end)
+
+    %{
+      db_passwords: db_passwords,
+      mail_passwords: Map.get(creds, "mail_passwords", %{}),
+      sysuser_passwords: Map.get(creds, "sysuser_passwords", %{}),
+      client_passwords: Map.get(creds, "client_passwords", %{}),
+      ftpuser_passwords: Map.get(creds, "ftpuser_passwords", %{})
+    }
+  end
 
   defp ensure_string_keys(map) when is_map(map) do
     Map.new(map, fn {k, v} -> {to_string(k), v} end)

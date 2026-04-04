@@ -11,6 +11,7 @@ defmodule Hostctl.Plesk.Migration do
     field :inventory, :map, default: %{}
     field :domain_configs, :map, default: %{}
     field :restore_results, :map, default: %{}
+    field :server_credentials, :map, default: %{}
 
     belongs_to :user, Hostctl.Accounts.User
 
@@ -27,7 +28,8 @@ defmodule Hostctl.Plesk.Migration do
       :subscriptions,
       :inventory,
       :domain_configs,
-      :restore_results
+      :restore_results,
+      :server_credentials
     ])
     |> validate_required([:name, :source, :status])
     |> validate_inclusion(:source, ~w(backup api ssh))
