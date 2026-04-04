@@ -1096,6 +1096,36 @@ defmodule Hostctl.Plesk.Importer do
         "(pg_dump=#{pg_dump_bin}, port=#{pg_port}, user=postgres via peer auth)"
     )
 
+    # Pre-dump diagnostics: list PG clusters and tables in the target database
+    diag_prefix = build_sudo_pg_prefix(ssh_opts, rand)
+
+    cluster_cmd = "pg_lsclusters 2>/dev/null || echo '(pg_lsclusters not available)'"
+    case ssh_exec_output(ssh_opts, cluster_cmd) do
+      {:ok, output} ->
+        Logger.info("[Importer] PG clusters on remote:\n#{String.trim(output)}")
+      _ -> :ok
+    end
+
+    tables_cmd =
+      "#{diag_prefix}psql -p #{pg_port} -d #{shell_escape(db_name)} " <>
+        "-c '\\dt *.*' 2>&1; #{cleanup_askpass(ssh_opts, rand)}"
+
+    case ssh_exec_output(ssh_opts, tables_cmd) do
+      {:ok, output} ->
+        Logger.info("[Importer] Tables in '#{db_name}' (port #{pg_port}):\n#{String.trim(output)}")
+      _ -> :ok
+    end
+
+    schemas_cmd =
+      "#{diag_prefix}psql -p #{pg_port} -d #{shell_escape(db_name)} " <>
+        "-c '\\dn' 2>&1; #{cleanup_askpass(ssh_opts, rand)}"
+
+    case ssh_exec_output(ssh_opts, schemas_cmd) do
+      {:ok, output} ->
+        Logger.info("[Importer] Schemas in '#{db_name}' (port #{pg_port}):\n#{String.trim(output)}")
+      _ -> :ok
+    end
+
     escaped_pg_dump = shell_escape(pg_dump_bin)
     escaped_db = shell_escape(db_name)
     escaped_out = shell_escape(remote_dump)
@@ -1212,6 +1242,43 @@ defmodule Hostctl.Plesk.Importer do
       {:error, reason} ->
         File.rm_rf(local_dir)
         {:error, "dump file not found after download: #{inspect(reason)}"}
+    end
+  end
+
+  # Builds a sudo prefix to run psql/pg_dump as the postgres user.
+  # For password-based SSH auth, uses SUDO_ASKPASS; otherwise plain sudo.
+  defp build_sudo_pg_prefix(ssh_opts, rand) do
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    password =
+      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+
+    if auth_method == "password" and password != "" do
+      escaped_pass = String.replace(password, "'", "'\\''")
+      askpass = "/tmp/hostctl_pgask_diag_#{rand}"
+
+      "AP=#{askpass}; " <>
+        "printf '#!/bin/sh\\necho '\"'\"'#{escaped_pass}'\"'\"'\\n' > $AP && " <>
+        "chmod 700 $AP && " <>
+        "SUDO_ASKPASS=$AP sudo -A -u postgres "
+    else
+      "sudo -u postgres "
+    end
+  end
+
+  # Cleanup command for the diagnostic askpass script
+  defp cleanup_askpass(ssh_opts, rand) do
+    auth_method =
+      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
+
+    password =
+      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
+
+    if auth_method == "password" and password != "" do
+      "rm -f /tmp/hostctl_pgask_diag_#{rand}"
+    else
+      "true"
     end
   end
 
