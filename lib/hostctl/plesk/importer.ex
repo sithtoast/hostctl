@@ -307,12 +307,14 @@ defmodule Hostctl.Plesk.Importer do
     ssh_opts = Keyword.get(opts, :ssh_opts)
     web_files_path = Keyword.get(opts, :web_files_path)
     progress_pid = Keyword.get(opts, :progress_pid)
+    server_credentials = Keyword.get(opts, :server_credentials)
     domain_name = subscription.domain
 
     restore_opts = %{
       ssh_opts: ssh_opts,
       web_files_path: web_files_path,
-      progress_pid: progress_pid
+      progress_pid: progress_pid,
+      server_credentials: server_credentials
     }
 
     result = %{
@@ -400,6 +402,63 @@ defmodule Hostctl.Plesk.Importer do
       %{} ->
         progress_pid = Map.get(restore_opts, :progress_pid)
         total = length(categories)
+        ssh_opts = Map.get(restore_opts, :ssh_opts)
+        has_server_creds = Map.get(restore_opts, :server_credentials) != nil
+
+        # When server-wide credentials were pre-fetched, use those for
+        # passwords and only download a per-domain backup when we actually
+        # need SQL dump files (i.e. the "databases" category is selected).
+        needs_backup =
+          ssh_opts != nil and
+            ((!has_server_creds and Enum.any?(categories, &(&1 in ~w(databases db_users mail_accounts)))) or
+               (has_server_creds and "databases" in categories))
+
+        {restore_opts, extract_dir} =
+          if needs_backup do
+            case download_plesk_db_backup(domain_name, ssh_opts) do
+              {:ok, dir} ->
+                opts = Map.put(restore_opts, :backup_extract_dir, dir)
+
+                # Only parse per-domain credentials when no server-wide
+                # credentials were provided
+                opts =
+                  if has_server_creds do
+                    Map.put_new(opts, :backup_credentials, restore_opts.server_credentials)
+                  else
+                    credentials = parse_backup_credentials(dir)
+                    Map.put(opts, :backup_credentials, credentials)
+                  end
+
+                {opts, dir}
+
+              {:error, reason} ->
+                Logger.warning(
+                  "[Importer] Backup download failed for #{domain_name}: #{reason}. " <>
+                    "SQL dump import will be skipped."
+                )
+
+                # Even without SQL dumps, server-wide credentials can still
+                # be used for db_users/mail_accounts
+                opts =
+                  if has_server_creds do
+                    Map.put_new(restore_opts, :backup_credentials, restore_opts.server_credentials)
+                  else
+                    restore_opts
+                  end
+
+                {opts, nil}
+            end
+          else
+            # No per-domain backup needed — apply server credentials if available
+            opts =
+              if has_server_creds do
+                Map.put_new(restore_opts, :backup_credentials, restore_opts.server_credentials)
+              else
+                restore_opts
+              end
+
+            {opts, nil}
+          end
 
         category_results =
           categories
@@ -410,6 +469,9 @@ defmodule Hostctl.Plesk.Importer do
             notify_progress(progress_pid, domain_name, category, index, total, cat_result)
             Map.put(acc, category, cat_result)
           end)
+
+        # Clean up the pre-downloaded backup
+        if extract_dir, do: File.rm_rf(extract_dir)
 
         {:ok, %{result | categories: category_results}}
     end
@@ -535,9 +597,10 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_category("mail_accounts", domain, _subscription, inventory, _restore_opts) do
+  defp restore_category("mail_accounts", domain, _subscription, inventory, restore_opts) do
     accounts = Map.get(inventory, "mail_accounts", [])
-    do_restore_items(accounts, fn item -> restore_mail_account(domain, item) end)
+    mail_passwords = get_in(restore_opts, [:backup_credentials, :mail_passwords]) || %{}
+    do_restore_items(accounts, fn item -> restore_mail_account(domain, item, mail_passwords) end)
   end
 
   defp restore_category("mail_content", domain, _subscription, inventory, restore_opts) do
@@ -564,17 +627,19 @@ defmodule Hostctl.Plesk.Importer do
   defp restore_category("databases", domain, _subscription, inventory, restore_opts) do
     dbs = Map.get(inventory, "databases", [])
     ssh_opts = Map.get(restore_opts, :ssh_opts)
+    extract_dir = Map.get(restore_opts, :backup_extract_dir)
 
     if ssh_opts != nil and dbs != [] do
-      restore_databases_via_pleskbackup(domain, dbs, ssh_opts)
+      restore_databases_via_pleskbackup(domain, dbs, ssh_opts, extract_dir)
     else
       do_restore_items(dbs, fn item -> restore_database(domain, item) end)
     end
   end
 
-  defp restore_category("db_users", domain, _subscription, inventory, _restore_opts) do
+  defp restore_category("db_users", domain, _subscription, inventory, restore_opts) do
     users = Map.get(inventory, "db_users", [])
-    do_restore_items(users, fn item -> restore_db_user(domain, item) end)
+    db_passwords = get_in(restore_opts, [:backup_credentials, :db_passwords]) || %{}
+    do_restore_items(users, fn item -> restore_db_user(domain, item, db_passwords) end)
   end
 
   defp restore_category("cron_jobs", _domain, _subscription, inventory, _restore_opts) do
@@ -647,7 +712,7 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_mail_account(domain, item) do
+  defp restore_mail_account(domain, item, mail_passwords) do
     username =
       item.address
       |> String.split("@")
@@ -661,8 +726,8 @@ defmodule Hostctl.Plesk.Importer do
     if existing do
       :skipped
     else
-      # Create with a random password since we can't recover the original
-      password = generate_random_password()
+      # Use the original password from the backup XML when available
+      password = Map.get(mail_passwords, username, generate_random_password())
 
       case Hosting.create_email_account(domain, %{
              username: username,
@@ -960,7 +1025,7 @@ defmodule Hostctl.Plesk.Importer do
   # into the corresponding local database.
   # ---------------------------------------------------------------------------
 
-  defp restore_databases_via_pleskbackup(domain, dbs, ssh_opts) do
+  defp restore_databases_via_pleskbackup(domain, dbs, ssh_opts, extract_dir) do
     # Partition databases by type — pleskbackup only includes MySQL dumps,
     # so PostgreSQL databases need a separate pg_dump-over-SSH path.
     {pg_dbs, mysql_dbs} =
@@ -974,7 +1039,7 @@ defmodule Hostctl.Plesk.Importer do
 
     mysql_results =
       if mysql_dbs != [] do
-        restore_mysql_databases_via_pleskbackup(domain, mysql_dbs, ssh_opts)
+        restore_mysql_databases_via_pleskbackup(domain, mysql_dbs, ssh_opts, extract_dir)
       else
         %{created: 0, skipped: 0, failed: 0, errors: []}
       end
@@ -999,16 +1064,36 @@ defmodule Hostctl.Plesk.Importer do
   # MySQL: pleskbackup-based database import
   # ---------------------------------------------------------------------------
 
-  defp restore_mysql_databases_via_pleskbackup(domain, dbs, ssh_opts) do
+  defp restore_mysql_databases_via_pleskbackup(domain, dbs, ssh_opts, pre_extract_dir) do
     # Step 1: Create all database entries in hostctl
     db_statuses =
       Enum.map(dbs, fn item ->
         {item, restore_database(domain, item)}
       end)
 
-    # Step 2: Run pleskbackup, download, extract, and import
-    case download_plesk_db_backup(domain.name, ssh_opts) do
-      {:ok, extract_dir} ->
+    # Step 2: Use pre-downloaded backup dir if available, otherwise download now
+    {extract_dir, should_cleanup} =
+      if pre_extract_dir != nil and File.exists?(pre_extract_dir) do
+        {pre_extract_dir, false}
+      else
+        case download_plesk_db_backup(domain.name, ssh_opts) do
+          {:ok, dir} -> {dir, true}
+          {:error, _} = err -> {err, false}
+        end
+      end
+
+    case extract_dir do
+      {:error, reason} ->
+        results =
+          Enum.map(db_statuses, fn
+            {_item, {:failed, _} = status} -> status
+            {item, :created} -> {:failed, "#{item.name}: created but backup failed - #{reason}"}
+            {item, _} -> {:failed, "#{item.name}: backup failed - #{reason}"}
+          end)
+
+        tally_restore_results(results)
+
+      dir when is_binary(dir) ->
         results =
           Enum.map(db_statuses, fn
             {_item, {:failed, _} = status} ->
@@ -1043,23 +1128,7 @@ defmodule Hostctl.Plesk.Importer do
               end
           end)
 
-        File.rm_rf(extract_dir)
-        tally_restore_results(results)
-
-      {:error, reason} ->
-        # Backup failed — report database creation results + backup error
-        results =
-          Enum.map(db_statuses, fn
-            {_item, {:failed, _} = status} ->
-              status
-
-            {item, :created} ->
-              {:failed, "#{item.name}: created but backup failed - #{reason}"}
-
-            {item, _} ->
-              {:failed, "#{item.name}: backup failed - #{reason}"}
-          end)
-
+        if should_cleanup, do: File.rm_rf(dir)
         tally_restore_results(results)
     end
   end
@@ -1423,6 +1492,50 @@ defmodule Hostctl.Plesk.Importer do
     end)
   end
 
+  @doc """
+  Downloads a server-wide config-only backup from a remote Plesk server.
+
+  Runs `pleskbackup --server -include-server-settings` with all content
+  excluded (files, mail, logs, databases) so only configuration/credentials
+  are captured. The backup is downloaded, extracted, and all credentials are
+  parsed from every `backup_info_*.xml` across domains, resellers, and clients.
+
+  Returns `{:ok, credentials}` where credentials is a map with keys:
+    - `:db_passwords`   — `%{{db_name, username} => password}`
+    - `:mail_passwords` — `%{email_username => password}`
+    - `:sysuser_passwords` — `%{system_username => password}`
+  """
+  def download_plesk_server_config_backup(ssh_opts) do
+    rand = :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false) |> String.slice(0, 8)
+    remote_tar = "/tmp/hostctl_serverconf_#{rand}.tar"
+    local_dir = Path.join(System.tmp_dir!(), "hostctl_serverconf_#{rand}")
+    local_tar = Path.join(local_dir, "backup.tar")
+
+    File.mkdir_p!(local_dir)
+
+    sudo_prefix = sudo_prefix(ssh_opts)
+
+    backup_cmd =
+      "#{sudo_prefix}plesk bin pleskbackup --server" <>
+        " -include-server-settings" <>
+        " -exclude-files -exclude-mail -exclude-logs -exclude-databases" <>
+        " -output-file #{shell_escape(remote_tar)}"
+
+    with :ok <- ssh_exec(ssh_opts, backup_cmd),
+         :ok <- scp_download(ssh_opts, remote_tar, local_tar),
+         _ <- ssh_exec(ssh_opts, "rm -f #{shell_escape(remote_tar)}"),
+         :ok <- extract_backup_archives(local_dir) do
+      credentials = parse_backup_credentials(local_dir)
+      File.rm_rf(local_dir)
+      {:ok, credentials}
+    else
+      {:error, reason} ->
+        File.rm_rf(local_dir)
+        ssh_exec(ssh_opts, "rm -f #{shell_escape(remote_tar)}")
+        {:error, reason}
+    end
+  end
+
   defp download_plesk_db_backup(domain_name, ssh_opts) do
     rand = :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false) |> String.slice(0, 8)
     remote_tar = "/tmp/hostctl_dbexport_#{rand}.tar"
@@ -1636,6 +1749,115 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # Backup credential extraction
+  # ---------------------------------------------------------------------------
+  # Plesk backup_info_*.xml files contain plaintext passwords for database
+  # users (inside <dbuser>) and email accounts (inside <mailuser>).
+  # We parse these so we can preserve the original passwords during import.
+  # ---------------------------------------------------------------------------
+
+  @doc false
+  def parse_backup_credentials(extract_dir) do
+    xml_files =
+      Path.wildcard("#{extract_dir}/**/backup_info_*.xml") ++
+        Path.wildcard("#{extract_dir}/**/dump.xml")
+
+    credentials =
+      Enum.reduce(
+        xml_files,
+        %{db_passwords: %{}, mail_passwords: %{}, sysuser_passwords: %{}},
+        fn xml_file, acc ->
+          case File.read(xml_file) do
+            {:ok, content} -> merge_credentials(acc, extract_credentials_from_xml(content))
+            {:error, _} -> acc
+          end
+        end
+      )
+
+    Logger.info(
+      "[Importer] Parsed backup credentials: " <>
+        "#{map_size(credentials.db_passwords)} DB user(s), " <>
+        "#{map_size(credentials.mail_passwords)} mail account(s), " <>
+        "#{map_size(credentials.sysuser_passwords)} system user(s)"
+    )
+
+    credentials
+  end
+
+  defp extract_credentials_from_xml(content) do
+    db_passwords = extract_db_passwords(content)
+    mail_passwords = extract_mail_passwords(content)
+    sysuser_passwords = extract_sysuser_passwords(content)
+    %{db_passwords: db_passwords, mail_passwords: mail_passwords, sysuser_passwords: sysuser_passwords}
+  end
+
+  # Extract DB user passwords from <database>...<dbuser> elements
+  # Structure: <database name="dbname" type="mysql|postgresql">
+  #              <dbuser name="username">
+  #                <password type="plain">thepassword</password>
+  #              </dbuser>
+  #            </database>
+  defp extract_db_passwords(content) do
+    # Match each <database ...>...</database> block
+    ~r/<database\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/database>/s
+    |> Regex.scan(content)
+    |> Enum.flat_map(fn [_full, db_name, db_block] ->
+      # Find all <dbuser> entries within this database block
+      ~r/<dbuser\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/dbuser>/s
+      |> Regex.scan(db_block)
+      |> Enum.flat_map(fn [_full, user_name, user_block] ->
+        case Regex.run(~r/<password[^>]*>([^<]+)<\/password>/, user_block) do
+          [_, password] -> [{{db_name, user_name}, password}]
+          _ -> []
+        end
+      end)
+    end)
+    |> Map.new()
+  end
+
+  # Extract mail user passwords from <mailuser> elements
+  # Structure: <mailuser name="username" ...>
+  #              <properties>
+  #                <password type="plain">thepassword</password>
+  #              </properties>
+  #            </mailuser>
+  defp extract_mail_passwords(content) do
+    ~r/<mailuser\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/mailuser>/s
+    |> Regex.scan(content)
+    |> Enum.flat_map(fn [_full, username, user_block] ->
+      case Regex.run(~r/<password[^>]*>([^<]+)<\/password>/, user_block) do
+        [_, password] -> [{username, password}]
+        _ -> []
+      end
+    end)
+    |> Map.new()
+  end
+
+  # Extract system user passwords from <sysuser> elements
+  # Structure: <sysuser name="username" quota="0" shell="/bin/false">
+  #              <password type="plain">thepassword</password>
+  #            </sysuser>
+  defp extract_sysuser_passwords(content) do
+    ~r/<sysuser\s[^>]*name="([^"]+)"[^>]*>(.+?)<\/sysuser>/s
+    |> Regex.scan(content)
+    |> Enum.flat_map(fn [_full, username, user_block] ->
+      case Regex.run(~r/<password[^>]*>([^<]+)<\/password>/, user_block) do
+        [_, password] -> [{username, password}]
+        _ -> []
+      end
+    end)
+    |> Map.new()
+  end
+
+  defp merge_credentials(acc, new) do
+    %{
+      db_passwords: Map.merge(acc.db_passwords, new.db_passwords),
+      mail_passwords: Map.merge(acc.mail_passwords, new.mail_passwords),
+      sysuser_passwords: Map.merge(Map.get(acc, :sysuser_passwords, %{}), Map.get(new, :sysuser_passwords, %{}))
+    }
+  end
+
   defp extract_tar(tar_path, dest_dir) do
     cond do
       String.ends_with?(tar_path, ".zst") or String.ends_with?(tar_path, ".tzst") ->
@@ -1732,7 +1954,7 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp restore_db_user(domain, item) do
+  defp restore_db_user(domain, item, db_passwords) do
     databases = Hosting.list_databases(domain)
     target_db = Enum.find(databases, &(&1.name == item.database))
 
@@ -1744,7 +1966,10 @@ defmodule Hostctl.Plesk.Importer do
         :skipped
 
       true ->
-        password = generate_random_password()
+        # Use the original password from the backup XML when available.
+        # The key is {db_name, username} as parsed from the <database>/<dbuser> XML.
+        password =
+          Map.get(db_passwords, {item.database, item.login}, generate_random_password())
 
         case Hosting.create_db_user(target_db, %{
                username: item.login,

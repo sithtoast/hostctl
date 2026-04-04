@@ -76,6 +76,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:restore_results, %{})
      |> assign(:restore_progress, %{})
      |> assign(:restore_task_refs, %{})
+     |> assign(:server_credentials, nil)
+     |> assign(:server_creds_task_ref, nil)
+     |> assign(:server_creds_loading, false)
      |> assign(:accounts, load_accounts())
      |> assign(:creating_account, false)
      |> assign(:new_account_form, to_form(%{"name" => "", "email" => ""}, as: :account))
@@ -131,7 +134,10 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:domain_configs, %{})
      |> assign(:restore_results, %{})
      |> assign(:restore_progress, %{})
-     |> assign(:restore_task_refs, %{})}
+     |> assign(:restore_task_refs, %{})
+     |> assign(:server_credentials, nil)
+     |> assign(:server_creds_task_ref, nil)
+     |> assign(:server_creds_loading, false)}
   end
 
   @impl true
@@ -334,6 +340,25 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   end
 
   @impl true
+  def handle_event("download_server_credentials", _params, socket) do
+    if socket.assigns.server_creds_loading || socket.assigns.server_credentials do
+      {:noreply, socket}
+    else
+      ssh_opts = build_ssh_opts(socket.assigns.form_params)
+
+      task =
+        Task.async(fn ->
+          {:server_creds_result, Importer.download_plesk_server_config_backup(ssh_opts)}
+        end)
+
+      {:noreply,
+       socket
+       |> assign(:server_creds_loading, true)
+       |> assign(:server_creds_task_ref, task.ref)}
+    end
+  end
+
+  @impl true
   def handle_event("restore_domain", %{"domain" => domain}, socket) do
     # Ignore if already restoring or restored
     if Map.has_key?(socket.assigns.restore_task_refs, domain) or
@@ -533,6 +558,47 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> put_flash(:error, "Discovery failed unexpectedly: #{inspect(reason)}")}
   end
 
+  # Server config backup credentials completed
+  @impl true
+  def handle_info({ref, {:server_creds_result, result}}, socket)
+      when ref == socket.assigns.server_creds_task_ref do
+    Process.demonitor(ref, [:flush])
+
+    socket =
+      socket
+      |> assign(:server_creds_loading, false)
+      |> assign(:server_creds_task_ref, nil)
+
+    case result do
+      {:ok, credentials} ->
+        db_count = map_size(credentials.db_passwords)
+        mail_count = map_size(credentials.mail_passwords)
+        sys_count = map_size(credentials.sysuser_passwords)
+
+        {:noreply,
+         socket
+         |> assign(:server_credentials, credentials)
+         |> put_flash(
+           :info,
+           "Server credentials loaded: #{db_count} DB, #{mail_count} mail, #{sys_count} system user password(s)."
+         )}
+
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, "Server config backup failed: #{reason}")}
+    end
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, socket)
+      when ref == socket.assigns.server_creds_task_ref do
+    {:noreply,
+     socket
+     |> assign(:server_creds_loading, false)
+     |> assign(:server_creds_task_ref, nil)
+     |> put_flash(:error, "Server config backup crashed: #{inspect(reason)}")}
+  end
+
   # Restore task completed
   @impl true
   def handle_info({ref, {:restore_result, domain, result}}, socket) do
@@ -623,6 +689,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
     ssh_opts = build_ssh_opts(socket.assigns.form_params)
     web_files_path = Map.get(config, :web_files_path, "/var/www/#{domain}")
+    server_credentials = socket.assigns.server_credentials
     lv_pid = self()
 
     task =
@@ -633,7 +700,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             apply_dns_template: apply_dns,
             ssh_opts: ssh_opts,
             web_files_path: web_files_path,
-            progress_pid: lv_pid
+            progress_pid: lv_pid,
+            server_credentials: server_credentials
           )
 
         {:restore_result, domain, result}
@@ -1152,6 +1220,54 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-indigo-300 dark:border-indigo-700 text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
           >
             <.icon name="hero-user-plus" class="w-4 h-4" /> New Account
+          </button>
+
+          <button
+            id="plesk-download-server-creds-btn"
+            phx-click="download_server_credentials"
+            disabled={@server_creds_loading || @server_credentials != nil || @form_params["source"] != "ssh"}
+            class={[
+              "inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+              cond do
+                @server_credentials != nil ->
+                  "border-green-300 dark:border-green-700 text-green-700 dark:text-green-300 bg-green-50 dark:bg-green-900/20 cursor-default"
+                @server_creds_loading ->
+                  "border-gray-300 dark:border-gray-600 text-gray-400 cursor-not-allowed"
+                true ->
+                  "border-purple-300 dark:border-purple-700 text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-900/30"
+              end
+            ]}
+          >
+            <%= cond do %>
+              <% @server_creds_loading -> %>
+                <svg
+                  class="animate-spin w-4 h-4"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    class="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    stroke-width="4"
+                  >
+                  </circle>
+                  <path
+                    class="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                  >
+                  </path>
+                </svg>
+                Downloading server credentials...
+              <% @server_credentials != nil -> %>
+                <.icon name="hero-check-circle" class="w-4 h-4" /> Credentials Loaded
+              <% true -> %>
+                <.icon name="hero-key" class="w-4 h-4" /> Download Server Credentials
+            <% end %>
           </button>
 
           <button
