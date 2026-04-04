@@ -1019,7 +1019,9 @@ defmodule Hostctl.Plesk.Importer do
             status
 
           _ ->
-            case dump_pg_database_via_ssh(item.name, ssh_opts, pg_creds) do
+            plesk_domain = Map.get(item, :domain) || Map.get(item, "domain")
+
+            case dump_pg_database_via_ssh(item.name, plesk_domain, ssh_opts, pg_creds) do
               {:ok, local_dir, dump_file} ->
                 result = import_sql_file(dump_file, item.name, "postgresql")
                 File.rm_rf(local_dir)
@@ -1111,7 +1113,7 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp dump_pg_database_via_ssh(db_name, ssh_opts, pg_creds) do
+  defp dump_pg_database_via_ssh(db_name, plesk_domain, ssh_opts, pg_creds) do
     rand =
       :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false) |> String.slice(0, 8)
 
@@ -1147,7 +1149,7 @@ defmodule Hostctl.Plesk.Importer do
     # pg_dump with PGPASSWORD, then remove the temp user. Plesk manages
     # pg_hba.conf so users it creates can authenticate via md5/scram.
     result =
-      case create_plesk_temp_pg_user(ssh_opts, db_name, rand) do
+      case create_plesk_temp_pg_user(ssh_opts, db_name, plesk_domain, pg_creds, rand) do
         {:ok, tmp_user, tmp_pass} ->
           Logger.info(
             "[Importer] Dumping PG DB '#{db_name}' with Plesk temp user '#{tmp_user}' " <>
@@ -1199,21 +1201,30 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  defp create_plesk_temp_pg_user(ssh_opts, db_name, rand) do
+  defp create_plesk_temp_pg_user(ssh_opts, db_name, plesk_domain, pg_creds, rand) do
     sudo = sudo_prefix(ssh_opts)
     tmp_user = "hostctl_tmp_#{rand}"
     tmp_pass = :crypto.strong_rand_bytes(24) |> Base.url_encode64(padding: false)
+    escaped_db = String.replace(db_name, "'", "'\\''")
+    escaped_pass = String.replace(tmp_pass, "'", "'\\''")
+    escaped_domain = String.replace(plesk_domain || "", "'", "'\\''")
+    server_spec = "#{pg_creds.host}:#{pg_creds.port}"
 
-    Logger.info("[Importer] Creating Plesk temp PG user '#{tmp_user}' for DB '#{db_name}'")
+    Logger.info(
+      "[Importer] Creating Plesk temp PG user '#{tmp_user}' " <>
+        "for DB '#{db_name}' (domain=#{plesk_domain}, server=#{server_spec})"
+    )
 
-    # Create the user with access to all databases (superuser-like for dump)
+    # Create a Plesk DB user bound to the specific database and domain.
+    # Plesk manages pg_hba.conf for users it creates, so they can auth via md5.
     create_cmd =
       "#{sudo}plesk bin database --create-dbuser " <>
         "'#{tmp_user}' " <>
-        "-passwd '#{String.replace(tmp_pass, "'", "'\\''")}' " <>
+        "-passwd '#{escaped_pass}' " <>
         "-type postgresql " <>
-        "-server localhost:5432 " <>
-        "-database '#{String.replace(db_name, "'", "'\\''")}' 2>&1"
+        "-domain '#{escaped_domain}' " <>
+        "-server #{server_spec} " <>
+        "-database '#{escaped_db}' 2>&1"
 
     case ssh_exec_output(ssh_opts, create_cmd) do
       {:ok, output} ->
@@ -1412,7 +1423,7 @@ defmodule Hostctl.Plesk.Importer do
       normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
 
     if auth_method == "password" and password != "" do
-      "echo #{shell_escape(password)} | sudo -S "
+      "echo #{shell_escape(password)} | sudo -S -p '' "
     else
       "sudo "
     end
