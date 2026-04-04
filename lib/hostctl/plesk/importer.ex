@@ -1224,7 +1224,8 @@ defmodule Hostctl.Plesk.Importer do
         "-type postgresql " <>
         "-domain '#{escaped_domain}' " <>
         "-server #{server_spec} " <>
-        "-database '#{escaped_db}' 2>&1"
+        "-database '#{escaped_db}' " <>
+        "-all-databases 2>&1"
 
     case ssh_exec_output(ssh_opts, create_cmd) do
       {:ok, output} ->
@@ -1254,7 +1255,9 @@ defmodule Hostctl.Plesk.Importer do
   # Run pg_dump via TCP with explicit credentials
   defp do_pg_dump_tcp(ssh_opts, host, port, username, password,
          db_name, escaped_pg_dump, escaped_db, escaped_out, escaped_err) do
-    escaped_host = shell_escape(host)
+    # Force 127.0.0.1 for localhost to guarantee TCP (avoid Unix socket ident auth)
+    tcp_host = if host in ["localhost", "localhost.localdomain"], do: "127.0.0.1", else: host
+    escaped_host = shell_escape(tcp_host)
     escaped_user = shell_escape(username)
     escaped_pg_pass = shell_escape(password)
 
