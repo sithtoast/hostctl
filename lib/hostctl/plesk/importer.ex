@@ -1143,26 +1143,40 @@ defmodule Hostctl.Plesk.Importer do
     remote_err = "/tmp/hostctl_pgdump_err_#{rand}.log"
     escaped_err = shell_escape(remote_err)
 
-    # Strategy 1: Try TCP with PGPASSWORD (works for remote PG servers and
-    # servers with md5/scram auth in pg_hba.conf).
-    tcp_result = try_pg_dump_tcp(ssh_opts, pg_creds, db_name, escaped_pg_dump,
-      escaped_db, escaped_out, escaped_err, remote_err, rand)
-
+    # Strategy: Create a temporary Plesk DB user with superuser-like access,
+    # pg_dump with PGPASSWORD, then remove the temp user. Plesk manages
+    # pg_hba.conf so users it creates can authenticate via md5/scram.
     result =
-      case tcp_result do
-        {:ok, _} ->
-          tcp_result
-
-        {:error, tcp_reason} ->
-          # Strategy 2: Fall back to sudo -u postgres (peer auth via Unix socket).
-          # This works when PG is local and pg_hba.conf uses ident for TCP.
-          Logger.warning(
-            "[Importer] TCP pg_dump failed for '#{db_name}': #{tcp_reason}. " <>
-              "Falling back to sudo -u postgres (peer auth)..."
+      case create_plesk_temp_pg_user(ssh_opts, db_name, rand) do
+        {:ok, tmp_user, tmp_pass} ->
+          Logger.info(
+            "[Importer] Dumping PG DB '#{db_name}' with Plesk temp user '#{tmp_user}' " <>
+              "(host=#{pg_creds.host}, port=#{pg_creds.port})"
           )
 
-          try_pg_dump_peer(ssh_opts, pg_creds, db_name, pg_dump_bin, escaped_pg_dump,
-            escaped_db, escaped_out, escaped_err, remote_err, rand)
+          dump_result =
+            do_pg_dump_tcp(
+              ssh_opts, pg_creds.host, pg_creds.port, tmp_user, tmp_pass,
+              db_name, escaped_pg_dump, escaped_db, escaped_out, escaped_err
+            )
+
+          # Always clean up the temp user
+          remove_plesk_temp_pg_user(ssh_opts, tmp_user)
+
+          dump_result
+
+        {:error, reason} ->
+          Logger.warning(
+            "[Importer] Could not create Plesk temp PG user: #{reason}. " <>
+              "Trying admin credentials..."
+          )
+
+          # Fallback: try with admin credentials from DatabaseServers
+          do_pg_dump_tcp(
+            ssh_opts, pg_creds.host, pg_creds.port,
+            pg_creds.admin_login, pg_creds.admin_password,
+            db_name, escaped_pg_dump, escaped_db, escaped_out, escaped_err
+          )
       end
 
     case result do
@@ -1185,69 +1199,67 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
-  # TCP connection with PGPASSWORD
-  defp try_pg_dump_tcp(ssh_opts, pg_creds, db_name, escaped_pg_dump,
-         escaped_db, escaped_out, escaped_err, _remote_err, _rand) do
-    escaped_host = shell_escape(pg_creds.host)
-    escaped_user = shell_escape(pg_creds.admin_login)
-    escaped_pg_pass = shell_escape(pg_creds.admin_password)
+  defp create_plesk_temp_pg_user(ssh_opts, db_name, rand) do
+    sudo = sudo_prefix(ssh_opts)
+    tmp_user = "hostctl_tmp_#{rand}"
+    tmp_pass = :crypto.strong_rand_bytes(24) |> Base.url_encode64(padding: false)
+
+    Logger.info("[Importer] Creating Plesk temp PG user '#{tmp_user}' for DB '#{db_name}'")
+
+    # Create the user with access to all databases (superuser-like for dump)
+    create_cmd =
+      "#{sudo}plesk bin database --create-dbuser " <>
+        "'#{tmp_user}' " <>
+        "-passwd '#{String.replace(tmp_pass, "'", "'\\''")}' " <>
+        "-type postgresql " <>
+        "-server localhost:5432 " <>
+        "-database '#{String.replace(db_name, "'", "'\\''")}' 2>&1"
+
+    case ssh_exec_output(ssh_opts, create_cmd) do
+      {:ok, output} ->
+        Logger.info("[Importer] Plesk temp user created: #{String.trim(output)}")
+        {:ok, tmp_user, tmp_pass}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp remove_plesk_temp_pg_user(ssh_opts, tmp_user) do
+    sudo = sudo_prefix(ssh_opts)
+
+    remove_cmd =
+      "#{sudo}plesk bin database --remove-dbuser '#{tmp_user}' -type postgresql 2>&1"
+
+    case ssh_exec_output(ssh_opts, remove_cmd) do
+      {:ok, _} ->
+        Logger.info("[Importer] Removed Plesk temp PG user '#{tmp_user}'")
+
+      {:error, reason} ->
+        Logger.warning("[Importer] Failed to remove temp PG user '#{tmp_user}': #{reason}")
+    end
+  end
+
+  # Run pg_dump via TCP with explicit credentials
+  defp do_pg_dump_tcp(ssh_opts, host, port, username, password,
+         db_name, escaped_pg_dump, escaped_db, escaped_out, escaped_err) do
+    escaped_host = shell_escape(host)
+    escaped_user = shell_escape(username)
+    escaped_pg_pass = shell_escape(password)
 
     Logger.info(
-      "[Importer] Trying pg_dump for '#{db_name}' via TCP " <>
-        "(host=#{pg_creds.host}, port=#{pg_creds.port}, user=#{pg_creds.admin_login})"
+      "[Importer] pg_dump '#{db_name}' via TCP (host=#{host}, port=#{port}, user=#{username})"
     )
 
     dump_cmd =
       "cd /tmp && " <>
         "PGPASSWORD=#{escaped_pg_pass} " <>
         "#{escaped_pg_dump} --no-owner --no-acl " <>
-        "-h #{escaped_host} -p #{pg_creds.port} -U #{escaped_user} " <>
+        "-h #{escaped_host} -p #{port} -U #{escaped_user} " <>
         "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
         "RC=$?; " <>
         "ERR=$(cat #{escaped_err} 2>/dev/null); rm -f #{escaped_err}; " <>
         "if [ $RC -ne 0 ]; then echo \"$ERR\" >&2; exit $RC; fi"
-
-    ssh_exec_output(ssh_opts, dump_cmd)
-  end
-
-  # Peer auth via sudo -u postgres (Unix socket, no -h flag)
-  defp try_pg_dump_peer(ssh_opts, pg_creds, db_name, _pg_dump_bin, escaped_pg_dump,
-         escaped_db, escaped_out, escaped_err, _remote_err, rand) do
-    Logger.info(
-      "[Importer] Trying pg_dump for '#{db_name}' via peer auth " <>
-        "(sudo -u postgres, port=#{pg_creds.port})"
-    )
-
-    auth_method =
-      normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method"))
-
-    password =
-      normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password"))
-
-    dump_cmd =
-      if auth_method == "password" and password != "" do
-        escaped_pass = String.replace(password, "'", "'\\''")
-        askpass = "/tmp/hostctl_pgask_#{rand}"
-
-        "AP=#{askpass}; " <>
-          "printf '#!/bin/sh\\necho '\"'\"'#{escaped_pass}'\"'\"'\\n' > $AP && " <>
-          "chmod 700 $AP && " <>
-          "cd /tmp && " <>
-          "SUDO_ASKPASS=$AP sudo -A -u postgres " <>
-          "#{escaped_pg_dump} --no-owner --no-acl -p #{pg_creds.port} " <>
-          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
-          "RC=$?; rm -f $AP; " <>
-          "ERR=$(cat #{escaped_err} 2>/dev/null); rm -f #{escaped_err}; " <>
-          "if [ $RC -ne 0 ]; then echo \"$ERR\" >&2; exit $RC; fi"
-      else
-        "cd /tmp && " <>
-          "sudo -u postgres " <>
-          "#{escaped_pg_dump} --no-owner --no-acl -p #{pg_creds.port} " <>
-          "#{escaped_db} > #{escaped_out} 2>#{escaped_err}; " <>
-          "RC=$?; " <>
-          "ERR=$(cat #{escaped_err} 2>/dev/null); rm -f #{escaped_err}; " <>
-          "if [ $RC -ne 0 ]; then echo \"$ERR\" >&2; exit $RC; fi"
-      end
 
     ssh_exec_output(ssh_opts, dump_cmd)
   end
