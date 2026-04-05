@@ -88,6 +88,21 @@ defmodule Hostctl.Accounts do
   end
 
   @doc """
+  Sets a password on an existing panel user who has no password yet (unconfirmed).
+  Returns `{:ok, user}` on success, `:already_confirmed` if the user already
+  has a password, or `{:error, changeset}` on validation failure.
+  """
+  def set_panel_user_password(%User{} = user, password) do
+    if user.confirmed_at do
+      :already_confirmed
+    else
+      user
+      |> User.panel_user_changeset(%{password: password})
+      |> Repo.update()
+    end
+  end
+
+  @doc """
   Returns an `%Ecto.Changeset{}` for a panel user form.
   """
   def change_panel_user(%User{} = user, attrs \\ %{}, opts \\ []) do

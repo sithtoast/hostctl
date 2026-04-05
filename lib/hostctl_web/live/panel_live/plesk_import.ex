@@ -276,7 +276,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   @impl true
   def handle_event("auto_create_accounts", _params, socket) do
     subscriptions = socket.assigns.subscriptions
-    existing_emails = MapSet.new(socket.assigns.accounts, & &1.email)
+    existing_accounts = Map.new(socket.assigns.accounts, &{&1.email, &1})
+    existing_emails = MapSet.new(Map.keys(existing_accounts))
 
     # System user and client/reseller passwords from server config backup
     {sysuser_passwords, client_passwords} =
@@ -294,9 +295,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       end)
       |> Map.delete(nil)
 
-    {created, skipped, configs} =
-      Enum.reduce(owner_groups, {0, 0, socket.assigns.domain_configs}, fn
-        {_key, subs}, {created, skipped, configs} ->
+    {created, skipped, pw_updated, configs} =
+      Enum.reduce(owner_groups, {0, 0, 0, socket.assigns.domain_configs}, fn
+        {_key, subs}, {created, skipped, pw_updated, configs} ->
           sample = hd(subs)
           email = Map.get(sample, :owner_email)
           name = Map.get(sample, :owner_name) || Map.get(sample, :owner_login) || "User"
@@ -311,25 +312,42 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               email
             end
 
+          # Look up the Plesk password: try system user first, then
+          # client/reseller login name (which matches owner_login).
+          owner_login = Map.get(sample, :owner_login)
+
+          plesk_password =
+            Map.get(sysuser_passwords, system_user) ||
+              Map.get(client_passwords, owner_login) ||
+              Map.get(client_passwords, system_user)
+
           if MapSet.member?(existing_emails, email) do
-            # Account exists — just assign domains
+            # Account exists — assign domains
             configs =
               Enum.reduce(subs, configs, fn sub, acc ->
                 config = Map.get(acc, sub.domain, %{})
                 Map.put(acc, sub.domain, Map.put(config, :account_email, email))
               end)
 
-            {created, skipped + 1, configs}
+            # If account has no password yet and we have one, set it now
+            existing_user = Map.get(existing_accounts, email)
+            pw_bump =
+              if is_binary(plesk_password) and String.length(plesk_password) >= 8 and
+                   existing_user != nil do
+                case Accounts.set_panel_user_password(existing_user, plesk_password) do
+                  {:ok, _user} ->
+                    Logger.info("[PleskImport] Set Plesk password on existing account #{email}")
+                    1
+
+                  _ ->
+                    0
+                end
+              else
+                0
+              end
+
+            {created, skipped + 1, pw_updated + pw_bump, configs}
           else
-            # Look up the Plesk password: try system user first, then
-            # client/reseller login name (which matches owner_login).
-            owner_login = Map.get(sample, :owner_login)
-
-            plesk_password =
-              Map.get(sysuser_passwords, system_user) ||
-                Map.get(client_passwords, owner_login) ||
-                Map.get(client_passwords, system_user)
-
             Logger.info(
               "[PleskImport] Auto-create account #{email}: " <>
                 "system_user=#{inspect(system_user)}, " <>
@@ -354,27 +372,33 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                     Map.put(acc, sub.domain, Map.put(config, :account_email, email))
                   end)
 
-                {created + 1, skipped, configs}
+                {created + 1, skipped, pw_updated, configs}
 
               {:error, _changeset} ->
-                {created, skipped, configs}
+                {created, skipped, pw_updated, configs}
             end
           end
       end)
 
+    flash_parts = []
+
+    flash_parts =
+      if created > 0, do: flash_parts ++ ["created #{created}"], else: flash_parts
+
+    flash_parts =
+      if skipped > 0, do: flash_parts ++ ["#{skipped} already existed"], else: flash_parts
+
+    flash_parts =
+      if pw_updated > 0,
+        do: flash_parts ++ ["#{pw_updated} password(s) updated from Plesk"],
+        else: flash_parts
+
     flash =
-      cond do
-        created > 0 and skipped > 0 ->
-          "Created #{created} account(s), #{skipped} already existed. Domains assigned."
-
-        created > 0 ->
-          "Created #{created} account(s) and assigned domains."
-
-        skipped > 0 ->
-          "All #{skipped} account(s) already exist. Domains assigned."
-
-        true ->
-          "No Plesk owner information available to create accounts."
+      if flash_parts == [] do
+        "No Plesk owner information available to create accounts."
+      else
+        parts = Enum.join(flash_parts, ", ")
+        "Accounts: #{parts}. Domains assigned."
       end
 
     {:noreply,
