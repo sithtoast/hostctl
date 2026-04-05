@@ -791,7 +791,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   defp launch_restore_task(socket, domain, scope, config, categories) do
     subscription = Enum.find(socket.assigns.subscriptions, &(&1.domain == domain))
-    inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, domain)
+    inventory = filter_inventory_for_domain(socket.assigns.ssh_discovery, domain, subscription)
     apply_dns = normalize_boolean(socket.assigns.form_params["apply_dns_template"])
     ssh_opts = build_ssh_opts(socket.assigns.form_params)
     web_files_path = Map.get(config, :web_files_path, "/var/www/#{domain}")
@@ -2075,6 +2075,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   defp count_inventory_per_domain(subscription, discovery) do
     domain = subscription.domain
+    system_user = Map.get(subscription, :system_user)
     inv = discovery.inventory
 
     %{
@@ -2088,17 +2089,30 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       "db_users" => inv |> Map.get("db_users", []) |> Enum.count(&(&1.domain == domain)),
       "cron_jobs" => inv |> Map.get("cron_jobs", []) |> Enum.count(&(&1.domain == domain)),
       "ftp_accounts" =>
-        inv |> Map.get("ftp_accounts", []) |> Enum.count(&(Map.get(&1, :domain) == domain)),
+        inv
+        |> Map.get("ftp_accounts", [])
+        |> Enum.count(fn item ->
+          Map.get(item, :domain) == domain ||
+            (system_user != nil && Map.get(item, :login) == system_user)
+        end),
       "ssl_certificates" =>
         inv |> Map.get("ssl_certificates", []) |> Enum.count(&(&1.domain == domain))
     }
   end
 
-  defp filter_inventory_for_domain(nil, _domain), do: %{}
+  defp filter_inventory_for_domain(nil, _domain, _subscription), do: %{}
 
-  defp filter_inventory_for_domain(discovery, domain) do
+  defp filter_inventory_for_domain(discovery, domain, subscription) do
+    system_user = if subscription, do: Map.get(subscription, :system_user)
+
     Map.new(discovery.inventory, fn {key, items} ->
-      filtered = Enum.filter(items, fn item -> Map.get(item, :domain) == domain end)
+      filtered =
+        Enum.filter(items, fn item ->
+          Map.get(item, :domain) == domain ||
+            (key == "ftp_accounts" && system_user != nil &&
+               Map.get(item, :login) == system_user)
+        end)
+
       {key, filtered}
     end)
   end

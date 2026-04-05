@@ -2423,7 +2423,7 @@ defmodule Hostctl.Plesk.Importer do
       case Hosting.create_ftp_account(domain, %{
              username: item.login,
              password: password,
-             home_dir: "/"
+             home_dir: "/var/www/#{domain.name}"
            }) do
         {:ok, _} -> :created
         {:error, cs} -> {:failed, "#{item.login}: #{changeset_error_summary(cs)}"}
