@@ -44,7 +44,7 @@ defmodule HostctlWeb.S3ProxyController do
          %DomainS3Backend{} = backend <- Repo.get(DomainS3Backend, id),
          true <- backend.enabled,
          true <- has_credentials?(backend) || backend.directory_listing do
-      if is_directory_request?(path_parts) do
+      if is_directory_request?(conn, path_parts) do
         serve_directory_listing(conn, backend, path_parts)
       else
         serve_object(conn, backend, path_parts)
@@ -65,11 +65,12 @@ defmodule HostctlWeb.S3ProxyController do
     is_binary(key) && key != ""
   end
 
-  # A directory request is either an empty path or one whose last segment is "".
-  # nginx strips trailing slashes when building path_parts so we get [] for "/".
-  # We treat an empty path as a directory listing of the bucket root.
-  defp is_directory_request?([]), do: true
-  defp is_directory_request?(parts), do: List.last(parts) == ""
+  # A directory request is either an empty path or the original request path
+  # ends with "/". We check conn.request_path rather than relying on a trailing
+  # "" in path_parts because Phoenix/Plug normalizes path_info by stripping
+  # trailing empty segments (so "cool-beans/" arrives as ["cool-beans"]).
+  defp is_directory_request?(_conn, []), do: true
+  defp is_directory_request?(conn, _parts), do: String.ends_with?(conn.request_path, "/")
 
   # Reconstructs the original client-facing path from the backend config and path parts.
   # For subdomain backends (url_path nil/empty), the root is "/".
