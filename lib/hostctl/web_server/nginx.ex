@@ -20,6 +20,7 @@ defmodule Hostctl.WebServer.Nginx do
 
   alias Hostctl.Hosting.Domain
   alias Hostctl.Hosting.SslCertificate
+  alias Hostctl.Hosting.DomainS3Backend
 
   @doc "Returns the filename (not the full path) for a domain's Nginx vhost config."
   def config_filename(%Domain{name: name}), do: "#{name}.conf"
@@ -27,13 +28,20 @@ defmodule Hostctl.WebServer.Nginx do
   @doc """
   Generates a complete Nginx vhost config for the given domain and its active
   subdomains. Pass the domain's `SslCertificate` record (or nil) to control
-  whether SSL server blocks are included.
+  whether SSL server blocks are included. Pass the domain's `DomainS3Backend`
+  record (or nil) to proxy all requests to S3-compatible storage.
   """
-  def generate_config(%Domain{} = domain, subdomains \\ [], ssl_cert \\ nil, proxies \\ []) do
+  def generate_config(
+        %Domain{} = domain,
+        subdomains \\ [],
+        ssl_cert \\ nil,
+        proxies \\ [],
+        s3_backend \\ nil
+      ) do
     if domain.status == "suspended" do
       suspended_config(domain)
     else
-      active_config(domain, subdomains, ssl_cert, proxies)
+      active_config(domain, subdomains, ssl_cert, proxies, s3_backend)
     end
   end
 
@@ -41,21 +49,31 @@ defmodule Hostctl.WebServer.Nginx do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  defp active_config(%Domain{} = domain, subdomains, ssl_cert, proxies) do
+  defp active_config(%Domain{} = domain, subdomains, ssl_cert, proxies, s3_backend) do
     doc_root = domain.document_root || "/var/www/#{domain.name}/httpdocs"
     php_socket = php_fpm_socket(domain.php_version)
     use_ssl = ssl_active?(domain, ssl_cert)
 
     main =
-      vhost_block(
-        domain.name,
-        "#{domain.name} www.#{domain.name}",
-        doc_root,
-        php_socket,
-        use_ssl,
-        ssl_cert,
-        proxies
-      )
+      if s3_backend && s3_backend.enabled do
+        s3_vhost_block(
+          domain.name,
+          "#{domain.name} www.#{domain.name}",
+          s3_backend,
+          use_ssl,
+          ssl_cert
+        )
+      else
+        vhost_block(
+          domain.name,
+          "#{domain.name} www.#{domain.name}",
+          doc_root,
+          php_socket,
+          use_ssl,
+          ssl_cert,
+          proxies
+        )
+      end
 
     sub_blocks =
       subdomains
@@ -202,6 +220,116 @@ defmodule Hostctl.WebServer.Nginx do
       """
     end)
     |> Enum.join("\n")
+  end
+
+  # ---------------------------------------------------------------------------
+  # S3-backed vhost blocks
+  # ---------------------------------------------------------------------------
+
+  defp s3_vhost_block(log_name, server_names, %DomainS3Backend{} = backend, false = _ssl, _cert) do
+    upstream = s3_upstream_url(backend)
+    upstream_host = s3_upstream_host(backend)
+
+    """
+    # #{log_name} — managed by hostctl (S3 backend)
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name #{server_names};
+
+        access_log /var/log/nginx/#{log_name}.access.log;
+        error_log /var/log/nginx/#{log_name}.error.log;
+
+        location / {
+            proxy_pass #{upstream};
+            proxy_set_header Host #{upstream_host};
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_hide_header x-amz-id-2;
+            proxy_hide_header x-amz-request-id;
+            proxy_hide_header x-amz-meta-server-side-encryption;
+            proxy_hide_header x-amz-server-side-encryption;
+            proxy_hide_header Set-Cookie;
+            proxy_ignore_headers Set-Cookie;
+            proxy_intercept_errors on;
+            error_page 404 = @s3_not_found;
+        }
+
+        location @s3_not_found {
+            return 404;
+        }
+    }
+    """
+  end
+
+  defp s3_vhost_block(log_name, server_names, %DomainS3Backend{} = backend, true = _ssl, ssl_cert) do
+    primary = server_names |> String.split(" ") |> hd()
+    ssl_cert_path = cert_path(ssl_cert, primary)
+    ssl_key_path = key_path(ssl_cert, primary)
+    upstream = s3_upstream_url(backend)
+    upstream_host = s3_upstream_host(backend)
+
+    """
+    # #{log_name} — managed by hostctl (S3 backend)
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name #{server_names};
+        return 301 https://$host$request_uri;
+    }
+
+    server {
+        listen 443 ssl http2;
+        listen [::]:443 ssl http2;
+        server_name #{server_names};
+
+        ssl_certificate #{ssl_cert_path};
+        ssl_certificate_key #{ssl_key_path};
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 1d;
+
+        access_log /var/log/nginx/#{log_name}.access.log;
+        error_log /var/log/nginx/#{log_name}.error.log;
+
+        location / {
+            proxy_pass #{upstream};
+            proxy_set_header Host #{upstream_host};
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_hide_header x-amz-id-2;
+            proxy_hide_header x-amz-request-id;
+            proxy_hide_header x-amz-meta-server-side-encryption;
+            proxy_hide_header x-amz-server-side-encryption;
+            proxy_hide_header Set-Cookie;
+            proxy_ignore_headers Set-Cookie;
+            proxy_intercept_errors on;
+            error_page 404 = @s3_not_found;
+        }
+
+        location @s3_not_found {
+            return 404;
+        }
+    }
+    """
+  end
+
+  # Builds the proxy_pass target URL: endpoint/bucket/prefix/
+  defp s3_upstream_url(%DomainS3Backend{endpoint_url: ep, bucket: bucket, path_prefix: prefix}) do
+    base = "#{ep}/#{bucket}"
+
+    if prefix && prefix != "" do
+      "#{base}/#{prefix}/"
+    else
+      "#{base}/"
+    end
+  end
+
+  # Extracts the Host header value from the endpoint URL (hostname only)
+  defp s3_upstream_host(%DomainS3Backend{endpoint_url: ep}) do
+    ep |> URI.parse() |> Map.get(:host, ep)
   end
 
   defp normalize_proxy_path(path) when is_binary(path) do

@@ -27,7 +27,8 @@ defmodule Hostctl.Hosting do
     CronJob,
     FtpAccount,
     DomainSmarthostSetting,
-    BandwidthSnapshot
+    BandwidthSnapshot,
+    DomainS3Backend
   }
 
   # ---------------------------------------------------------------------------
@@ -1365,5 +1366,64 @@ defmodule Hostctl.Hosting do
       _ ->
         Logger.info("[Mailgun] Local DNS zone not found for #{domain_name}, skipping local sync")
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # S3 Backends
+  # ---------------------------------------------------------------------------
+
+  def get_s3_backend(%Domain{} = domain) do
+    Repo.get_by(DomainS3Backend, domain_id: domain.id)
+  end
+
+  def create_s3_backend(%Domain{} = domain, attrs) do
+    result =
+      %DomainS3Backend{domain_id: domain.id}
+      |> DomainS3Backend.changeset(attrs)
+      |> Repo.insert()
+
+    case result do
+      {:ok, backend} ->
+        WebServer.sync_domain(domain)
+        {:ok, backend}
+
+      error ->
+        error
+    end
+  end
+
+  def update_s3_backend(%DomainS3Backend{} = backend, attrs) do
+    result =
+      backend
+      |> DomainS3Backend.changeset(attrs)
+      |> Repo.update()
+
+    case result do
+      {:ok, updated} ->
+        domain = Repo.get!(Domain, updated.domain_id)
+        WebServer.sync_domain(domain)
+        {:ok, updated}
+
+      error ->
+        error
+    end
+  end
+
+  def delete_s3_backend(%DomainS3Backend{} = backend) do
+    result = Repo.delete(backend)
+
+    case result do
+      {:ok, deleted} ->
+        domain = Repo.get!(Domain, deleted.domain_id)
+        WebServer.sync_domain(domain)
+        {:ok, deleted}
+
+      error ->
+        error
+    end
+  end
+
+  def change_s3_backend(%DomainS3Backend{} = backend, attrs \\ %{}) do
+    DomainS3Backend.changeset(backend, attrs)
   end
 end

@@ -2,7 +2,7 @@ defmodule HostctlWeb.DomainLive.Show do
   use HostctlWeb, :live_view
 
   alias Hostctl.Hosting
-  alias Hostctl.Hosting.{SslCertificate, Subdomain}
+  alias Hostctl.Hosting.{SslCertificate, Subdomain, DomainS3Backend}
   alias Hostctl.Accounts.Scope
   alias Hostctl.Settings
   alias Hostctl.WebServer
@@ -87,6 +87,7 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign_cron_form()
      |> assign_ftp_form()
      |> assign_smarthost_form()
+     |> assign_s3_form()
      |> assign(:mg_key, "")
      |> assign(:mg_region, "us")
      |> assign(:mg_status, nil)
@@ -482,6 +483,77 @@ defmodule HostctlWeb.DomainLive.Show do
     end
   end
 
+  # S3 backend events
+  def handle_event("validate_s3_backend", %{"domain_s3_backend" => params}, socket) do
+    backend = socket.assigns.s3_backend || %DomainS3Backend{}
+
+    form =
+      backend
+      |> Hosting.change_s3_backend(params)
+      |> to_form(action: :validate, as: :domain_s3_backend)
+
+    {:noreply, assign(socket, :s3_form, form)}
+  end
+
+  def handle_event("save_s3_backend", %{"domain_s3_backend" => params}, socket) do
+    domain = socket.assigns.domain
+    backend = socket.assigns.s3_backend
+
+    result =
+      if backend do
+        Hosting.update_s3_backend(backend, params)
+      else
+        Hosting.create_s3_backend(domain, params)
+      end
+
+    case result do
+      {:ok, saved} ->
+        {:noreply,
+         socket
+         |> assign(:s3_backend, saved)
+         |> assign(:s3_form, to_form(Hosting.change_s3_backend(saved), as: :domain_s3_backend))
+         |> put_flash(:info, "S3 backend saved.")}
+
+      {:error, changeset} ->
+        {:noreply, assign(socket, :s3_form, to_form(changeset, as: :domain_s3_backend))}
+    end
+  end
+
+  def handle_event("toggle_s3_backend", _params, socket) do
+    backend = socket.assigns.s3_backend
+
+    case Hosting.update_s3_backend(backend, %{enabled: !backend.enabled}) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> assign(:s3_backend, updated)
+         |> assign(:s3_form, to_form(Hosting.change_s3_backend(updated), as: :domain_s3_backend))
+         |> put_flash(
+           :info,
+           if(updated.enabled, do: "S3 backend enabled.", else: "S3 backend disabled.")
+         )}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not toggle S3 backend.")}
+    end
+  end
+
+  def handle_event("delete_s3_backend", _params, socket) do
+    backend = socket.assigns.s3_backend
+
+    case Hosting.delete_s3_backend(backend) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> assign(:s3_backend, nil)
+         |> assign_s3_form()
+         |> put_flash(:info, "S3 backend removed.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not remove S3 backend.")}
+    end
+  end
+
   defp assign_ssl_form(socket) do
     user_email = socket.assigns.domain_scope.user.email
     changeset = Hosting.change_ssl_certificate(%SslCertificate{}, %{email: user_email})
@@ -511,6 +583,17 @@ defmodule HostctlWeb.DomainLive.Show do
     )
     |> assign(:smarthost_show_password, false)
     |> assign(:smarthost_apply_status, nil)
+  end
+
+  defp assign_s3_form(socket) do
+    backend = Hosting.get_s3_backend(socket.assigns.domain)
+
+    socket
+    |> assign(:s3_backend, backend)
+    |> assign(
+      :s3_form,
+      to_form(Hosting.change_s3_backend(backend || %DomainS3Backend{}), as: :domain_s3_backend)
+    )
   end
 
   def render(assigns) do
@@ -574,7 +657,9 @@ defmodule HostctlWeb.DomainLive.Show do
               tabs ++ [{"Smarthost", :smarthost, "hero-envelope-open"}]
             else
               tabs
-            end %>
+            end
+
+          tabs = tabs ++ [{"S3 Storage", :s3, "hero-cloud-arrow-up"}] %>
           <%= for {label, section, icon} <- tabs do %>
             <button
               phx-click="set_section"
@@ -1349,9 +1434,127 @@ defmodule HostctlWeb.DomainLive.Show do
             </div>
           </div>
         <% end %>
+
+        <%!-- S3 Storage --%>
+        <%= if @active_section == :s3 do %>
+          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
+            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+              <div>
+                <h3 class="text-base font-semibold text-gray-900 dark:text-white">
+                  S3 Storage Backend
+                </h3>
+                <p class="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+                  Proxy all requests for this domain transparently to an S3-compatible bucket.
+                </p>
+              </div>
+              <%= if @s3_backend do %>
+                <span class={[
+                  "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium",
+                  if(@s3_backend.enabled,
+                    do:
+                      "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400",
+                    else: "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
+                  )
+                ]}>
+                  <span class={[
+                    "w-1.5 h-1.5 rounded-full",
+                    if(@s3_backend.enabled, do: "bg-emerald-500", else: "bg-gray-400")
+                  ]}>
+                  </span>
+                  {if @s3_backend.enabled, do: "Active", else: "Disabled"}
+                </span>
+              <% end %>
+            </div>
+            <div class="p-6">
+              <.form
+                for={@s3_form}
+                id="s3-backend-form"
+                phx-change="validate_s3_backend"
+                phx-submit="save_s3_backend"
+                class="space-y-4"
+              >
+                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <.input
+                    field={@s3_form[:endpoint_url]}
+                    type="text"
+                    label="Endpoint URL"
+                    placeholder="https://s3.amazonaws.com"
+                  />
+                  <.input
+                    field={@s3_form[:bucket]}
+                    type="text"
+                    label="Bucket Name"
+                    placeholder="my-static-site"
+                  />
+                </div>
+                <.input
+                  field={@s3_form[:path_prefix]}
+                  type="text"
+                  label="Path Prefix (optional)"
+                  placeholder="subdirectory/within/bucket"
+                />
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  Requests to <strong>{@domain.name}</strong>
+                  will be proxied to <code class="font-mono">{endpoint_preview(@s3_form)}</code>. No credentials are
+                  stored — the bucket must be publicly readable or use a bucket policy.
+                </p>
+                <div class="flex items-center gap-3 pt-2">
+                  <button
+                    type="submit"
+                    class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    {if @s3_backend, do: "Save Changes", else: "Enable S3 Backend"}
+                  </button>
+                  <%= if @s3_backend do %>
+                    <button
+                      type="button"
+                      phx-click="toggle_s3_backend"
+                      class={[
+                        "px-4 py-2 text-sm font-medium rounded-lg border transition-colors",
+                        if(@s3_backend.enabled,
+                          do:
+                            "border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800",
+                          else:
+                            "border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
+                        )
+                      ]}
+                    >
+                      {if @s3_backend.enabled, do: "Disable", else: "Enable"}
+                    </button>
+                    <button
+                      type="button"
+                      phx-click="delete_s3_backend"
+                      data-confirm="Remove the S3 backend configuration for this domain?"
+                      class="px-4 py-2 text-sm font-medium text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-colors"
+                    >
+                      Remove
+                    </button>
+                  <% end %>
+                </div>
+              </.form>
+            </div>
+          </div>
+        <% end %>
       </div>
     </Layouts.app>
     """
+  end
+
+  defp endpoint_preview(form) do
+    ep = Phoenix.HTML.Form.input_value(form, :endpoint_url) || ""
+    bucket = Phoenix.HTML.Form.input_value(form, :bucket) || ""
+    prefix = Phoenix.HTML.Form.input_value(form, :path_prefix) || ""
+
+    ep = String.trim_trailing(to_string(ep), "/")
+    bucket = to_string(bucket)
+    prefix = prefix |> to_string() |> String.trim("/")
+
+    cond do
+      ep == "" && bucket == "" -> "<endpoint>/<bucket>/..."
+      bucket == "" -> "#{ep}/<bucket>/..."
+      prefix != "" -> "#{ep}/#{bucket}/#{prefix}/..."
+      true -> "#{ep}/#{bucket}/..."
+    end
   end
 
   defp format_mb(mb) when is_integer(mb) do
