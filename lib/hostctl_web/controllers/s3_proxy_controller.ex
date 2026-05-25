@@ -305,15 +305,22 @@ defmodule HostctlWeb.S3ProxyController do
 
   defp verify_proxy_token(conn, _opts) do
     expected = proxy_token()
-    provided = get_req_header(conn, "x-s3-proxy-token") |> List.first()
 
-    if expected && Plug.Crypto.secure_compare(expected, provided || "") do
+    # When no token is configured, the endpoint is trusted via network isolation alone.
+    # When a token is configured, it must match exactly.
+    if is_nil(expected) || expected == "" do
       conn
     else
-      conn
-      |> put_status(403)
-      |> text("Forbidden")
-      |> halt()
+      provided = get_req_header(conn, "x-s3-proxy-token") |> List.first()
+
+      if Plug.Crypto.secure_compare(expected, provided || "") do
+        conn
+      else
+        conn
+        |> put_status(403)
+        |> text("Forbidden")
+        |> halt()
+      end
     end
   end
 

@@ -316,7 +316,8 @@ defmodule Hostctl.WebServer.Nginx do
               proxy_pass #{upstream};
               proxy_set_header Host $host;
               proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;#{token_line}
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto https;#{token_line}
               proxy_intercept_errors on;
               error_page 404 = @s3_path_not_found;
           }
@@ -440,7 +441,8 @@ defmodule Hostctl.WebServer.Nginx do
             proxy_pass #{upstream};
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;#{token_line}
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;#{token_line}
             proxy_intercept_errors on;
             error_page 404 = @not_found;
         }
@@ -491,7 +493,8 @@ defmodule Hostctl.WebServer.Nginx do
             proxy_pass #{upstream};
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;#{token_line}
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;#{token_line}
             proxy_intercept_errors on;
             error_page 404 = @not_found;
         }
