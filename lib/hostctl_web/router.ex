@@ -96,6 +96,15 @@ defmodule HostctlWeb.Router do
     post "/users/update-password", UserSessionController, :update_password
   end
 
+  # S3 reverse proxy — accessed by the local Nginx process, not end users.
+  # No authentication pipeline; the controller verifies the shared internal
+  # token from the X-S3-Proxy-Token request header instead.
+  scope "/_s3_proxy", HostctlWeb do
+    pipe_through [:api]
+
+    get "/:domain/*path", S3ProxyController, :show
+  end
+
   scope "/", HostctlWeb do
     pipe_through [:browser]
 

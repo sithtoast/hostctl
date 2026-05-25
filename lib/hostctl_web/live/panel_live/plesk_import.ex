@@ -83,6 +83,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:ssh_discovery, nil)
      |> assign(:subscriptions, [])
      |> assign(:domain_configs, %{})
+     |> assign(:domain_s3_backends, %{})
      |> assign(:restore_results, %{})
      |> assign(:restore_progress, %{})
      |> assign(:restore_task_refs, %{})
@@ -143,6 +144,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:ssh_discovery, nil)
      |> assign(:subscriptions, [])
      |> assign(:domain_configs, %{})
+     |> assign(:domain_s3_backends, %{})
      |> assign(:restore_results, %{})
      |> assign(:restore_progress, %{})
      |> assign(:restore_task_refs, %{})
@@ -206,6 +208,15 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     configs = socket.assigns.domain_configs
     config = Map.get(configs, domain, %{})
     config = Map.put(config, :web_files_path, String.trim(path))
+
+    {:noreply, assign(socket, :domain_configs, Map.put(configs, domain, config))}
+  end
+
+  @impl true
+  def handle_event("toggle_s3_import", %{"domain" => domain}, socket) do
+    configs = socket.assigns.domain_configs
+    config = Map.get(configs, domain, %{})
+    config = Map.update(config, :s3_import, true, fn current -> not current end)
 
     {:noreply, assign(socket, :domain_configs, Map.put(configs, domain, config))}
   end
@@ -564,6 +575,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:ssh_discovery, ssh_discovery)
      |> assign(:subscriptions, subscriptions)
      |> assign(:domain_configs, domain_configs)
+     |> assign(:domain_s3_backends, load_domain_s3_backends(subscriptions))
      |> assign(:restore_results, restore_results)
      |> assign(:server_credentials, server_credentials)
      |> put_flash(:info, creds_flash)}
@@ -629,6 +641,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
          |> assign(:ssh_discovery, ssh_discovery)
          |> assign(:subscriptions, subscriptions)
          |> assign(:domain_configs, domain_configs)
+         |> assign(:domain_s3_backends, load_domain_s3_backends(subscriptions))
          |> assign(:restore_results, %{})
          |> assign(:restore_progress, %{})
          |> put_flash(:info, "Discovered #{length(subscriptions)} domain(s).")}
@@ -797,7 +810,17 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     ssh_opts = build_ssh_opts(socket.assigns.form_params)
     web_files_path = Map.get(config, :web_files_path, "/var/www/#{domain}")
     server_credentials = socket.assigns.server_credentials
+    s3_import = Map.get(config, :s3_import, false)
     lv_pid = self()
+
+    # Build S3 backend opts when the domain has an S3 backend configured with
+    # credentials and the user has opted in to upload imports directly to S3.
+    s3_backend_opts =
+      if s3_import do
+        build_s3_backend_opts(domain)
+      else
+        nil
+      end
 
     task =
       Task.async(fn ->
@@ -807,6 +830,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             apply_dns_template: apply_dns,
             ssh_opts: ssh_opts,
             web_files_path: web_files_path,
+            s3_backend_opts: s3_backend_opts,
             progress_pid: lv_pid,
             server_credentials: server_credentials
           )
@@ -827,6 +851,38 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     socket
     |> assign(:restore_progress, progress)
     |> assign(:restore_task_refs, task_refs)
+  end
+
+  # Returns S3 backend opts for a domain if it has an S3 backend with credentials.
+  defp build_s3_backend_opts(domain_name) do
+    import Ecto.Query
+
+    alias Hostctl.Repo
+    alias Hostctl.Hosting.{Domain, DomainS3Backend}
+
+    domain =
+      Repo.one(from d in Domain, where: d.name == ^domain_name, limit: 1)
+
+    if domain do
+      backend = Repo.get_by(DomainS3Backend, domain_id: domain.id)
+
+      if backend &&
+           is_binary(backend.access_key_id) && backend.access_key_id != "" &&
+           is_binary(backend.secret_access_key) && backend.secret_access_key != "" do
+        %{
+          endpoint: backend.endpoint_url,
+          bucket: backend.bucket,
+          prefix: backend.path_prefix || "",
+          access_key_id: backend.access_key_id,
+          secret_access_key: backend.secret_access_key,
+          region: backend.region || "us-east-1"
+        }
+      else
+        nil
+      end
+    else
+      nil
+    end
   end
 
   # ── Render ─────────────────────────────────────────────────────────────
@@ -1659,17 +1715,48 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               >
                 <.icon name="hero-folder" class="w-3.5 h-3.5 inline" /> Destination:
               </label>
-              <form id={"web-path-form-#{sub.domain}"} phx-change="set_web_path" class="flex-1">
-                <input type="hidden" name="domain" value={sub.domain} />
-                <input
-                  type="text"
-                  id={"web-path-#{sub.domain}"}
-                  name="path"
-                  value={Map.get(config, :web_files_path, "/var/www/#{sub.domain}")}
-                  class="block w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                  placeholder="/var/www/{sub.domain}"
-                />
-              </form>
+              <%= if Map.get(config, :s3_import, false) do %>
+                <span class="flex-1 rounded-lg border border-sky-300 dark:border-sky-700 bg-sky-50 dark:bg-sky-950/30 px-2.5 py-1.5 text-xs text-sky-700 dark:text-sky-300 font-mono">
+                  <.icon name="hero-cloud-arrow-up" class="w-3 h-3 inline" /> Upload to S3 bucket
+                </span>
+              <% else %>
+                <form id={"web-path-form-#{sub.domain}"} phx-change="set_web_path" class="flex-1">
+                  <input type="hidden" name="domain" value={sub.domain} />
+                  <input
+                    type="text"
+                    id={"web-path-#{sub.domain}"}
+                    name="path"
+                    value={Map.get(config, :web_files_path, "/var/www/#{sub.domain}")}
+                    class="block w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                    placeholder="/var/www/{sub.domain}"
+                  />
+                </form>
+              <% end %>
+              <%!-- S3 import toggle — only shown when the domain has an S3 backend with credentials --%>
+              <%= if Map.has_key?(@domain_s3_backends, sub.domain) do %>
+                <button
+                  id={"s3-import-toggle-#{sub.domain}"}
+                  type="button"
+                  phx-click="toggle_s3_import"
+                  phx-value-domain={sub.domain}
+                  title={
+                    if Map.get(config, :s3_import, false),
+                      do: "Switch to local path",
+                      else: "Upload directly to S3 bucket"
+                  }
+                  class={[
+                    "flex-shrink-0 inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border text-xs font-medium transition-colors",
+                    if(Map.get(config, :s3_import, false),
+                      do:
+                        "border-sky-300 dark:border-sky-700 bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300",
+                      else:
+                        "border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-sky-50 dark:hover:bg-sky-950/30 hover:border-sky-300 dark:hover:border-sky-700 hover:text-sky-700 dark:hover:text-sky-300"
+                    )
+                  ]}
+                >
+                  <.icon name="hero-cloud-arrow-up" class="w-3 h-3" /> S3
+                </button>
+              <% end %>
             </div>
           <% end %>
 
@@ -2142,6 +2229,41 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     |> Enum.map(fn user ->
       %{id: user.id, name: user.name, email: user.email, role: user.role}
     end)
+  end
+
+  # Returns a map of %{domain_name => s3_backend} for domains that already exist
+  # in the database and have an S3 backend configured with credentials.
+  defp load_domain_s3_backends(subscriptions) do
+    import Ecto.Query
+
+    alias Hostctl.Repo
+    alias Hostctl.Hosting.{Domain, DomainS3Backend}
+
+    domain_names = Enum.map(subscriptions, & &1.domain)
+
+    if domain_names == [] do
+      %{}
+    else
+      domains =
+        Repo.all(from d in Domain, where: d.name in ^domain_names, select: {d.name, d.id})
+
+      domain_id_map = Map.new(domains)
+
+      backends =
+        Repo.all(
+          from b in DomainS3Backend,
+            where: b.domain_id in ^Map.values(domain_id_map),
+            where: not is_nil(b.access_key_id),
+            where: b.access_key_id != ""
+        )
+
+      Enum.reduce(domains, %{}, fn {name, id}, acc ->
+        case Enum.find(backends, &(&1.domain_id == id)) do
+          nil -> acc
+          backend -> Map.put(acc, name, backend)
+        end
+      end)
+    end
   end
 
   defp resolve_scope(""), do: {:error, "No account selected. Assign an account to this domain."}

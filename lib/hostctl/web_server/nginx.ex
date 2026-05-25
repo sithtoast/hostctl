@@ -227,6 +227,109 @@ defmodule Hostctl.WebServer.Nginx do
   # ---------------------------------------------------------------------------
 
   defp s3_vhost_block(log_name, server_names, %DomainS3Backend{} = backend, false = _ssl, _cert) do
+    if has_credentials?(backend) do
+      phoenix_proxy_block_http(log_name, server_names, backend)
+    else
+      s3_direct_block_http(log_name, server_names, backend)
+    end
+  end
+
+  defp s3_vhost_block(log_name, server_names, %DomainS3Backend{} = backend, true = _ssl, ssl_cert) do
+    if has_credentials?(backend) do
+      phoenix_proxy_block_ssl(log_name, server_names, backend, ssl_cert)
+    else
+      s3_direct_block_ssl(log_name, server_names, backend, ssl_cert)
+    end
+  end
+
+  defp has_credentials?(%DomainS3Backend{access_key_id: key}) when is_binary(key) and key != "",
+    do: true
+
+  defp has_credentials?(_), do: false
+
+  # Proxies to local Phoenix S3ProxyController (private buckets)
+  defp phoenix_proxy_block_http(log_name, server_names, _backend) do
+    upstream = phoenix_proxy_url(log_name)
+    token = s3_proxy_token()
+
+    """
+    # #{log_name} — managed by hostctl (S3 backend, private)
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name #{server_names};
+
+        access_log /var/log/nginx/#{log_name}.access.log;
+        error_log /var/log/nginx/#{log_name}.error.log;
+
+        location / {
+            proxy_pass #{upstream};
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-S3-Proxy-Token #{token};
+            proxy_intercept_errors on;
+            error_page 404 = @not_found;
+        }
+
+        location @not_found {
+            return 404;
+        }
+    }
+    """
+  end
+
+  defp phoenix_proxy_block_ssl(log_name, server_names, _backend, ssl_cert) do
+    primary = server_names |> String.split(" ") |> hd()
+    ssl_cert_path = cert_path(ssl_cert, primary)
+    ssl_key_path = key_path(ssl_cert, primary)
+    upstream = phoenix_proxy_url(log_name)
+    token = s3_proxy_token()
+
+    """
+    # #{log_name} — managed by hostctl (S3 backend, private)
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name #{server_names};
+        return 301 https://$host$request_uri;
+    }
+
+    server {
+        listen 443 ssl http2;
+        listen [::]:443 ssl http2;
+        server_name #{server_names};
+
+        ssl_certificate #{ssl_cert_path};
+        ssl_certificate_key #{ssl_key_path};
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 1d;
+
+        access_log /var/log/nginx/#{log_name}.access.log;
+        error_log /var/log/nginx/#{log_name}.error.log;
+
+        location / {
+            proxy_pass #{upstream};
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-S3-Proxy-Token #{token};
+            proxy_intercept_errors on;
+            error_page 404 = @not_found;
+        }
+
+        location @not_found {
+            return 404;
+        }
+    }
+    """
+  end
+
+  # Proxies directly to the public S3 endpoint (no credentials)
+  defp s3_direct_block_http(log_name, server_names, backend) do
     upstream = s3_upstream_url(backend)
     upstream_host = s3_upstream_host(backend)
 
@@ -262,7 +365,7 @@ defmodule Hostctl.WebServer.Nginx do
     """
   end
 
-  defp s3_vhost_block(log_name, server_names, %DomainS3Backend{} = backend, true = _ssl, ssl_cert) do
+  defp s3_direct_block_ssl(log_name, server_names, backend, ssl_cert) do
     primary = server_names |> String.split(" ") |> hd()
     ssl_cert_path = cert_path(ssl_cert, primary)
     ssl_key_path = key_path(ssl_cert, primary)
@@ -314,6 +417,21 @@ defmodule Hostctl.WebServer.Nginx do
         }
     }
     """
+  end
+
+  # Builds the Phoenix S3 proxy URL for a given domain name.
+  # Nginx proxies to this when the backend has credentials configured.
+  defp phoenix_proxy_url(domain_name) do
+    port =
+      Application.get_env(:hostctl, HostctlWeb.Endpoint)
+      |> Keyword.get(:http, [])
+      |> Keyword.get(:port, 4000)
+
+    "http://127.0.0.1:#{port}/_s3_proxy/#{domain_name}/"
+  end
+
+  defp s3_proxy_token do
+    Application.get_env(:hostctl, :s3_proxy_token, "")
   end
 
   # Builds the proxy_pass target URL: endpoint/bucket/prefix/

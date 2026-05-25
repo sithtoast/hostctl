@@ -89,6 +89,8 @@ config :hostctl, :dev_basic_auth,
 # Do not include metadata nor timestamps in development logs
 # Disable web server (Nginx) integration in development — no nginx running locally
 config :hostctl, :web_server, enabled: false
+# Dev-only token for the internal S3 proxy endpoint (not used in dev, but prevents boot warning)
+config :hostctl, :s3_proxy_token, "dev-s3-proxy-token-changeme"
 config :logger, :default_formatter, format: "[$level] $message\n"
 
 # Set a higher stacktrace during development. Avoid configuring such

@@ -169,4 +169,12 @@ if config_env() == :prod do
       username: uri.userinfo && String.split(uri.userinfo, ":") |> List.first(),
       password: uri.userinfo && String.split(uri.userinfo, ":", parts: 2) |> List.last()
   end
+
+  # Shared token used to authenticate requests from the local Nginx process to
+  # the internal S3 reverse proxy endpoint (/_s3_proxy/:domain/*path).
+  # Generate with: mix phx.gen.secret 32
+  # Keep this value secret — it must match S3_PROXY_TOKEN in Nginx config.
+  if token = System.get_env("S3_PROXY_TOKEN") do
+    config :hostctl, :s3_proxy_token, token
+  end
 end

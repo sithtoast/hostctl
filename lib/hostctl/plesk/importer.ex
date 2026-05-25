@@ -595,6 +595,7 @@ defmodule Hostctl.Plesk.Importer do
     all_items = Map.get(inventory, "web_files", [])
     ssh_opts = Map.get(restore_opts, :ssh_opts)
     web_files_path = Map.get(restore_opts, :web_files_path)
+    s3_backend_opts = Map.get(restore_opts, :s3_backend_opts)
 
     # Find the parent domain web_files item (the one matching our domain name).
     # Subdomain WEB entries also exist in inventory but are filtered by
@@ -615,6 +616,15 @@ defmodule Hostctl.Plesk.Importer do
             note: "Provide SSH credentials to enable web files rsync"
           }
         end
+
+      not is_nil(s3_backend_opts) ->
+        # Upload directly to S3 using a temporary staging directory
+        item =
+          parent_item ||
+            List.first(all_items) ||
+            %{domain: domain.name, system_user: nil, document_root: nil}
+
+        restore_web_files_to_s3(domain, item, subdomains, ssh_opts, s3_backend_opts)
 
       is_nil(web_files_path) || web_files_path == "" ->
         %{
@@ -964,6 +974,150 @@ defmodule Hostctl.Plesk.Importer do
             ["#{sub.full_name}: #{reason}" | acc]
         end
       end)
+
+    errors = Enum.reverse(errors)
+    total = 1 + length(subdomains)
+    failed = length(errors)
+
+    %{
+      created: total - failed,
+      skipped: 0,
+      failed: failed,
+      errors: errors
+    }
+  end
+
+  # Rsyncs web files into a temporary local directory, uploads them to S3,
+  # then removes the temp directory.  This allows importing to domains whose
+  # web root lives in an S3-compatible bucket (e.g. for space-constrained hosts).
+  #
+  # `s3_backend_opts` is a map with keys:
+  #   :endpoint   — S3 endpoint URL (string)
+  #   :bucket     — bucket name (string)
+  #   :prefix     — optional path prefix inside the bucket (string or nil)
+  #   :access_key_id     — AWS access key ID (string)
+  #   :secret_access_key — AWS secret access key (string)
+  #   :region            — region string, e.g. "us-east-1" (default "us-east-1")
+  defp restore_web_files_to_s3(domain, item, subdomains, ssh_opts, s3_backend_opts) do
+    domain_name = domain.name
+    endpoint = Map.fetch!(s3_backend_opts, :endpoint)
+    bucket = Map.fetch!(s3_backend_opts, :bucket)
+    prefix = Map.get(s3_backend_opts, :prefix, "")
+    access_key_id = Map.fetch!(s3_backend_opts, :access_key_id)
+    secret_access_key = Map.fetch!(s3_backend_opts, :secret_access_key)
+    region = Map.get(s3_backend_opts, :region, "us-east-1")
+
+    {remote_docroot, remote_home_dir} =
+      if is_binary(item.document_root) and item.document_root != "" do
+        docroot = item.document_root
+        basename = Path.basename(docroot)
+
+        if basename in @plesk_docroot_dirs do
+          {docroot, Path.dirname(docroot)}
+        else
+          {docroot, Path.dirname(docroot)}
+        end
+      else
+        home = "/var/www/vhosts/#{domain_name}"
+        {home <> "/httpdocs", home}
+      end
+
+    Logger.info(
+      "[Importer] web_files→S3 #{domain_name}: " <>
+        "docroot=#{remote_docroot}, bucket=#{bucket}, prefix=#{inspect(prefix)}"
+    )
+
+    tmp_base =
+      System.tmp_dir!()
+      |> Path.join("hostctl_s3_import_#{domain_name}_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(tmp_base)
+
+    errors = []
+
+    # 1) Rsync docroot to temp dir, then upload httpdocs/ to S3
+    tmp_httpdocs = Path.join(tmp_base, "httpdocs")
+    File.mkdir_p!(tmp_httpdocs)
+
+    errors =
+      case do_rsync(ssh_opts, remote_docroot, tmp_httpdocs,
+             timeout: 3600,
+             excludes: @plesk_rsync_excludes
+           ) do
+        :ok ->
+          s3_prefix = if prefix && prefix != "", do: "#{prefix}/httpdocs", else: "httpdocs"
+
+          case Hostctl.S3Client.upload_directory(
+                 endpoint,
+                 bucket,
+                 s3_prefix,
+                 tmp_httpdocs,
+                 access_key_id,
+                 secret_access_key,
+                 region
+               ) do
+            {:ok, count} ->
+              Logger.info(
+                "[Importer] web_files→S3 #{domain_name}: uploaded #{count} files to #{s3_prefix}"
+              )
+
+              errors
+
+            {:error, upload_errors} ->
+              Logger.warning(
+                "[Importer] web_files→S3 #{domain_name}: #{length(upload_errors)} upload failures"
+              )
+
+              errors ++ upload_errors
+          end
+
+        {:error, reason} ->
+          ["#{domain_name} docroot: rsync failed - #{reason}" | errors]
+      end
+
+    # 2) Rsync each subdomain, upload to S3
+    errors =
+      Enum.reduce(subdomains, errors, fn sub, acc ->
+        sub_dir_name = "#{sub.name}.#{domain_name}"
+        remote_sub = "#{remote_home_dir}/#{sub_dir_name}"
+        tmp_sub = Path.join(tmp_base, sub_dir_name)
+        File.mkdir_p!(tmp_sub)
+
+        case do_rsync(ssh_opts, remote_sub, tmp_sub,
+               timeout: 3600,
+               excludes: @plesk_rsync_excludes
+             ) do
+          :ok ->
+            s3_prefix =
+              if prefix && prefix != "", do: "#{prefix}/#{sub_dir_name}", else: sub_dir_name
+
+            case Hostctl.S3Client.upload_directory(
+                   endpoint,
+                   bucket,
+                   s3_prefix,
+                   tmp_sub,
+                   access_key_id,
+                   secret_access_key,
+                   region
+                 ) do
+              {:ok, _count} ->
+                Logger.info(
+                  "[Importer] web_files→S3 #{domain_name}: subdomain #{sub.full_name} uploaded"
+                )
+
+                acc
+
+              {:error, upload_errors} ->
+                acc ++ upload_errors
+            end
+
+          {:error, reason} ->
+            ["#{sub.full_name}: rsync failed - #{reason}" | acc]
+        end
+      end)
+
+    # Clean up temp directory
+    File.rm_rf(tmp_base)
 
     errors = Enum.reverse(errors)
     total = 1 + length(subdomains)

@@ -1487,16 +1487,47 @@ defmodule HostctlWeb.DomainLive.Show do
                     placeholder="my-static-site"
                   />
                 </div>
-                <.input
-                  field={@s3_form[:path_prefix]}
-                  type="text"
-                  label="Path Prefix (optional)"
-                  placeholder="subdirectory/within/bucket"
-                />
+                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <.input
+                    field={@s3_form[:path_prefix]}
+                    type="text"
+                    label="Path Prefix (optional)"
+                    placeholder="subdirectory/within/bucket"
+                  />
+                  <.input
+                    field={@s3_form[:region]}
+                    type="text"
+                    label="Region"
+                    placeholder="us-east-1"
+                  />
+                </div>
+                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <.input
+                    field={@s3_form[:access_key_id]}
+                    type="text"
+                    label="Access Key ID (optional)"
+                    placeholder="Leave blank for public buckets"
+                  />
+                  <.input
+                    field={@s3_form[:secret_access_key]}
+                    type="password"
+                    label="Secret Access Key (optional)"
+                    placeholder={
+                      if @s3_backend && @s3_backend.secret_access_key,
+                        do: "Stored — enter new value to replace",
+                        else: "Leave blank for public buckets"
+                    }
+                  />
+                </div>
                 <p class="text-xs text-gray-500 dark:text-gray-400">
                   Requests to <strong>{@domain.name}</strong>
-                  will be proxied to <code class="font-mono">{endpoint_preview(@s3_form)}</code>. No credentials are
-                  stored — the bucket must be publicly readable or use a bucket policy.
+                  will be proxied to <code class="font-mono">{endpoint_preview(@s3_form)}</code>.
+                  <%= if @s3_backend && @s3_backend.access_key_id && @s3_backend.access_key_id != "" do %>
+                    Requests are authenticated by the panel — the bucket can remain private.
+                    The secret access key is stored encrypted at rest.
+                  <% else %>
+                    No credentials stored — the bucket must be publicly readable or allow public access via a bucket policy.
+                  <% end %>
                 </p>
                 <div class="flex items-center gap-3 pt-2">
                   <button
