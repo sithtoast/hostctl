@@ -221,9 +221,21 @@ defmodule Hostctl.WebServer.RcloneMount do
     """
   end
 
-  # Runs a systemctl subcommand via sudo.
+  # Runs a systemctl subcommand via sudo systemd-run (the only passwordless
+  # sudo path available to the service user per /etc/sudoers.d/hostctl-features).
   defp systemctl(args) do
-    case System.cmd("sudo", ["systemctl" | args], stderr_to_stdout: true) do
+    case System.cmd(
+           "sudo",
+           [
+             "systemd-run",
+             "--pipe",
+             "--wait",
+             "--collect",
+             "--quiet",
+             "/usr/bin/systemctl" | args
+           ],
+           stderr_to_stdout: true
+         ) do
       {_, 0} ->
         :ok
 
