@@ -1005,8 +1005,19 @@ if [[ "$SKIP_NGINX" == false ]]; then
 
   NGINX_CONF="/etc/nginx/sites-available/$APP_NAME"
 
-  # Literal heredoc + sed substitution avoids nginx $variable conflicts
-  cat > "$NGINX_CONF" <<'NGINXEOF'
+  if [[ "$CLOUDFLARE_PROXY" == true ]]; then
+    # Cloudflare mode: Cloudflare terminates TLS and forwards HTTP to origin.
+    # Hardcode X-Forwarded-Proto: https so Phoenix doesn't redirect to HTTPS.
+    # A default_server catch-all rejects requests by raw IP (bypassing Cloudflare).
+    cat > "$NGINX_CONF" <<'NGINXEOF'
+# Reject direct IP / non-hostname access (bypass protection)
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444;
+}
+
 upstream APPNAME {
     server 127.0.0.1:4000;
     keepalive 64;
@@ -1026,18 +1037,53 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto XFWDPROTO;
+        proxy_set_header X-Forwarded-Proto https;
         proxy_set_header Host $host;
         proxy_redirect off;
         proxy_read_timeout 60s;
     }
 }
 NGINXEOF
-  if [[ "$CLOUDFLARE_PROXY" == true ]]; then
-    sed -i "s/APPNAME/$APP_NAME/g; s/SERVERNAME/$DOMAIN/g; s/XFWDPROTO/https/g" "$NGINX_CONF"
-  else
     sed -i "s/APPNAME/$APP_NAME/g; s/SERVERNAME/$DOMAIN/g" "$NGINX_CONF"
-    sed -i 's/XFWDPROTO/$scheme/' "$NGINX_CONF"
+  else
+    # Standard mode: HTTP redirects to HTTPS.
+    # A default_server catch-all rejects raw-IP requests to prevent redirect loops.
+    # Certbot uses webroot so we write the full nginx config ourselves, ensuring
+    # X-Forwarded-Proto: https is always explicit in the HTTPS block.
+    mkdir -p /var/www/letsencrypt
+    cat > "$NGINX_CONF" <<'NGINXEOF'
+# Reject direct IP / non-hostname access
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444;
+}
+
+upstream APPNAME {
+    server 127.0.0.1:4000;
+    keepalive 64;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name SERVERNAME;
+
+    client_max_body_size 50M;
+
+    # ACME challenge for certbot webroot mode
+    location /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+NGINXEOF
+    sed -i "s/APPNAME/$APP_NAME/g; s/SERVERNAME/$DOMAIN/g" "$NGINX_CONF"
   fi
 
   ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/$APP_NAME"
@@ -1047,20 +1093,69 @@ NGINXEOF
   success "Nginx configured for $DOMAIN"
 
   # 3i. SSL via Certbot (panel domain only) -------------------------------------
-  if [[ "$SKIP_CERTBOT" == false ]]; then
+  if [[ "$SKIP_CERTBOT" == false && "$CLOUDFLARE_PROXY" == false ]]; then
     step "Provisioning SSL certificate for the panel via Let's Encrypt"
 
-    if ! dpkg -l python3-certbot-nginx &>/dev/null; then
-      apt-get install -y --no-install-recommends python3-certbot-nginx
+    if ! dpkg -l certbot &>/dev/null; then
+      apt-get install -y --no-install-recommends certbot
     fi
 
-    certbot --nginx \
+    if certbot certonly \
+      --webroot -w /var/www/letsencrypt \
       --non-interactive \
       --agree-tos \
-      --redirect \
       --email "admin@$DOMAIN" \
-      -d "$DOMAIN" \
-      || warn "Certbot failed -- DNS may not point here yet. Run 'certbot --nginx -d $DOMAIN' manually once DNS propagates."
+      -d "$DOMAIN"; then
+
+      CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+      KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+
+      # Append the HTTPS server block. X-Forwarded-Proto is hardcoded to https
+      # so Phoenix never sees the connection as plain HTTP and loops.
+      cat >> "$NGINX_CONF" <<'HTTPSEOF'
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name SERVERNAME;
+
+    ssl_certificate SSLCERT;
+    ssl_certificate_key SSLKEY;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:50m;
+    ssl_session_tickets off;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    add_header Strict-Transport-Security "max-age=63072000" always;
+
+    client_max_body_size 50M;
+
+    location / {
+        proxy_pass http://APPNAME;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Host $host;
+        proxy_redirect off;
+        proxy_read_timeout 60s;
+    }
+}
+HTTPSEOF
+      # Replace placeholders in the newly-appended HTTPS block.
+      # Use | as delimiter to handle slashes in cert paths safely.
+      sed -i "s|SERVERNAME|$DOMAIN|g; s|SSLCERT|$CERT_PATH|g; s|SSLKEY|$KEY_PATH|g; s|APPNAME|$APP_NAME|g" "$NGINX_CONF"
+
+      nginx -t && systemctl reload nginx
+      success "HTTPS configured for $DOMAIN"
+    else
+      warn "Certbot failed -- DNS may not point here yet."
+      warn "Once DNS propagates, run: certbot certonly --webroot -w /var/www/letsencrypt -d $DOMAIN"
+      warn "Then re-run: bash install.sh --reconfigure --domain=$DOMAIN"
+    fi
   fi
 fi
 

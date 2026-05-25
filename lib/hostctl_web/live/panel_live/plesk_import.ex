@@ -331,6 +331,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
             # If account has no password yet and we have one, set it now
             existing_user = Map.get(existing_accounts, email)
+
             pw_bump =
               if is_binary(plesk_password) and String.length(plesk_password) >= 8 and
                    existing_user != nil do

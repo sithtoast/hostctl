@@ -1878,7 +1878,13 @@ defmodule Hostctl.Plesk.Importer do
     credentials =
       Enum.reduce(
         xml_files,
-        %{db_passwords: %{}, mail_passwords: %{}, sysuser_passwords: %{}, client_passwords: %{}, ftpuser_passwords: %{}},
+        %{
+          db_passwords: %{},
+          mail_passwords: %{},
+          sysuser_passwords: %{},
+          client_passwords: %{},
+          ftpuser_passwords: %{}
+        },
         fn xml_file, acc ->
           case File.read(xml_file) do
             {:ok, content} ->
@@ -2129,7 +2135,9 @@ defmodule Hostctl.Plesk.Importer do
               [
                 "-c",
                 "zstd -d -c #{shell_escape(tar_path)} | tar xf - -C #{shell_escape(dest_dir)}"
-              ], stderr_to_stdout: true)
+              ],
+              stderr_to_stdout: true
+            )
         end
 
       true ->
