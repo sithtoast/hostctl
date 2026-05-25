@@ -273,7 +273,7 @@ defmodule HostctlWeb.S3ProxyController do
       parts
       |> Enum.with_index()
       |> Enum.map(fn {part, idx} ->
-        href = ("/" <> Enum.take(parts, idx + 1)) |> Enum.join("/")
+        href = "/" <> (parts |> Enum.take(idx + 1) |> Enum.join("/"))
         ~s(<a href="#{href}">#{part}</a>)
       end)
 
