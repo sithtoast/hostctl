@@ -21,6 +21,9 @@ defmodule Hostctl.Hosting.DomainS3Backend do
     # When true, hostctl provisions a rclone FUSE mount at the document root
     # for this scope so FTP users can upload directly to S3.
     field :ftp_mount_enabled, :boolean, default: false
+    # When true, requests to "directory" paths (trailing slash) return an HTML
+    # listing of objects at that S3 prefix instead of a 404.
+    field :directory_listing, :boolean, default: false
 
     belongs_to :domain, Domain
 
@@ -36,6 +39,7 @@ defmodule Hostctl.Hosting.DomainS3Backend do
       :region,
       :enabled,
       :ftp_mount_enabled,
+      :directory_listing,
       :access_key_id,
       :secret_access_key,
       :subdomain,

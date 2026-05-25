@@ -174,6 +174,145 @@ defmodule Hostctl.S3Client do
   end
 
   # ---------------------------------------------------------------------------
+  # Directory listing — list objects at a prefix
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Lists objects in an S3 bucket at the given prefix using the ListObjectsV2 API
+  with a `/` delimiter for directory-style grouping.
+
+  When `access_key_id` is nil or `""`, the request is made without signing
+  (suitable for public buckets).
+
+  Returns `{:ok, %{dirs: [String.t()], files: [map()]}}` or `{:error, reason}`.
+  Each file map has keys: `:key`, `:name`, `:size`, `:last_modified`.
+  """
+  def list_objects_v2(
+        endpoint,
+        bucket,
+        prefix,
+        access_key_id,
+        secret_access_key,
+        region \\ "us-east-1"
+      ) do
+    encoded_prefix = s3_encode(prefix)
+    # Query params must be sorted lexicographically
+    canonical_query =
+      "delimiter=%2F&list-type=2&max-keys=1000&prefix=#{encoded_prefix}"
+
+    url = "#{endpoint}/#{bucket}?#{canonical_query}"
+
+    if is_binary(access_key_id) && access_key_id != "" do
+      now = DateTime.utc_now()
+      amzdate = amz_datetime(now)
+      datestamp = amz_date(now)
+      host = uri_host(endpoint)
+
+      headers_to_sign = [
+        {"host", host},
+        {"x-amz-date", amzdate}
+      ]
+
+      canonical_headers = canonical_headers_string(headers_to_sign)
+      signed_headers = signed_headers_string(headers_to_sign)
+      body_hash = hex_sha256("")
+
+      canonical_request =
+        Enum.join(
+          ["GET", "/#{bucket}", canonical_query, canonical_headers, signed_headers, body_hash],
+          "\n"
+        )
+
+      auth_header =
+        build_auth_header(
+          canonical_request,
+          amzdate,
+          datestamp,
+          signed_headers,
+          access_key_id,
+          secret_access_key,
+          region,
+          "s3"
+        )
+
+      request_headers = [
+        {"x-amz-date", amzdate},
+        {"x-amz-content-sha256", body_hash},
+        {"authorization", auth_header}
+      ]
+
+      do_list_objects(url, request_headers, prefix)
+    else
+      do_list_objects(url, [], prefix)
+    end
+  end
+
+  defp do_list_objects(url, headers, prefix) do
+    case Req.get(url: url, headers: headers, retry: false) do
+      {:ok, %Req.Response{status: 200, body: body}} ->
+        xml = if is_binary(body), do: body, else: IO.iodata_to_binary(body)
+        {:ok, parse_list_xml(xml, prefix)}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, "HTTP #{status}: #{inspect(body)}"}
+
+      {:error, reason} ->
+        {:error, inspect(reason)}
+    end
+  end
+
+  defp parse_list_xml(xml, prefix) do
+    dirs =
+      Regex.scan(~r|<Prefix>(.*?)</Prefix>|s, xml, capture: :all_but_first)
+      |> Enum.map(fn [p] -> String.trim(p) end)
+      # Filter out the listing prefix itself (it appears as a CommonPrefix in some implementations)
+      |> Enum.reject(&(&1 == prefix))
+
+    files =
+      Regex.scan(~r|<Contents>(.*?)</Contents>|s, xml, capture: :all_but_first)
+      |> Enum.flat_map(fn [block] ->
+        key = Regex.run(~r|<Key>(.*?)</Key>|, block, capture: :all_but_first)
+        size = Regex.run(~r|<Size>(.*?)</Size>|, block, capture: :all_but_first)
+
+        modified =
+          Regex.run(~r|<LastModified>(.*?)</LastModified>|, block, capture: :all_but_first)
+
+        case {key, size} do
+          {[k], [s]} ->
+            # Skip "directory" placeholder keys (exact prefix match or trailing slash)
+            if k == prefix or String.ends_with?(k, "/") do
+              []
+            else
+              name = Path.basename(k)
+              mod = if modified, do: List.first(modified), else: ""
+              [%{key: k, name: name, size: String.to_integer(s), last_modified: mod}]
+            end
+
+          _ ->
+            []
+        end
+      end)
+
+    %{dirs: dirs, files: files}
+  end
+
+  @doc """
+  Fetches a single S3 object from a public bucket without signing.
+  Returns `{:ok, status, headers, body}` or `{:error, reason}`.
+  """
+  def get_object_public(endpoint, bucket, key) do
+    url = "#{endpoint}/#{bucket}/#{key}"
+
+    case Req.get(url: url, raw: true, retry: false) do
+      {:ok, %Req.Response{status: status, headers: resp_headers, body: body}} ->
+        {:ok, status, resp_headers, body}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
 
@@ -339,6 +478,10 @@ defmodule Hostctl.S3Client do
       ".txt" -> "text/plain"
       _ -> "application/octet-stream"
     end
+  end
+
+  defp s3_encode(value) do
+    URI.encode(to_string(value), &URI.char_unreserved?/1)
   end
 
   defp list_files_recursive(dir) do

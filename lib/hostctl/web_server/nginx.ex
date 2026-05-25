@@ -302,7 +302,7 @@ defmodule Hostctl.WebServer.Nginx do
     # prefix-stripping when forwarding to the upstream URI.
     location_path = String.trim_trailing(backend.url_path, "/") <> "/"
 
-    if has_credentials?(backend) do
+    if use_phoenix_proxy?(backend) do
       upstream = phoenix_proxy_url(backend)
       token = s3_proxy_token()
 
@@ -393,7 +393,7 @@ defmodule Hostctl.WebServer.Nginx do
   # ---------------------------------------------------------------------------
 
   defp s3_vhost_block(log_name, server_names, %DomainS3Backend{} = backend, false = _ssl, _cert) do
-    if has_credentials?(backend) do
+    if use_phoenix_proxy?(backend) do
       phoenix_proxy_block_http(log_name, server_names, backend)
     else
       s3_direct_block_http(log_name, server_names, backend)
@@ -401,7 +401,7 @@ defmodule Hostctl.WebServer.Nginx do
   end
 
   defp s3_vhost_block(log_name, server_names, %DomainS3Backend{} = backend, true = _ssl, ssl_cert) do
-    if has_credentials?(backend) do
+    if use_phoenix_proxy?(backend) do
       phoenix_proxy_block_ssl(log_name, server_names, backend, ssl_cert)
     else
       s3_direct_block_ssl(log_name, server_names, backend, ssl_cert)
@@ -412,6 +412,9 @@ defmodule Hostctl.WebServer.Nginx do
     do: true
 
   defp has_credentials?(_), do: false
+
+  defp use_phoenix_proxy?(%DomainS3Backend{} = backend),
+    do: has_credentials?(backend) || backend.directory_listing
 
   # Proxies to local Phoenix S3ProxyController (private buckets).
   # The URL uses the backend's DB id so nginx can strip the url_path prefix

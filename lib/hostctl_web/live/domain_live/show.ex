@@ -1715,6 +1715,20 @@ defmodule HostctlWeb.DomainLive.Show do
                       </p>
                     </div>
 
+                    <%!-- Directory listing --%>
+                    <div class="pt-1 border-t border-gray-200 dark:border-gray-700">
+                      <.input
+                        field={@s3_form[:directory_listing]}
+                        type="checkbox"
+                        label="Enable directory listings"
+                      />
+                      <p class="text-xs text-gray-500 dark:text-gray-400 -mt-1">
+                        When enabled, requests to paths ending in <code>/</code>
+                        will show an HTML index of files and folders at that S3 prefix.
+                        Works for both public and private buckets.
+                      </p>
+                    </div>
+
                     <div class="flex items-center gap-3 pt-1">
                       <button
                         type="submit"
