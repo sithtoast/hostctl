@@ -158,6 +158,16 @@ defmodule Hostctl.FeatureSetup do
       ],
       services: [],
       setup_fn: :setup_adminer
+    },
+    %{
+      key: "rclone",
+      label: "Rclone S3 Mounts",
+      description:
+        "Installs rclone and enables FUSE allow-other so S3-backed domains can be FUSE-mounted as local filesystems. Required for the \"Enable transparent FTP access\" option on S3 backends.",
+      icon: "hero-cloud-arrow-up",
+      packages: ["rclone", "fuse3"],
+      services: [],
+      setup_fn: :setup_rclone
     }
   ]
 
@@ -1283,6 +1293,77 @@ defmodule Hostctl.FeatureSetup do
     """
 
     write_file_via_sudo(key, "/etc/apache2/conf-available/adminer.conf", conf)
+  end
+
+  def setup_rclone(key) do
+    broadcast(key, :log, "Configuring rclone for S3 FTP mounts...")
+
+    with :ok <- enable_fuse_allow_other(key),
+         :ok <- create_rclone_dirs(key) do
+      broadcast(key, :log, "Rclone configuration complete.")
+      broadcast(key, :log, "You can now enable 'transparent FTP access' on S3 backends.")
+      :ok
+    end
+  end
+
+  defp enable_fuse_allow_other(key) do
+    broadcast(key, :log, "Checking /etc/fuse.conf for user_allow_other...")
+
+    case escaped_cmd("grep", ["-q", "^user_allow_other", "/etc/fuse.conf"],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        broadcast(key, :log, "user_allow_other is already enabled.")
+        :ok
+
+      _ ->
+        broadcast(key, :log, "Enabling user_allow_other in /etc/fuse.conf...")
+        # Uncomment any existing commented-out line
+        escaped_cmd(
+          "sed",
+          ["-i", "s/^#[[:space:]]*user_allow_other/user_allow_other/", "/etc/fuse.conf"],
+          stderr_to_stdout: true
+        )
+
+        # Check if that was enough; if not, append the line
+        case escaped_cmd("grep", ["-q", "^user_allow_other", "/etc/fuse.conf"],
+               stderr_to_stdout: true
+             ) do
+          {_, 0} ->
+            broadcast(key, :log, "user_allow_other enabled in /etc/fuse.conf.")
+            :ok
+
+          _ ->
+            case escaped_cmd("sh", ["-c", "echo 'user_allow_other' >> /etc/fuse.conf"],
+                   stderr_to_stdout: true
+                 ) do
+              {_, 0} ->
+                broadcast(key, :log, "user_allow_other appended to /etc/fuse.conf.")
+                :ok
+
+              {output, code} ->
+                broadcast(
+                  key,
+                  :log,
+                  "Failed to update /etc/fuse.conf (exit #{code}): #{output}"
+                )
+
+                {:error, :fuse_conf_failed}
+            end
+        end
+    end
+  end
+
+  defp create_rclone_dirs(key) do
+    broadcast(key, :log, "Creating rclone directories...")
+
+    with :ok <- run_cmd(key, "mkdir", ["-p", "/etc/hostctl/rclone"]),
+         :ok <- run_cmd(key, "chmod", ["700", "/etc/hostctl/rclone"]),
+         :ok <- run_cmd(key, "mkdir", ["-p", "/var/cache/hostctl/rclone"]),
+         :ok <- run_cmd(key, "mkdir", ["-p", "/var/log/hostctl"]) do
+      broadcast(key, :log, "Rclone directories ready.")
+      :ok
+    end
   end
 
   # ---------------------------------------------------------------------------

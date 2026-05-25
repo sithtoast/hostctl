@@ -80,6 +80,7 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign(:ftp_edit_form, nil)
      |> assign(:ftp_home_options, ftp_home_options)
      |> stream(:subdomains, subdomains)
+     |> assign(:subdomain_names, Enum.map(subdomains, & &1.name))
      |> stream(:cron_jobs, cron_jobs)
      |> stream(:ftp_accounts, ftp_accounts)
      |> assign_ssl_form()
@@ -228,6 +229,7 @@ defmodule HostctlWeb.DomainLive.Show do
          socket
          |> stream_insert(:subdomains, subdomain)
          |> assign_subdomain_form()
+         |> assign(:subdomain_names, [subdomain.name | socket.assigns.subdomain_names])
          |> put_flash(:info, "Subdomain #{subdomain.name}.#{socket.assigns.domain.name} created.")}
 
       {:error, changeset} ->
@@ -241,7 +243,11 @@ defmodule HostctlWeb.DomainLive.Show do
 
     if subdomain do
       {:ok, _} = Hosting.delete_subdomain(subdomain)
-      {:noreply, stream_delete(socket, :subdomains, subdomain)}
+
+      {:noreply,
+       socket
+       |> stream_delete(:subdomains, subdomain)
+       |> assign(:subdomain_names, List.delete(socket.assigns.subdomain_names, subdomain.name))}
     else
       {:noreply, socket}
     end
@@ -1600,6 +1606,18 @@ defmodule HostctlWeb.DomainLive.Show do
                   <h4 class="text-sm font-semibold text-gray-800 dark:text-gray-100 mb-4">
                     {if @s3_editing, do: "Edit S3 Backend", else: "New S3 Backend"}
                   </h4>
+                  <%!-- Datalists for subdomain and url_path suggestions --%>
+                  <datalist id="s3-subdomain-list">
+                    <option :for={name <- @subdomain_names} value={name} />
+                  </datalist>
+                  <datalist id="s3-url-path-list">
+                    <option value="/assets" />
+                    <option value="/static" />
+                    <option value="/media" />
+                    <option value="/uploads" />
+                    <option value="/images" />
+                    <option value="/files" />
+                  </datalist>
                   <.form
                     for={@s3_form}
                     id="s3-backend-form"
@@ -1614,12 +1632,14 @@ defmodule HostctlWeb.DomainLive.Show do
                         type="text"
                         label="Subdomain (optional)"
                         placeholder="Leave blank to apply to the entire domain"
+                        list="s3-subdomain-list"
                       />
                       <.input
                         field={@s3_form[:url_path]}
                         type="text"
                         label="URL Path (optional)"
                         placeholder="e.g. /assets — leave blank to serve entire domain from S3"
+                        list="s3-url-path-list"
                       />
                     </div>
                     <p class="text-xs text-gray-500 dark:text-gray-400 -mt-2">
@@ -1676,6 +1696,23 @@ defmodule HostctlWeb.DomainLive.Show do
                             else: "Leave blank for public buckets"
                         }
                       />
+                    </div>
+
+                    <%!-- FTP mount --%>
+                    <div class="pt-1 border-t border-gray-200 dark:border-gray-700">
+                      <.input
+                        field={@s3_form[:ftp_mount_enabled]}
+                        type="checkbox"
+                        label="Enable transparent FTP access via rclone FUSE mount"
+                      />
+                      <p class="text-xs text-gray-500 dark:text-gray-400 -mt-1">
+                        When enabled, hostctl provisions a systemd service that mounts
+                        this S3 bucket at the document root using rclone, allowing FTP
+                        users to upload files directly to S3. Requires <code>rclone</code>
+                        and <code>user_allow_other</code>
+                        in <code>/etc/fuse.conf</code>
+                        on the server.
+                      </p>
                     </div>
 
                     <div class="flex items-center gap-3 pt-1">

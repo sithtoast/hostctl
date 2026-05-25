@@ -18,6 +18,9 @@ defmodule Hostctl.Hosting.DomainS3Backend do
     # url_path non-empty = only serves requests under that URL path (e.g. "/assets").
     field :subdomain, :string, default: ""
     field :url_path, :string, default: ""
+    # When true, hostctl provisions a rclone FUSE mount at the document root
+    # for this scope so FTP users can upload directly to S3.
+    field :ftp_mount_enabled, :boolean, default: false
 
     belongs_to :domain, Domain
 
@@ -32,6 +35,7 @@ defmodule Hostctl.Hosting.DomainS3Backend do
       :path_prefix,
       :region,
       :enabled,
+      :ftp_mount_enabled,
       :access_key_id,
       :secret_access_key,
       :subdomain,

@@ -35,6 +35,7 @@ defmodule Hostctl.WebServer do
   alias Hostctl.Repo
   alias Hostctl.Hosting.{Domain, DomainProxy, Subdomain, SslCertificate, DomainS3Backend}
   alias Hostctl.WebServer.Nginx
+  alias Hostctl.WebServer.RcloneMount
 
   @doc """
   Writes (or overwrites) the Nginx vhost config for the given domain, then
@@ -78,6 +79,7 @@ defmodule Hostctl.WebServer do
       case write_vhost(domain, config) do
         :ok ->
           reload()
+          RcloneMount.sync_mounts(domain, subdomains, s3_backends)
 
         {:error, reason} ->
           Logger.error(
@@ -99,6 +101,9 @@ defmodule Hostctl.WebServer do
   """
   def remove_domain(%Domain{} = domain) do
     if enabled?() do
+      s3_backends = Repo.all(from b in DomainS3Backend, where: b.domain_id == ^domain.id)
+      RcloneMount.remove_all(s3_backends)
+
       available_path = sites_available_path(domain)
       enabled_path = sites_enabled_path(domain)
 
