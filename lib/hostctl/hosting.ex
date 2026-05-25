@@ -1392,6 +1392,10 @@ defmodule Hostctl.Hosting do
 
     case result do
       {:ok, backend} ->
+        if is_binary(backend.subdomain) && backend.subdomain != "" do
+          maybe_create_subdomain_dns_records(domain, backend.subdomain)
+        end
+
         WebServer.sync_domain(domain)
         {:ok, backend}
 
@@ -1401,6 +1405,8 @@ defmodule Hostctl.Hosting do
   end
 
   def update_s3_backend(%DomainS3Backend{} = backend, attrs) do
+    old_subdomain = backend.subdomain
+
     result =
       backend
       |> DomainS3Backend.changeset(attrs)
@@ -1409,6 +1415,12 @@ defmodule Hostctl.Hosting do
     case result do
       {:ok, updated} ->
         domain = Repo.get!(Domain, updated.domain_id)
+
+        if is_binary(updated.subdomain) && updated.subdomain != "" &&
+             updated.subdomain != old_subdomain do
+          maybe_create_subdomain_dns_records(domain, updated.subdomain)
+        end
+
         WebServer.sync_domain(domain)
         {:ok, updated}
 

@@ -63,7 +63,17 @@ defmodule Hostctl.WebServer do
         write_ssl_cert(domain.name, ssl_cert)
       end
 
-      # Ensure the document root exists before nginx tries to serve from it
+      # Ensure the document root exists before nginx tries to serve from it.
+      # Skip subdomains whose root is managed by an ftp_mount_enabled S3 backend —
+      # the mount point is the S3 bucket itself, so writing a placeholder index.html
+      # would either land on the local filesystem (confusing) or get written into S3
+      # via the FUSE mount (potentially overwriting real content).
+      s3_mounted_subdomain_names =
+        s3_backends
+        |> Enum.filter(&(&1.ftp_mount_enabled && &1.url_path == ""))
+        |> Enum.map(& &1.subdomain)
+        |> MapSet.new()
+
       provision_webroot(domain.document_root || "/var/www/#{domain.name}/httpdocs")
 
       Enum.each(subdomains, fn sub ->
@@ -71,7 +81,9 @@ defmodule Hostctl.WebServer do
           sub.document_root ||
             "/var/www/#{domain.name}/#{sub.name}.#{domain.name}"
 
-        provision_webroot(sub_root)
+        unless MapSet.member?(s3_mounted_subdomain_names, sub.name) do
+          provision_webroot(sub_root)
+        end
       end)
 
       config = Nginx.generate_config(domain, subdomains, ssl_cert, proxies, s3_backends)
