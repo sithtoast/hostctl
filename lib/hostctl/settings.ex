@@ -531,4 +531,90 @@ defmodule Hostctl.Settings do
     |> String.replace("{{ipv6}}", ipv6)
     |> String.replace("{{hostname}}", hostname)
   end
+
+  # ---------------------------------------------------------------------------
+  # External IP auto-detection
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Returns true when the interface name looks like a Docker-managed virtual adapter
+  (docker0, br-*, veth*, virbr*) or is the loopback interface.
+  """
+  def docker_interface?(name) when is_binary(name) do
+    String.starts_with?(name, "docker") or
+      String.starts_with?(name, "br-") or
+      String.starts_with?(name, "veth") or
+      String.starts_with?(name, "virbr") or
+      name == "lo"
+  end
+
+  def docker_interface?(_), do: false
+
+  @doc """
+  For every non-Docker IP setting that has no external IP set, attempts to detect
+  the external (NAT) IP by opening a TCP connection to `api.ipify.org` bound to
+  that interface's local IP as the source address.
+
+  Returns `{:ok, updated_settings}` with the refreshed list of all detected IPs.
+  """
+  def auto_detect_external_ips do
+    candidates =
+      Repo.all(
+        from s in ServerIpSetting,
+          where: is_nil(s.external_ip) or s.external_ip == ""
+      )
+      |> Enum.reject(fn s -> docker_interface?(s.interface || "") end)
+      |> Enum.reject(fn s -> String.contains?(s.ip_address, ":") end)
+
+    candidates
+    |> Task.async_stream(
+      fn setting ->
+        case fetch_external_ip_for(setting.ip_address) do
+          {:ok, ext_ip} -> update_ip_setting(setting, %{external_ip: ext_ip})
+          {:error, _} -> :skip
+        end
+      end,
+      timeout: 12_000,
+      max_concurrency: 4
+    )
+    |> Stream.run()
+
+    {:ok, sync_and_list_ip_settings()}
+  end
+
+  # Makes a raw HTTP/1.0 request to api.ipify.org bound to `local_ip` as the
+  # TCP source address, returning the detected public IP.
+  defp fetch_external_ip_for(local_ip_str) do
+    with {:ok, local_ip_tuple} <- :inet.parse_address(String.to_charlist(local_ip_str)),
+         {:ok, socket} <-
+           :gen_tcp.connect(
+             ~c"api.ipify.org",
+             80,
+             [:binary, active: false, ip: local_ip_tuple],
+             5_000
+           ),
+         :ok <-
+           :gen_tcp.send(socket, "GET /?format=text HTTP/1.0\r\nHost: api.ipify.org\r\n\r\n"),
+         {:ok, response} <- recv_tcp(socket, "") do
+      :gen_tcp.close(socket)
+
+      case Regex.run(~r/\r\n\r\n(\S+)/, response) do
+        [_, ip] ->
+          if ip =~ ~r/^\d+\.\d+\.\d+\.\d+$/, do: {:ok, ip}, else: {:error, :invalid_response}
+
+        _ ->
+          {:error, :invalid_response}
+      end
+    else
+      _ -> {:error, :failed}
+    end
+  end
+
+  defp recv_tcp(socket, acc) do
+    case :gen_tcp.recv(socket, 0, 5_000) do
+      {:ok, data} -> recv_tcp(socket, acc <> data)
+      {:error, :closed} -> {:ok, acc}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 end

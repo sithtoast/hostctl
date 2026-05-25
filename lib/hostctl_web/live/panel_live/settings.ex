@@ -22,6 +22,7 @@ defmodule HostctlWeb.PanelLive.Settings do
      |> assign(:active_tab, :panel_settings)
      |> assign(:editing_id, nil)
      |> assign(:edit_form, nil)
+     |> assign(:detecting_ips, false)
      |> assign(:dns_setting, dns_setting)
      |> assign(:dns_form, dns_form)
      |> assign(:dns_test_status, nil)
@@ -83,6 +84,26 @@ defmodule HostctlWeb.PanelLive.Settings do
      socket
      |> put_flash(:info, "IP list refreshed.")
      |> stream(:ip_settings, ip_settings, reset: true)}
+  end
+
+  @impl true
+  def handle_event("auto_detect_ips", _, socket) do
+    socket = assign(socket, :detecting_ips, true)
+
+    case Settings.auto_detect_external_ips() do
+      {:ok, ip_settings} ->
+        {:noreply,
+         socket
+         |> assign(:detecting_ips, false)
+         |> put_flash(:info, "External IPs auto-detected for non-Docker interfaces.")
+         |> stream(:ip_settings, ip_settings, reset: true)}
+
+      _ ->
+        {:noreply,
+         socket
+         |> assign(:detecting_ips, false)
+         |> put_flash(:error, "External IP detection failed.")}
+    end
   end
 
   @impl true
@@ -259,6 +280,25 @@ defmodule HostctlWeb.PanelLive.Settings do
           >
             <.icon name="hero-arrow-path" class="w-4 h-4" /> Refresh IPs
           </button>
+          <button
+            id="auto-detect-ips-btn"
+            phx-click="auto_detect_ips"
+            disabled={@detecting_ips}
+            class={[
+              "inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors",
+              if(@detecting_ips,
+                do:
+                  "bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed",
+                else: "bg-emerald-600 hover:bg-emerald-500 text-white"
+              )
+            ]}
+          >
+            <.icon
+              name={if(@detecting_ips, do: "hero-arrow-path", else: "hero-magnifying-glass")}
+              class={["w-4 h-4", @detecting_ips && "animate-spin"]}
+            />
+            {if @detecting_ips, do: "Detecting…", else: "Auto-detect External IPs"}
+          </button>
         </div>
 
         <%!-- IP Settings table --%>
@@ -303,8 +343,13 @@ defmodule HostctlWeb.PanelLive.Settings do
                       <p class="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wide">
                         Interface
                       </p>
-                      <p class="text-sm font-mono text-gray-900 dark:text-white truncate">
+                      <p class="text-sm font-mono text-gray-900 dark:text-white truncate flex items-center gap-1.5">
                         {setting.interface || "—"}
+                        <%= if Settings.docker_interface?(setting.interface || "") do %>
+                          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-sky-100 dark:bg-sky-900/30 text-sky-600 dark:text-sky-400">
+                            docker
+                          </span>
+                        <% end %>
                       </p>
                     </div>
                     <div>
