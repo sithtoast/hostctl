@@ -545,6 +545,41 @@ if dpkg -l vsftpd &>/dev/null 2>&1; then
   if [[ -f "$VSFTPD_CONF" ]]; then
     vsftpd_changed=false
 
+    # Ensure listen=NO (vsftpd must use listen_ipv6=YES so it binds :: and
+    # accepts both IPv4 and IPv6; listen=YES restricts it to IPv4 only, which
+    # causes "connection refused" when clients connect via a domain that has
+    # an AAAA record and prefer IPv6)
+    if grep -q "^listen=NO" "$VSFTPD_CONF"; then
+      ok "listen already set to NO"
+    else
+      sed -i "/^listen=/d" "$VSFTPD_CONF"
+      echo "listen=NO" >> "$VSFTPD_CONF"
+      fix "listen → NO"
+      FIXED=$((FIXED + 1))
+      vsftpd_changed=true
+    fi
+
+    if grep -q "^listen_ipv6=YES" "$VSFTPD_CONF"; then
+      ok "listen_ipv6 already set to YES"
+    else
+      sed -i "/^listen_ipv6=/d" "$VSFTPD_CONF"
+      echo "listen_ipv6=YES" >> "$VSFTPD_CONF"
+      fix "listen_ipv6 → YES"
+      FIXED=$((FIXED + 1))
+      vsftpd_changed=true
+    fi
+
+    # Ensure pasv_addr_resolve=YES so passive mode works via domain name
+    if grep -q "^pasv_addr_resolve=YES" "$VSFTPD_CONF"; then
+      ok "pasv_addr_resolve already set to YES"
+    else
+      sed -i "/^pasv_addr_resolve=/d" "$VSFTPD_CONF"
+      echo "pasv_addr_resolve=YES" >> "$VSFTPD_CONF"
+      fix "pasv_addr_resolve → YES"
+      FIXED=$((FIXED + 1))
+      vsftpd_changed=true
+    fi
+
     # Ensure virtual_use_local_privs=YES is in the global config
     if grep -q "^virtual_use_local_privs=YES" "$VSFTPD_CONF"; then
       ok "virtual_use_local_privs already set"

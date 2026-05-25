@@ -638,8 +638,8 @@ defmodule Hostctl.FeatureSetup do
     broadcast(key, :log, "Writing vsftpd.conf...")
 
     conf = """
-    listen=YES
-    listen_ipv6=NO
+    listen=NO
+    listen_ipv6=YES
     anonymous_enable=NO
     local_enable=YES
     write_enable=YES
@@ -661,6 +661,7 @@ defmodule Hostctl.FeatureSetup do
     hide_ids=YES
     pasv_min_port=30000
     pasv_max_port=31000
+    pasv_addr_resolve=YES
     """
 
     write_file_via_sudo(key, "/etc/vsftpd.conf", conf)
