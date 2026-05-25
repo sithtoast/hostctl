@@ -306,13 +306,17 @@ defmodule Hostctl.WebServer.Nginx do
       upstream = phoenix_proxy_url(backend)
       token = s3_proxy_token()
 
+      token_line =
+        if token != "",
+          do: "\n              proxy_set_header X-S3-Proxy-Token #{token};",
+          else: ""
+
       """
           location ^~ #{location_path} {
               proxy_pass #{upstream};
               proxy_set_header Host $host;
               proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-S3-Proxy-Token #{token};
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;#{token_line}
               proxy_intercept_errors on;
               error_page 404 = @s3_path_not_found;
           }
@@ -416,6 +420,9 @@ defmodule Hostctl.WebServer.Nginx do
     upstream = phoenix_proxy_url(backend)
     token = s3_proxy_token()
 
+    token_line =
+      if token != "", do: "\n            proxy_set_header X-S3-Proxy-Token #{token};", else: ""
+
     """
     # #{log_name} — managed by hostctl (S3 backend, private)
     server {
@@ -430,8 +437,7 @@ defmodule Hostctl.WebServer.Nginx do
             proxy_pass #{upstream};
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-S3-Proxy-Token #{token};
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;#{token_line}
             proxy_intercept_errors on;
             error_page 404 = @not_found;
         }
@@ -449,6 +455,9 @@ defmodule Hostctl.WebServer.Nginx do
     ssl_key_path = key_path(ssl_cert, primary)
     upstream = phoenix_proxy_url(backend)
     token = s3_proxy_token()
+
+    token_line =
+      if token != "", do: "\n            proxy_set_header X-S3-Proxy-Token #{token};", else: ""
 
     """
     # #{log_name} — managed by hostctl (S3 backend, private)
@@ -479,8 +488,7 @@ defmodule Hostctl.WebServer.Nginx do
             proxy_pass #{upstream};
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-S3-Proxy-Token #{token};
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;#{token_line}
             proxy_intercept_errors on;
             error_page 404 = @not_found;
         }
