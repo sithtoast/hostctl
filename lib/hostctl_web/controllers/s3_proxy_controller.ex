@@ -71,6 +71,28 @@ defmodule HostctlWeb.S3ProxyController do
   defp is_directory_request?([]), do: true
   defp is_directory_request?(parts), do: List.last(parts) == ""
 
+  # Reconstructs the original client-facing path from the backend config and path parts.
+  # For subdomain backends (url_path nil/empty), the root is "/".
+  # For url-path backends, the root is "/{url_path}/".
+  # path_parts for a directory request may end with "" (e.g. ["cool-beans", ""]) —
+  # that trailing empty segment is stripped for display.
+  defp client_display_path(backend, path_parts) do
+    parts = Enum.reject(path_parts, &(&1 == ""))
+
+    base =
+      if is_binary(backend.url_path) && backend.url_path != "" do
+        "/" <> String.trim(backend.url_path, "/") <> "/"
+      else
+        "/"
+      end
+
+    if parts == [] do
+      base
+    else
+      base <> Enum.join(parts, "/") <> "/"
+    end
+  end
+
   defp build_full_key(backend, path_parts) do
     object_key = Enum.join(path_parts, "/")
 
@@ -142,8 +164,8 @@ defmodule HostctlWeb.S3ProxyController do
            region
          ) do
       {:ok, %{dirs: dirs, files: files}} ->
-        request_path = conn.request_path
-        html = render_directory_listing(request_path, prefix, dirs, files)
+        display_path = client_display_path(backend, path_parts)
+        html = render_directory_listing(display_path, prefix, dirs, files)
 
         conn
         |> put_resp_content_type("text/html")
@@ -156,15 +178,12 @@ defmodule HostctlWeb.S3ProxyController do
     end
   end
 
-  defp render_directory_listing(request_path, prefix, dirs, files) do
-    # Strip trailing slash from request path for display
-    display_path = if request_path == "/" || request_path == "", do: "/", else: request_path
-
+  defp render_directory_listing(display_path, prefix, dirs, files) do
     breadcrumb_html = build_breadcrumb(display_path)
 
     parent_link =
       if prefix != "" do
-        parent = request_path |> String.trim_trailing("/") |> Path.dirname()
+        parent = display_path |> String.trim_trailing("/") |> Path.dirname()
         parent = if parent == ".", do: "/", else: parent
 
         """
@@ -184,7 +203,7 @@ defmodule HostctlWeb.S3ProxyController do
       |> Enum.map(fn dir_prefix ->
         # dir_prefix is the full S3 prefix; we want just the directory name
         name = dir_prefix |> String.trim_trailing("/") |> Path.basename()
-        href = Path.join(String.trim_trailing(request_path, "/"), name) <> "/"
+        href = Path.join(String.trim_trailing(display_path, "/"), name) <> "/"
 
         """
         <tr>
@@ -200,7 +219,7 @@ defmodule HostctlWeb.S3ProxyController do
     file_rows =
       files
       |> Enum.map(fn %{name: name, size: size, last_modified: modified} ->
-        href = Path.join(String.trim_trailing(request_path, "/"), name)
+        href = Path.join(String.trim_trailing(display_path, "/"), name)
         size_str = format_size(size)
         date_str = format_date(modified)
 
