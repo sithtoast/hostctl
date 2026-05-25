@@ -591,6 +591,63 @@ if dpkg -l vsftpd &>/dev/null 2>&1; then
       vsftpd_changed=true
     fi
 
+    # Ensure pam_service_name points to the virtual-users PAM config.
+    # Without this vsftpd falls through to the default 'vsftpd' PAM service
+    # which uses pam_unix (system accounts) and never consults the virtual
+    # users DB — causing "user unknown" for all FTP accounts.
+    if grep -q "^pam_service_name=vsftpd.virtual" "$VSFTPD_CONF"; then
+      ok "pam_service_name already set to vsftpd.virtual"
+    else
+      sed -i "/^pam_service_name=/d" "$VSFTPD_CONF"
+      echo "pam_service_name=vsftpd.virtual" >> "$VSFTPD_CONF"
+      fix "pam_service_name → vsftpd.virtual"
+      FIXED=$((FIXED + 1))
+      vsftpd_changed=true
+    fi
+
+    # Ensure /etc/pam.d/vsftpd.virtual exists with the pam_userdb configuration.
+    # If this file is missing, vsftpd cannot authenticate virtual users even
+    # when pam_service_name is set correctly.
+    PAM_VIRT="/etc/pam.d/vsftpd.virtual"
+    if [[ -f "$PAM_VIRT" ]] && grep -q "pam_userdb" "$PAM_VIRT"; then
+      ok "/etc/pam.d/vsftpd.virtual already configured"
+    else
+      cat > "$PAM_VIRT" <<'PAMEOF'
+auth required pam_userdb.so db=/etc/vsftpd/virtual_users
+account required pam_userdb.so db=/etc/vsftpd/virtual_users
+PAMEOF
+      fix "wrote /etc/pam.d/vsftpd.virtual (pam_userdb)"
+      FIXED=$((FIXED + 1))
+      vsftpd_changed=true
+    fi
+
+    # Rebuild the virtual users Berkeley DB if the plaintext source exists but
+    # the compiled .db file is absent or older than the source. Without the .db
+    # file, pam_userdb cannot authenticate any virtual FTP user.
+    VUSERS_TXT="/etc/vsftpd/virtual_users.txt"
+    VUSERS_DB="/etc/vsftpd/virtual_users.db"
+    if [[ -f "$VUSERS_TXT" ]]; then
+      if [[ ! -f "$VUSERS_DB" ]] || [[ "$VUSERS_TXT" -nt "$VUSERS_DB" ]]; then
+        DB_LOAD_CMD=""
+        for candidate in db_load db5.3_load db4.8_load; do
+          if command -v "$candidate" &>/dev/null; then
+            DB_LOAD_CMD="$candidate"
+            break
+          fi
+        done
+        if [[ -n "$DB_LOAD_CMD" ]]; then
+          "$DB_LOAD_CMD" -T -t hash -f "$VUSERS_TXT" "$VUSERS_DB" 2>/dev/null \
+            && fix "rebuilt virtual_users.db from virtual_users.txt" \
+            || warn "db_load failed — virtual FTP users may not authenticate"
+          FIXED=$((FIXED + 1))
+        else
+          warn "db_load not found — install db-util or db5.3-util to fix FTP auth"
+        fi
+      else
+        ok "virtual_users.db is up to date"
+      fi
+    fi
+
     # Patch per-user config files: ensure virtual_use_local_privs=YES is present
     # and remove stale anon_* directives (irrelevant when local privs are active)
     VSFTPD_USER_CONF_DIR="/etc/vsftpd/vsftpd_user_conf"
