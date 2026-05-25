@@ -1372,8 +1372,16 @@ defmodule Hostctl.Hosting do
   # S3 Backends
   # ---------------------------------------------------------------------------
 
-  def get_s3_backend(%Domain{} = domain) do
-    Repo.get_by(DomainS3Backend, domain_id: domain.id)
+  def list_s3_backends(%Domain{} = domain) do
+    Repo.all(
+      from b in DomainS3Backend,
+        where: b.domain_id == ^domain.id,
+        order_by: [asc: b.subdomain, asc: b.url_path]
+    )
+  end
+
+  def get_s3_backend_by_id!(id) do
+    Repo.get!(DomainS3Backend, id)
   end
 
   def create_s3_backend(%Domain{} = domain, attrs) do

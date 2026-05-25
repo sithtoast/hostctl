@@ -40,7 +40,7 @@ defmodule Hostctl.Hosting.Domain do
     has_one :smarthost_setting, DomainSmarthostSetting
     has_many :bandwidth_snapshots, BandwidthSnapshot
     has_one :backup_setting, Hostctl.Backup.DomainSetting
-    has_one :s3_backend, DomainS3Backend
+    has_many :s3_backends, DomainS3Backend
 
     timestamps(type: :utc_datetime)
   end

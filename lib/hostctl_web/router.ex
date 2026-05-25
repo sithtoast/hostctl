@@ -102,7 +102,7 @@ defmodule HostctlWeb.Router do
   scope "/_s3_proxy", HostctlWeb do
     pipe_through [:api]
 
-    get "/:domain/*path", S3ProxyController, :show
+    get "/:backend_id/*path", S3ProxyController, :show
   end
 
   scope "/", HostctlWeb do

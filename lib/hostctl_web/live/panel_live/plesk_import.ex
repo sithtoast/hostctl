@@ -853,7 +853,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     |> assign(:restore_task_refs, task_refs)
   end
 
-  # Returns S3 backend opts for a domain if it has an S3 backend with credentials.
+  # Returns S3 backend opts for a domain if it has a whole-domain S3 backend
+  # (subdomain and url_path both empty) with credentials configured.
   defp build_s3_backend_opts(domain_name) do
     import Ecto.Query
 
@@ -864,7 +865,12 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       Repo.one(from d in Domain, where: d.name == ^domain_name, limit: 1)
 
     if domain do
-      backend = Repo.get_by(DomainS3Backend, domain_id: domain.id)
+      backend =
+        Repo.one(
+          from b in DomainS3Backend,
+            where: b.domain_id == ^domain.id and b.subdomain == "" and b.url_path == "",
+            limit: 1
+        )
 
       if backend &&
            is_binary(backend.access_key_id) && backend.access_key_id != "" &&
@@ -2232,7 +2238,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   end
 
   # Returns a map of %{domain_name => s3_backend} for domains that already exist
-  # in the database and have an S3 backend configured with credentials.
+  # in the database and have a whole-domain S3 backend (subdomain="", url_path="")
+  # configured with credentials.
   defp load_domain_s3_backends(subscriptions) do
     import Ecto.Query
 
@@ -2253,6 +2260,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         Repo.all(
           from b in DomainS3Backend,
             where: b.domain_id in ^Map.values(domain_id_map),
+            where: b.subdomain == "" and b.url_path == "",
             where: not is_nil(b.access_key_id),
             where: b.access_key_id != ""
         )

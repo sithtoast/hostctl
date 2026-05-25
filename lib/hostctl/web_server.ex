@@ -56,7 +56,7 @@ defmodule Hostctl.WebServer do
         )
 
       ssl_cert = Repo.get_by(SslCertificate, domain_id: domain.id)
-      s3_backend = Repo.get_by(DomainS3Backend, domain_id: domain.id)
+      s3_backends = Repo.all(from b in DomainS3Backend, where: b.domain_id == ^domain.id)
 
       if ssl_cert && ssl_cert.cert_type == "custom" && ssl_cert.status == "active" do
         write_ssl_cert(domain.name, ssl_cert)
@@ -73,7 +73,7 @@ defmodule Hostctl.WebServer do
         provision_webroot(sub_root)
       end)
 
-      config = Nginx.generate_config(domain, subdomains, ssl_cert, proxies, s3_backend)
+      config = Nginx.generate_config(domain, subdomains, ssl_cert, proxies, s3_backends)
 
       case write_vhost(domain, config) do
         :ok ->

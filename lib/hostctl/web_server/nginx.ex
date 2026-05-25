@@ -28,20 +28,26 @@ defmodule Hostctl.WebServer.Nginx do
   @doc """
   Generates a complete Nginx vhost config for the given domain and its active
   subdomains. Pass the domain's `SslCertificate` record (or nil) to control
-  whether SSL server blocks are included. Pass the domain's `DomainS3Backend`
-  record (or nil) to proxy all requests to S3-compatible storage.
+  whether SSL server blocks are included. Pass a list of `DomainS3Backend`
+  records to proxy some or all requests to S3-compatible storage.
+
+  Each backend's scope is determined by its `subdomain` and `url_path` fields:
+  - `subdomain: "", url_path: ""` — whole-domain S3 (replaces filesystem vhost)
+  - `subdomain: "cdn", url_path: ""` — whole-subdomain S3
+  - `subdomain: "", url_path: "/assets"` — URL-path S3 within main domain vhost
+  - `subdomain: "cdn", url_path: "/files"` — URL-path S3 within subdomain vhost
   """
   def generate_config(
         %Domain{} = domain,
         subdomains \\ [],
         ssl_cert \\ nil,
         proxies \\ [],
-        s3_backend \\ nil
+        s3_backends \\ []
       ) do
     if domain.status == "suspended" do
       suspended_config(domain)
     else
-      active_config(domain, subdomains, ssl_cert, proxies, s3_backend)
+      active_config(domain, subdomains, ssl_cert, proxies, s3_backends)
     end
   end
 
@@ -49,17 +55,27 @@ defmodule Hostctl.WebServer.Nginx do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  defp active_config(%Domain{} = domain, subdomains, ssl_cert, proxies, s3_backend) do
+  defp active_config(%Domain{} = domain, subdomains, ssl_cert, proxies, s3_backends) do
     doc_root = domain.document_root || "/var/www/#{domain.name}/httpdocs"
     php_socket = php_fpm_socket(domain.php_version)
     use_ssl = ssl_active?(domain, ssl_cert)
 
+    # Partition enabled backends by scope.
+    enabled = Enum.filter(s3_backends, & &1.enabled)
+    whole_domain_backend = Enum.find(enabled, &(&1.subdomain == "" && &1.url_path == ""))
+    domain_path_backends = Enum.filter(enabled, &(&1.subdomain == "" && &1.url_path != ""))
+
+    subdomain_backend_map =
+      enabled
+      |> Enum.filter(&(&1.subdomain != ""))
+      |> Enum.group_by(& &1.subdomain)
+
     main =
-      if s3_backend && s3_backend.enabled do
+      if whole_domain_backend do
         s3_vhost_block(
           domain.name,
           "#{domain.name} www.#{domain.name}",
-          s3_backend,
+          whole_domain_backend,
           use_ssl,
           ssl_cert
         )
@@ -71,34 +87,96 @@ defmodule Hostctl.WebServer.Nginx do
           php_socket,
           use_ssl,
           ssl_cert,
-          proxies
+          proxies,
+          domain_path_backends
         )
       end
 
-    sub_blocks =
-      subdomains
-      |> Enum.filter(&(&1.status == "active"))
-      |> Enum.map(fn sub ->
-        sub_root =
-          sub.document_root ||
-            "/var/www/#{domain.name}/#{sub.name}.#{domain.name}"
+    # Subdomains that have DB records.
+    active_subs = Enum.filter(subdomains, &(&1.status == "active"))
+    active_sub_names = Enum.map(active_subs, & &1.name)
 
-        vhost_block(
-          "#{sub.name}.#{domain.name}",
-          "#{sub.name}.#{domain.name}",
-          sub_root,
-          php_socket,
-          false,
-          nil,
-          []
-        )
+    # Subdomain names that only exist as S3 backend entries (no DB Subdomain record).
+    extra_sub_names = Map.keys(subdomain_backend_map) -- active_sub_names
+
+    active_sub_blocks =
+      Enum.map(active_subs, fn sub ->
+        sub_root = sub.document_root || "/var/www/#{domain.name}/#{sub.name}.#{domain.name}"
+        backends_for_sub = Map.get(subdomain_backend_map, sub.name, [])
+        whole_sub_backend = Enum.find(backends_for_sub, &(&1.url_path == ""))
+        path_backends_for_sub = Enum.filter(backends_for_sub, &(&1.url_path != ""))
+
+        if whole_sub_backend do
+          s3_vhost_block(
+            "#{sub.name}.#{domain.name}",
+            "#{sub.name}.#{domain.name}",
+            whole_sub_backend,
+            false,
+            nil
+          )
+        else
+          vhost_block(
+            "#{sub.name}.#{domain.name}",
+            "#{sub.name}.#{domain.name}",
+            sub_root,
+            php_socket,
+            false,
+            nil,
+            [],
+            path_backends_for_sub
+          )
+        end
       end)
 
-    Enum.join([main | sub_blocks], "\n")
+    # S3-only vhosts for subdomains that have no DB Subdomain record.
+    extra_sub_blocks =
+      Enum.map(extra_sub_names, fn sub_name ->
+        backends_for_sub = Map.get(subdomain_backend_map, sub_name, [])
+        whole_sub_backend = Enum.find(backends_for_sub, &(&1.url_path == ""))
+        path_backends_for_sub = Enum.filter(backends_for_sub, &(&1.url_path != ""))
+
+        if whole_sub_backend do
+          s3_vhost_block(
+            "#{sub_name}.#{domain.name}",
+            "#{sub_name}.#{domain.name}",
+            whole_sub_backend,
+            false,
+            nil
+          )
+        else
+          # No filesystem document root for this subdomain – generate a basic
+          # vhost with the S3 path location blocks anyway.
+          sub_root = "/var/www/#{domain.name}/#{sub_name}.#{domain.name}"
+
+          vhost_block(
+            "#{sub_name}.#{domain.name}",
+            "#{sub_name}.#{domain.name}",
+            sub_root,
+            php_socket,
+            false,
+            nil,
+            [],
+            path_backends_for_sub
+          )
+        end
+      end)
+
+    Enum.join([main | active_sub_blocks ++ extra_sub_blocks], "\n")
   end
 
-  defp vhost_block(log_name, server_names, doc_root, php_socket, false = _ssl, _cert, proxies) do
+  defp vhost_block(
+         log_name,
+         server_names,
+         doc_root,
+         php_socket,
+         false = _ssl,
+         _cert,
+         proxies,
+         s3_path_backends
+       ) do
     proxy_locations = proxy_location_blocks(proxies)
+    s3_locations = s3_location_blocks(s3_path_backends)
+    s3_error_handler = s3_path_error_handler(s3_path_backends)
 
     """
     # #{log_name} — managed by hostctl
@@ -115,6 +193,8 @@ defmodule Hostctl.WebServer.Nginx do
 
       #{proxy_locations}
 
+      #{s3_locations}
+
         location / {
             try_files $uri $uri/ /index.php?$query_string;
         }
@@ -130,15 +210,26 @@ defmodule Hostctl.WebServer.Nginx do
         location ~ /\\.ht {
             deny all;
         }
-    }
+    #{s3_error_handler}}
     """
   end
 
-  defp vhost_block(log_name, server_names, doc_root, php_socket, true = _ssl, ssl_cert, proxies) do
+  defp vhost_block(
+         log_name,
+         server_names,
+         doc_root,
+         php_socket,
+         true = _ssl,
+         ssl_cert,
+         proxies,
+         s3_path_backends
+       ) do
     primary = server_names |> String.split(" ") |> hd()
     ssl_cert_path = cert_path(ssl_cert, primary)
     ssl_key_path = key_path(ssl_cert, primary)
     proxy_locations = proxy_location_blocks(proxies)
+    s3_locations = s3_location_blocks(s3_path_backends)
+    s3_error_handler = s3_path_error_handler(s3_path_backends)
 
     """
     # #{log_name} — managed by hostctl
@@ -170,6 +261,8 @@ defmodule Hostctl.WebServer.Nginx do
 
       #{proxy_locations}
 
+      #{s3_locations}
+
         location / {
             try_files $uri $uri/ /index.php?$query_string;
         }
@@ -185,7 +278,76 @@ defmodule Hostctl.WebServer.Nginx do
         location ~ /\\.ht {
             deny all;
         }
-    }
+    #{s3_error_handler}}
+    """
+  end
+
+  # ---------------------------------------------------------------------------
+  # S3 path location blocks (injected into filesystem vhosts)
+  # ---------------------------------------------------------------------------
+
+  defp s3_location_blocks([]), do: ""
+
+  defp s3_location_blocks(backends) do
+    backends
+    |> Enum.map(&s3_location_block/1)
+    |> Enum.join("\n")
+  end
+
+  # Generates a single `location /path/` block that proxies to S3.
+  # Nginx strips the url_path prefix from the request URI because proxy_pass
+  # includes a URI component, leaving only the remaining path for the upstream.
+  defp s3_location_block(%DomainS3Backend{} = backend) do
+    # Ensure the location path ends with a trailing slash so nginx performs
+    # prefix-stripping when forwarding to the upstream URI.
+    location_path = String.trim_trailing(backend.url_path, "/") <> "/"
+
+    if has_credentials?(backend) do
+      upstream = phoenix_proxy_url(backend)
+      token = s3_proxy_token()
+
+      """
+          location ^~ #{location_path} {
+              proxy_pass #{upstream};
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-S3-Proxy-Token #{token};
+              proxy_intercept_errors on;
+              error_page 404 = @s3_path_not_found;
+          }
+      """
+    else
+      upstream = s3_upstream_url(backend)
+      upstream_host = s3_upstream_host(backend)
+
+      """
+          location ^~ #{location_path} {
+              proxy_pass #{upstream};
+              proxy_set_header Host #{upstream_host};
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_hide_header x-amz-id-2;
+              proxy_hide_header x-amz-request-id;
+              proxy_hide_header x-amz-meta-server-side-encryption;
+              proxy_hide_header x-amz-server-side-encryption;
+              proxy_hide_header Set-Cookie;
+              proxy_ignore_headers Set-Cookie;
+              proxy_intercept_errors on;
+              error_page 404 = @s3_path_not_found;
+          }
+      """
+    end
+  end
+
+  # Injects a named location handler for S3 404s when any path backends exist.
+  defp s3_path_error_handler([]), do: ""
+
+  defp s3_path_error_handler(_backends) do
+    """
+        location @s3_path_not_found {
+            return 404;
+        }
     """
   end
 
@@ -247,9 +409,11 @@ defmodule Hostctl.WebServer.Nginx do
 
   defp has_credentials?(_), do: false
 
-  # Proxies to local Phoenix S3ProxyController (private buckets)
-  defp phoenix_proxy_block_http(log_name, server_names, _backend) do
-    upstream = phoenix_proxy_url(log_name)
+  # Proxies to local Phoenix S3ProxyController (private buckets).
+  # The URL uses the backend's DB id so nginx can strip the url_path prefix
+  # while the controller still knows exactly which backend to serve from.
+  defp phoenix_proxy_block_http(log_name, server_names, backend) do
+    upstream = phoenix_proxy_url(backend)
     token = s3_proxy_token()
 
     """
@@ -279,11 +443,11 @@ defmodule Hostctl.WebServer.Nginx do
     """
   end
 
-  defp phoenix_proxy_block_ssl(log_name, server_names, _backend, ssl_cert) do
+  defp phoenix_proxy_block_ssl(log_name, server_names, backend, ssl_cert) do
     primary = server_names |> String.split(" ") |> hd()
     ssl_cert_path = cert_path(ssl_cert, primary)
     ssl_key_path = key_path(ssl_cert, primary)
-    upstream = phoenix_proxy_url(log_name)
+    upstream = phoenix_proxy_url(backend)
     token = s3_proxy_token()
 
     """
@@ -419,15 +583,18 @@ defmodule Hostctl.WebServer.Nginx do
     """
   end
 
-  # Builds the Phoenix S3 proxy URL for a given domain name.
-  # Nginx proxies to this when the backend has credentials configured.
-  defp phoenix_proxy_url(domain_name) do
+  # Builds the Phoenix S3 proxy URL using the backend's DB id.
+  # Nginx proxies to this URL when the backend has credentials configured.
+  # Because the URL path includes the backend id, nginx can strip any url_path
+  # prefix via the proxy_pass URI rewrite and the controller resolves the
+  # correct backend by id.
+  defp phoenix_proxy_url(%DomainS3Backend{id: id}) do
     port =
       Application.get_env(:hostctl, HostctlWeb.Endpoint)
       |> Keyword.get(:http, [])
       |> Keyword.get(:port, 4000)
 
-    "http://127.0.0.1:#{port}/_s3_proxy/#{domain_name}/"
+    "http://127.0.0.1:#{port}/_s3_proxy/#{id}/"
   end
 
   defp s3_proxy_token do

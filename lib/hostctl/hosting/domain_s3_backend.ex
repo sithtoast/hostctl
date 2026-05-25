@@ -13,6 +13,11 @@ defmodule Hostctl.Hosting.DomainS3Backend do
     field :enabled, :boolean, default: true
     field :access_key_id, :string
     field :secret_access_key, EncryptedField
+    # Scope fields — both empty = whole domain.
+    # subdomain non-empty = applies to that subdomain (e.g. "static" → static.example.com).
+    # url_path non-empty = only serves requests under that URL path (e.g. "/assets").
+    field :subdomain, :string, default: ""
+    field :url_path, :string, default: ""
 
     belongs_to :domain, Domain
 
@@ -29,9 +34,14 @@ defmodule Hostctl.Hosting.DomainS3Backend do
       :enabled,
       :access_key_id,
       :secret_access_key,
+      :subdomain,
+      :url_path,
       :domain_id
     ])
     |> validate_required([:endpoint_url, :bucket, :domain_id])
+    |> validate_format(:url_path, ~r/^(\/[^\s]*)?$/, message: "must start with / or be empty")
+    |> update_change(:subdomain, &String.trim/1)
+    |> update_change(:url_path, &normalize_url_path/1)
     |> validate_format(:endpoint_url, ~r|^https?://[^\s/$.?#].[^\s]*$|,
       message: "must be a valid URL (e.g. https://s3.amazonaws.com)"
     )
@@ -42,7 +52,10 @@ defmodule Hostctl.Hosting.DomainS3Backend do
     |> update_change(:path_prefix, &normalize_prefix/1)
     |> maybe_keep_secret_access_key(s3_backend)
     |> foreign_key_constraint(:domain_id)
-    |> unique_constraint(:domain_id, name: :domain_s3_backends_domain_id_index)
+    |> unique_constraint(:url_path,
+      name: :domain_s3_backends_domain_id_subdomain_url_path_index,
+      message: "an S3 backend with this scope already exists for this domain"
+    )
   end
 
   # If a blank secret_access_key is submitted (e.g. the password field was left
@@ -61,6 +74,24 @@ defmodule Hostctl.Hosting.DomainS3Backend do
         cs
       end
     end)
+  end
+
+  # Normalise url_path: ensure it starts with "/" and has no trailing slash.
+  defp normalize_url_path(nil), do: ""
+
+  defp normalize_url_path(path) when is_binary(path) do
+    path = String.trim(path)
+
+    cond do
+      path == "" ->
+        ""
+
+      String.starts_with?(path, "/") ->
+        String.trim_trailing(path, "/")
+
+      true ->
+        "/" <> String.trim_trailing(path, "/")
+    end
   end
 
   defp normalize_prefix(nil), do: ""
