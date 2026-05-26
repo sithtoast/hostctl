@@ -1026,6 +1026,12 @@ defmodule Hostctl.Hosting do
   # FTP Accounts
   # ---------------------------------------------------------------------------
 
+  # Returns all domains owned by a given user_id, ordered by name.
+  # Used by the Plesk importer when building multi-mount FTP accounts.
+  def list_domains_by_user_id(user_id) do
+    Repo.all(from d in Domain, where: d.user_id == ^user_id, order_by: [asc: d.name])
+  end
+
   # list_ftp_accounts/1 with a Domain returns all FTP accounts belonging to
   # the domain's owner — used by the backup runner and Plesk importer.
   def list_ftp_accounts(%Domain{} = domain) do

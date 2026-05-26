@@ -723,12 +723,18 @@ defmodule Hostctl.Plesk.Importer do
     accounts = Map.get(inventory, "ftp_accounts", [])
     ftpuser_passwords = get_in(restore_opts, [:backup_credentials, :ftpuser_passwords]) || %{}
 
+    # All domains owned by this user — needed to build multi-mount accounts
+    # when the Plesk FTP home was the subscription root.
+    user_domains = Hosting.list_domains_by_user_id(domain.user_id)
+
     Logger.info(
       "[Importer] Restoring #{length(accounts)} FTP account(s) for #{domain.name}, " <>
         "#{map_size(ftpuser_passwords)} FTP password(s) available (keys: #{inspect(Map.keys(ftpuser_passwords))})"
     )
 
-    do_restore_items(accounts, fn item -> restore_ftp_account(domain, item, ftpuser_passwords) end)
+    do_restore_items(accounts, fn item ->
+      restore_ftp_account(domain, item, ftpuser_passwords, user_domains)
+    end)
   end
 
   defp restore_category("ssl_certificates", _domain, _subscription, inventory, _restore_opts) do
@@ -2403,9 +2409,11 @@ defmodule Hostctl.Plesk.Importer do
     |> Enum.flat_map(fn xml_file ->
       case File.read(xml_file) do
         {:ok, content} ->
-          ~r/<ftpuser\s[^>]*name="([^"]+)"[^>]*>/s
+          ~r/<ftpuser\s[^>]*name="([^"]+)"[^>]*>(.*?)<\/ftpuser>/s
           |> Regex.scan(content)
-          |> Enum.map(fn [_full, name] -> %{login: name} end)
+          |> Enum.map(fn [_full, name, block] ->
+            %{login: name, home: extract_sysuser_home(block)}
+          end)
 
         {:error, _} ->
           []
@@ -2428,6 +2436,15 @@ defmodule Hostctl.Plesk.Importer do
 
       true ->
         nil
+    end
+  end
+
+  # Extract the home directory from a <sysuser home="..."> element in an ftpuser block.
+  defp extract_sysuser_home(block) do
+    case Regex.run(~r/<sysuser\b[^>]*\shome="([^"]*)"/, block) do
+      [_, ""] -> nil
+      [_, home] -> home
+      _ -> nil
     end
   end
 
@@ -2743,7 +2760,7 @@ defmodule Hostctl.Plesk.Importer do
 
   defp maybe_replace_ip(_type, value, _replacements), do: value
 
-  defp restore_ftp_account(domain, item, ftpuser_passwords) do
+  defp restore_ftp_account(domain, item, ftpuser_passwords, user_domains) do
     existing =
       domain
       |> Hosting.list_ftp_accounts()
@@ -2752,17 +2769,94 @@ defmodule Hostctl.Plesk.Importer do
     if existing do
       :skipped
     else
-      password = Map.get(ftpuser_passwords, item.login) || generate_random_password()
+      password =
+        case Map.get(ftpuser_passwords, item.login) do
+          p when is_binary(p) and byte_size(p) >= 8 -> p
+          _ -> generate_random_password()
+        end
 
-      case Hosting.create_ftp_account(domain, %{
-             username: item.login,
-             password: password,
-             home_dir: "/var/www/#{domain.name}"
-           }) do
+      attrs = ftp_attrs_from_item(item, domain, user_domains, password)
+
+      case Hosting.create_ftp_account(domain, attrs) do
         {:ok, _} -> :created
         {:error, cs} -> {:failed, "#{item.login}: #{changeset_error_summary(cs)}"}
       end
     end
+  end
+
+  # Derive the FTP account attrs from a Plesk inventory item.
+  # When the Plesk home directory is at the subscription root (or `/`) and the
+  # panel user owns more than one domain, a multi-mount virtual-root account is
+  # created covering all of their domains — matching the broad access that the
+  # original Plesk account had.
+  defp ftp_attrs_from_item(item, domain, user_domains, password) do
+    base = %{username: item.login, password: password}
+    home = Map.get(item, :home)
+
+    cond do
+      # Root-level home + multiple domains → virtual multi-mount root
+      multi_mount_home?(home, domain.name) and length(user_domains) > 1 ->
+        Logger.info(
+          "[Importer] FTP account #{item.login} has root-level home #{inspect(home)}, " <>
+            "creating multi-mount for #{length(user_domains)} domain(s)"
+        )
+
+        Map.merge(base, %{mounts: build_domain_mounts(user_domains), home_dir: nil})
+
+      # Root-level home but only one domain → single dir at domain root
+      multi_mount_home?(home, domain.name) ->
+        Map.merge(base, %{home_dir: "/var/www/#{domain.name}", mounts: []})
+
+      # Known Plesk path → translate to hostctl equivalent
+      is_binary(home) and home != "" ->
+        Map.merge(base, %{home_dir: map_plesk_home(home, domain.name), mounts: []})
+
+      # No home info → fall back to domain web root
+      true ->
+        Map.merge(base, %{home_dir: "/var/www/#{domain.name}", mounts: []})
+    end
+  end
+
+  # Returns true when a Plesk home path represents "root-level" access —
+  # either the filesystem root, the Plesk vhosts root, or the subscription
+  # root for this particular domain (no httpdocs/subdir component).
+  defp multi_mount_home?(nil, _domain_name), do: false
+
+  defp multi_mount_home?(home, domain_name) do
+    trimmed = String.trim_trailing(home, "/")
+
+    trimmed in ~w(/ /var/www /var/www/vhosts) or
+      trimmed == "/var/www/vhosts/#{domain_name}" or
+      trimmed == "/var/www/#{domain_name}"
+  end
+
+  # Translates a Plesk-style home path (/var/www/vhosts/domain/subpath) to
+  # the equivalent hostctl path (/var/www/domain/subpath).
+  defp map_plesk_home(home, domain_name) do
+    cond do
+      String.starts_with?(home, "/var/www/vhosts/#{domain_name}") ->
+        rest = String.replace_prefix(home, "/var/www/vhosts/#{domain_name}", "")
+        "/var/www/#{domain_name}#{rest}"
+
+      String.starts_with?(home, "/var/www/#{domain_name}") ->
+        home
+
+      true ->
+        "/var/www/#{domain_name}"
+    end
+  end
+
+  # Build a list of virtual mount entries for all user-owned domains.
+  # Each mount exposes the parent of the domain's document_root (i.e. the
+  # subscription root), which mirrors the access level Plesk's subscription
+  # root FTP users have.
+  defp build_domain_mounts(domains) do
+    Enum.map(domains, fn d ->
+      dir = Path.dirname(d.document_root)
+      # Ensure the path is under /var/www/ (fallback to document_root itself)
+      path = if String.starts_with?(dir, "/var/www/"), do: dir, else: d.document_root
+      %{"name" => d.name, "path" => path}
+    end)
   end
 
   defp generate_random_password do
