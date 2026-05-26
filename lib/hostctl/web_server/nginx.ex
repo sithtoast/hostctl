@@ -88,7 +88,8 @@ defmodule Hostctl.WebServer.Nginx do
           use_ssl,
           ssl_cert,
           proxies,
-          domain_path_backends
+          domain_path_backends,
+          domain.autoindex
         )
       end
 
@@ -123,7 +124,8 @@ defmodule Hostctl.WebServer.Nginx do
             false,
             nil,
             [],
-            path_backends_for_sub
+            path_backends_for_sub,
+            sub.autoindex
           )
         end
       end)
@@ -156,7 +158,8 @@ defmodule Hostctl.WebServer.Nginx do
             false,
             nil,
             [],
-            path_backends_for_sub
+            path_backends_for_sub,
+            false
           )
         end
       end)
@@ -172,11 +175,13 @@ defmodule Hostctl.WebServer.Nginx do
          false = _ssl,
          _cert,
          proxies,
-         s3_path_backends
+         s3_path_backends,
+         autoindex
        ) do
     proxy_locations = proxy_location_blocks(proxies)
     s3_locations = s3_location_blocks(s3_path_backends)
     s3_error_handler = s3_path_error_handler(s3_path_backends)
+    root_location = root_location_block(autoindex)
 
     """
     # #{log_name} — managed by hostctl
@@ -196,7 +201,7 @@ defmodule Hostctl.WebServer.Nginx do
       #{s3_locations}
 
         location / {
-            try_files $uri $uri/ /index.php?$query_string;
+            #{root_location}
         }
 
         location ~ \\.php$ {
@@ -222,7 +227,8 @@ defmodule Hostctl.WebServer.Nginx do
          true = _ssl,
          ssl_cert,
          proxies,
-         s3_path_backends
+         s3_path_backends,
+         autoindex
        ) do
     primary = server_names |> String.split(" ") |> hd()
     ssl_cert_path = cert_path(ssl_cert, primary)
@@ -230,6 +236,7 @@ defmodule Hostctl.WebServer.Nginx do
     proxy_locations = proxy_location_blocks(proxies)
     s3_locations = s3_location_blocks(s3_path_backends)
     s3_error_handler = s3_path_error_handler(s3_path_backends)
+    root_location = root_location_block(autoindex)
 
     """
     # #{log_name} — managed by hostctl
@@ -264,7 +271,7 @@ defmodule Hostctl.WebServer.Nginx do
       #{s3_locations}
 
         location / {
-            try_files $uri $uri/ /index.php?$query_string;
+            #{root_location}
         }
 
         location ~ \\.php$ {
@@ -281,6 +288,16 @@ defmodule Hostctl.WebServer.Nginx do
     #{s3_error_handler}}
     """
   end
+
+  # Returns the `location /` body for a filesystem vhost.
+  # When autoindex is enabled, directories without an index file show a listing
+  # instead of falling through to PHP. PHP files are still served via the
+  # separate `location ~ \.php$` block.
+  defp root_location_block(true),
+    do: "autoindex on;\n            try_files $uri $uri/ =404;"
+
+  defp root_location_block(_),
+    do: "try_files $uri $uri/ /index.php?$query_string;"
 
   # ---------------------------------------------------------------------------
   # S3 path location blocks (injected into filesystem vhosts)

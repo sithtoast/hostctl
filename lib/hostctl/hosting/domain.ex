@@ -26,6 +26,7 @@ defmodule Hostctl.Hosting.Domain do
     field :disk_usage_mb, :integer, default: 0
     field :bandwidth_used_mb, :integer, default: 0
     field :apply_dns_template, :boolean, default: true
+    field :autoindex, :boolean, default: false
 
     belongs_to :user, User
     has_many :subdomains, Subdomain
@@ -54,7 +55,8 @@ defmodule Hostctl.Hosting.Domain do
       :php_version,
       :status,
       :ssl_enabled,
-      :apply_dns_template
+      :apply_dns_template,
+      :autoindex
     ])
     |> validate_required([:name])
     |> validate_format(:name, ~r/^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?(\.[a-z]{2,})+$/i,

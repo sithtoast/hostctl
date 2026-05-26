@@ -8,6 +8,7 @@ defmodule Hostctl.Hosting.Subdomain do
     field :name, :string
     field :document_root, :string
     field :status, :string, default: "active"
+    field :autoindex, :boolean, default: false
     field :domain_name, :string, virtual: true
 
     belongs_to :domain, Domain
@@ -18,7 +19,7 @@ defmodule Hostctl.Hosting.Subdomain do
 
   def changeset(subdomain, attrs) do
     subdomain
-    |> cast(attrs, [:name, :document_root, :status, :domain_name])
+    |> cast(attrs, [:name, :document_root, :status, :autoindex, :domain_name])
     |> validate_required([:name])
     |> validate_format(
       :name,

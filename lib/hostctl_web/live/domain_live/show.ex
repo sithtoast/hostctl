@@ -218,6 +218,41 @@ defmodule HostctlWeb.DomainLive.Show do
     end
   end
 
+  def handle_event("toggle_autoindex", _params, socket) do
+    domain = socket.assigns.domain
+
+    case Hosting.update_domain(socket.assigns.domain_scope, domain, %{
+           autoindex: !domain.autoindex
+         }) do
+      {:ok, updated} ->
+        {:noreply,
+         socket |> assign(:domain, updated) |> put_flash(:info, "Directory listings updated.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update directory listings.")}
+    end
+  end
+
+  def handle_event("toggle_subdomain_autoindex", %{"id" => id}, socket) do
+    subdomains = Hosting.list_subdomains(socket.assigns.domain)
+    sub = Enum.find(subdomains, &(to_string(&1.id) == id))
+
+    if sub do
+      case Hosting.update_subdomain(sub, %{autoindex: !sub.autoindex}) do
+        {:ok, updated} ->
+          {:noreply,
+           socket
+           |> stream_insert(:subdomains, updated)
+           |> put_flash(:info, "Directory listings updated.")}
+
+        {:error, _} ->
+          {:noreply, put_flash(socket, :error, "Could not update directory listings.")}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
   def handle_event("delete_subdomain", %{"id" => id}, socket) do
     subdomains = Hosting.list_subdomains(socket.assigns.domain)
     subdomain = Enum.find(subdomains, &(to_string(&1.id) == id))
@@ -753,8 +788,26 @@ defmodule HostctlWeb.DomainLive.Show do
         <%!-- Subdomains --%>
         <%= if @active_section == :subdomains do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
-            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
+            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
               <h3 class="text-base font-semibold text-gray-900 dark:text-white">Subdomains</h3>
+              <button
+                phx-click="toggle_autoindex"
+                class={[
+                  "flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors",
+                  if(@domain.autoindex,
+                    do:
+                      "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300",
+                    else:
+                      "bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-indigo-300"
+                  )
+                ]}
+              >
+                <.icon
+                  name={if @domain.autoindex, do: "hero-folder-open", else: "hero-folder"}
+                  class="w-3.5 h-3.5"
+                />
+                {if @domain.autoindex, do: "Dir listings on", else: "Dir listings off"} ({@domain.name})
+              </button>
             </div>
             <div class="p-6 border-b border-gray-200 dark:border-gray-800">
               <.form
@@ -809,14 +862,36 @@ defmodule HostctlWeb.DomainLive.Show do
                   </p>
                   <p class="text-xs text-gray-500">{sub.document_root || "Default"}</p>
                 </div>
-                <button
-                  phx-click="delete_subdomain"
-                  phx-value-id={sub.id}
-                  data-confirm="Delete this subdomain?"
-                  class="text-xs text-red-500 hover:text-red-600"
-                >
-                  Delete
-                </button>
+                <div class="flex items-center gap-3">
+                  <button
+                    phx-click="toggle_subdomain_autoindex"
+                    phx-value-id={sub.id}
+                    class={[
+                      "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors",
+                      if(sub.autoindex,
+                        do:
+                          "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300",
+                        else:
+                          "bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:border-indigo-300"
+                      )
+                    ]}
+                    title="Toggle directory listings"
+                  >
+                    <.icon
+                      name={if sub.autoindex, do: "hero-folder-open", else: "hero-folder"}
+                      class="w-3 h-3"
+                    />
+                    {if sub.autoindex, do: "Listings on", else: "Listings off"}
+                  </button>
+                  <button
+                    phx-click="delete_subdomain"
+                    phx-value-id={sub.id}
+                    data-confirm="Delete this subdomain?"
+                    class="text-xs text-red-500 hover:text-red-600"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
             </div>
           </div>
