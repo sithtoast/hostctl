@@ -679,17 +679,26 @@ PAMEOF
     fi
 
     if $vsftpd_changed && systemctl is-active --quiet vsftpd 2>/dev/null; then
-      systemctl reload vsftpd 2>/dev/null && fix "vsftpd reloaded" || warn "vsftpd reload failed"
+      # listen= and listen_ipv6= changes require a full restart — reload does not
+      # rebind the listening socket, so the old IPv4-only socket stays in place.
+      systemctl restart vsftpd 2>/dev/null && fix "vsftpd restarted" || warn "vsftpd restart failed"
     fi
 
-    # Fix ownership: FTP home directories must be owned by www-data since
-    # vsftpd maps all virtual users to guest_username=www-data
+    # Fix FTP home directories: create missing ones and ensure www-data ownership.
+    # vsftpd chroots to local_root after PAM auth; a missing or root-owned directory
+    # causes a 530 error even though pam_userdb already granted access.
     if [[ -d "$VSFTPD_USER_CONF_DIR" ]]; then
       for uconf in "$VSFTPD_USER_CONF_DIR"/*; do
         [[ -f "$uconf" ]] || continue
         uname="$(basename "$uconf")"
         local_root="$(grep '^local_root=' "$uconf" 2>/dev/null | cut -d= -f2)"
-        [[ -z "$local_root" || ! -d "$local_root" ]] && continue
+        [[ -z "$local_root" ]] && continue
+
+        if [[ ! -d "$local_root" ]]; then
+          mkdir -p "$local_root"
+          fix "created missing FTP home $local_root for user $uname"
+          FIXED=$((FIXED + 1))
+        fi
 
         cur_owner="$(stat -c '%U' "$local_root" 2>/dev/null)"
         if [[ "$cur_owner" != "www-data" ]]; then
@@ -700,6 +709,18 @@ PAMEOF
           ok "FTP home $local_root owned by www-data"
         fi
       done
+    fi
+
+    # Ensure secure_chroot_dir exists — vsftpd requires this empty directory to
+    # be present or it fails to set up chrooted sessions.
+    SECURE_CHROOT_DIR="$(grep '^secure_chroot_dir=' "$VSFTPD_CONF" 2>/dev/null | cut -d= -f2)"
+    SECURE_CHROOT_DIR="${SECURE_CHROOT_DIR:-/var/run/vsftpd/empty}"
+    if [[ ! -d "$SECURE_CHROOT_DIR" ]]; then
+      mkdir -p "$SECURE_CHROOT_DIR"
+      fix "created missing secure_chroot_dir $SECURE_CHROOT_DIR"
+      FIXED=$((FIXED + 1))
+    else
+      ok "secure_chroot_dir $SECURE_CHROOT_DIR exists"
     fi
   else
     ok "vsftpd.conf not found — skipping"
