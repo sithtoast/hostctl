@@ -186,6 +186,12 @@ defmodule Hostctl.UploadWorker do
   defp run_streaming_upload(job) do
     Logger.info("[UploadWorker] Job #{job.id}: streaming mode (batched rsync → S3)")
 
+    # Signal listing phase so the UI shows activity
+    {:ok, job} =
+      Hosting.update_upload_job(job, %{current_file: "Listing remote files…"})
+
+    broadcast_progress(job)
+
     # 1. List all files on the remote server via SSH find
     case list_remote_files(job) do
       {:error, reason} ->
@@ -267,10 +273,14 @@ defmodule Hostctl.UploadWorker do
 
     File.mkdir_p!(staging_base)
 
+    batches = Enum.chunk_every(paths, @batch_size)
+    total_batches = length(batches)
+
     result =
-      paths
-      |> Enum.chunk_every(@batch_size)
-      |> Enum.reduce_while({:ok, done_count, 0}, fn batch_paths, {:ok, uploaded, failed} ->
+      batches
+      |> Enum.with_index(1)
+      |> Enum.reduce_while({:ok, done_count, 0}, fn {batch_paths, batch_n},
+                                                    {:ok, uploaded, failed} ->
         if Process.get(:cancel_upload, false) do
           {:halt, {:paused, uploaded}}
         else
@@ -278,6 +288,14 @@ defmodule Hostctl.UploadWorker do
             Path.join(staging_base, "b#{System.unique_integer([:positive])}")
 
           File.mkdir_p!(batch_dir)
+
+          # Show rsync progress in the UI
+          {:ok, progress_job} =
+            Hosting.update_upload_job(job, %{
+              current_file: "Syncing batch #{batch_n}/#{total_batches}…"
+            })
+
+          broadcast_progress(progress_job)
 
           batch_result = process_one_batch(job, batch_paths, batch_dir, uploaded)
           File.rm_rf(batch_dir)
@@ -339,6 +357,7 @@ defmodule Hostctl.UploadWorker do
     with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts_from_job(job) do
       ssh_cmd = String.trim("#{sshpass_prefix} ssh #{Enum.join(["-p", port] ++ auth_args, " ")}")
       rsync = System.find_executable("rsync") || "rsync"
+      rsync_path = remote_rsync_path_from_job(job)
 
       env_args = Enum.flat_map(env, fn {k, v} -> ["--setenv=#{k}=#{v}"] end)
 
@@ -350,6 +369,7 @@ defmodule Hostctl.UploadWorker do
             "-rltzD",
             "--chmod=D755,F644",
             "--timeout=120",
+            "--rsync-path=#{rsync_path}",
             "--files-from=#{list_file}",
             "--relative",
             "-e",
@@ -379,7 +399,7 @@ defmodule Hostctl.UploadWorker do
     remote_path = job.remote_source_path |> String.replace("'", "'\\''")
 
     find_cmd =
-      "find '#{remote_path}' -type f -printf '%P\\n' 2>/dev/null | sort"
+      "sudo find '#{remote_path}' -type f -printf '%P\\n' 2>/dev/null | sort"
 
     with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts_from_job(job) do
       ssh = System.find_executable("ssh") || "ssh"
@@ -408,6 +428,30 @@ defmodule Hostctl.UploadWorker do
     end
   end
 
+  # Builds the --rsync-path value for the remote rsync invocation.
+  # Mirrors remote_rsync_path/1 in Hostctl.Plesk.Importer.
+  # For password auth, creates a tiny SUDO_ASKPASS helper on the remote so
+  # that stdin stays free for rsync protocol data.
+  defp remote_rsync_path_from_job(job) do
+    if job.ssh_auth_method == "password" and job.ssh_password not in [nil, ""] do
+      escaped = String.replace(job.ssh_password, "'", "'\\''")
+
+      "sh -c '" <>
+        "AP=/tmp/.rsync_askpass_$$; " <>
+        "printf \"#!/bin/sh\\necho " <>
+        "'\"'\"'" <>
+        escaped <>
+        "'\"'\"'" <>
+        "\\n\" > $AP; " <>
+        "chmod 700 $AP; " <>
+        "SUDO_ASKPASS=$AP sudo -A rsync \"$@\"; " <>
+        "RC=$?; rm -f $AP; exit $RC" <>
+        "' rsync"
+    else
+      "sudo rsync"
+    end
+  end
+
   # Builds SSH auth args from the job's stored credentials.
   # Mirrors the logic in Hostctl.Plesk.Importer.ssh_auth_parts/1.
   defp ssh_auth_parts_from_job(job) do
@@ -425,7 +469,9 @@ defmodule Hostctl.UploadWorker do
         end
 
       _ ->
-        key_path = job.ssh_private_key_path || ""
+        key_path =
+          (job.ssh_private_key_path || "")
+          |> String.replace(~r{^~/}, System.user_home!() <> "/")
 
         {:ok, "",
          [

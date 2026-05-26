@@ -879,12 +879,6 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     {:noreply, assign(socket, :restore_progress, progress)}
   end
 
-  # Upload job progress from PubSub
-  @impl true
-  def handle_info({:upload_progress, _job}, socket) do
-    {:noreply, load_upload_jobs(socket)}
-  end
-
   # Restore task crashed
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
