@@ -1322,7 +1322,11 @@ defmodule Hostctl.FeatureSetup do
         # Uncomment any existing commented-out line
         escaped_cmd(
           "sed",
-          ["-i", "s/^#[[:space:]]*user_allow_other/user_allow_other/", "/etc/fuse.conf"],
+          [
+            "-i",
+            "s/^#[[:space:]]*user_allow_other[[:space:]]*$/user_allow_other/",
+            "/etc/fuse.conf"
+          ],
           stderr_to_stdout: true
         )
 
