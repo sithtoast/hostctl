@@ -12,7 +12,6 @@ defmodule Hostctl.Hosting.Domain do
     DomainProxy,
     SslCertificate,
     CronJob,
-    FtpAccount,
     DomainSmarthostSetting,
     BandwidthSnapshot,
     DomainS3Backend
@@ -35,7 +34,6 @@ defmodule Hostctl.Hosting.Domain do
     has_many :databases, Database
     has_one :ssl_certificate, SslCertificate
     has_many :cron_jobs, CronJob
-    has_many :ftp_accounts, FtpAccount
     has_many :domain_proxies, DomainProxy
     has_one :smarthost_setting, DomainSmarthostSetting
     has_many :bandwidth_snapshots, BandwidthSnapshot

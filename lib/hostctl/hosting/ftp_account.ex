@@ -2,7 +2,7 @@ defmodule Hostctl.Hosting.FtpAccount do
   use Ecto.Schema
   import Ecto.Changeset
 
-  alias Hostctl.Hosting.Domain
+  alias Hostctl.Accounts.User
 
   schema "ftp_accounts" do
     field :username, :string
@@ -12,7 +12,7 @@ defmodule Hostctl.Hosting.FtpAccount do
     field :status, :string, default: "active"
     field :mounts, {:array, :map}, default: []
 
-    belongs_to :domain, Domain
+    belongs_to :user, User
 
     timestamps(type: :utc_datetime)
   end

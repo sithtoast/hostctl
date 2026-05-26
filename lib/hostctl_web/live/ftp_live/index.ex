@@ -63,28 +63,22 @@ defmodule HostctlWeb.FtpLive.Index do
   end
 
   def handle_event("save_ftp", %{"ftp_account" => params}, socket) do
-    {domain_id_str, params} = Map.pop(params, "domain_id")
-    domain = Enum.find(socket.assigns.domains, &(to_string(&1.id) == domain_id_str))
+    params = prepare_ftp_params(params, socket.assigns.ftp_access_mode)
+    user = socket.assigns.current_scope.user
 
-    if domain do
-      params = prepare_ftp_params(params, socket.assigns.ftp_access_mode)
+    case Hosting.create_ftp_account(user, params) do
+      {:ok, account} ->
+        account = Hosting.get_ftp_account_with_user!(account.id)
 
-      case Hosting.create_ftp_account(domain, params) do
-        {:ok, account} ->
-          account = Hosting.get_ftp_account_with_domain!(account.id)
+        {:noreply,
+         socket
+         |> stream_insert(:ftp_accounts, account)
+         |> assign_ftp_form()
+         |> assign(:ftp_access_mode, "single")
+         |> put_flash(:info, "FTP account #{account.username} created.")}
 
-          {:noreply,
-           socket
-           |> stream_insert(:ftp_accounts, account)
-           |> assign_ftp_form()
-           |> assign(:ftp_access_mode, "single")
-           |> put_flash(:info, "FTP account #{account.username} created.")}
-
-        {:error, changeset} ->
-          {:noreply, assign(socket, :ftp_form, to_form(changeset))}
-      end
-    else
-      {:noreply, put_flash(socket, :error, "Please select a domain.")}
+      {:error, changeset} ->
+        {:noreply, assign(socket, :ftp_form, to_form(changeset))}
     end
   end
 
@@ -142,7 +136,7 @@ defmodule HostctlWeb.FtpLive.Index do
 
       case Hosting.update_ftp_account(account, params) do
         {:ok, updated} ->
-          updated = Hosting.get_ftp_account_with_domain!(updated.id)
+          updated = Hosting.get_ftp_account_with_user!(updated.id)
 
           {:noreply,
            socket
@@ -244,134 +238,105 @@ defmodule HostctlWeb.FtpLive.Index do
         </div>
 
         <%!-- Create new account --%>
-        <%= if @domains != [] do %>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
-            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
-              <h3 class="text-base font-semibold text-gray-900 dark:text-white">
-                New FTP Account
-              </h3>
-            </div>
-            <div class="p-6">
-              <.form
-                for={@ftp_form}
-                id="ftp-form"
-                phx-change="validate_ftp"
-                phx-submit="save_ftp"
-                class="space-y-4"
-              >
-                <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <%!-- Domain picker (plain select — not a changeset field) --%>
-                  <div>
-                    <label class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-1">
-                      Domain
-                    </label>
-                    <select
-                      name="ftp_account[domain_id]"
-                      class="mt-1 block w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    >
-                      <%= for domain <- @domains do %>
-                        <option value={domain.id}>{domain.name}</option>
-                      <% end %>
-                    </select>
-                  </div>
-                  <.input
-                    field={@ftp_form[:username]}
-                    type="text"
-                    placeholder="ftpuser"
-                    label="Username"
-                  />
-                  <.input field={@ftp_form[:password]} type="password" label="Password" />
-                </div>
-                <%!-- Access mode toggle --%>
-                <div>
-                  <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
-                    Directory access
-                  </p>
-                  <div class="flex rounded-lg border border-gray-300 dark:border-gray-700 w-fit overflow-hidden">
-                    <button
-                      type="button"
-                      phx-click="set_ftp_mode"
-                      phx-value-mode="single"
-                      class={[
-                        "px-4 py-2 text-xs font-medium transition-colors",
-                        if(@ftp_access_mode == "single",
-                          do: "bg-indigo-600 text-white",
-                          else:
-                            "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
-                        )
-                      ]}
-                    >
-                      Single Directory
-                    </button>
-                    <button
-                      type="button"
-                      phx-click="set_ftp_mode"
-                      phx-value-mode="multi"
-                      class={[
-                        "px-4 py-2 text-xs font-medium transition-colors border-l border-gray-300 dark:border-gray-700",
-                        if(@ftp_access_mode == "multi",
-                          do: "bg-indigo-600 text-white",
-                          else:
-                            "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
-                        )
-                      ]}
-                    >
-                      Multi-Domain Virtual Root
-                    </button>
-                  </div>
-                </div>
-                <%= if @ftp_access_mode == "single" do %>
-                  <.input
-                    field={@ftp_form[:home_dir]}
-                    type="select"
-                    label="Home directory"
-                    options={@ftp_dir_options}
-                  />
-                <% else %>
-                  <div>
-                    <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
-                      Select directories to expose
-                    </p>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                      <%= for {label, path} <- @ftp_dir_options do %>
-                        <label class="flex items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            name="ftp_account[mount_paths][]"
-                            value={path}
-                            class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                          />
-                          <span class="text-sm text-gray-700 dark:text-gray-300">{label}</span>
-                        </label>
-                      <% end %>
-                    </div>
-                  </div>
-                <% end %>
-                <div class="flex justify-end">
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
+          <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white">
+              New FTP Account
+            </h3>
+          </div>
+          <div class="p-6">
+            <.form
+              for={@ftp_form}
+              id="ftp-form"
+              phx-change="validate_ftp"
+              phx-submit="save_ftp"
+              class="space-y-4"
+            >
+              <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <.input
+                  field={@ftp_form[:username]}
+                  type="text"
+                  placeholder="ftpuser"
+                  label="Username"
+                />
+                <.input field={@ftp_form[:password]} type="password" label="Password" />
+              </div>
+              <%!-- Access mode toggle --%>
+              <div>
+                <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
+                  Directory access
+                </p>
+                <div class="flex rounded-lg border border-gray-300 dark:border-gray-700 w-fit overflow-hidden">
                   <button
-                    type="submit"
-                    class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+                    type="button"
+                    phx-click="set_ftp_mode"
+                    phx-value-mode="single"
+                    class={[
+                      "px-4 py-2 text-xs font-medium transition-colors",
+                      if(@ftp_access_mode == "single",
+                        do: "bg-indigo-600 text-white",
+                        else:
+                          "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                      )
+                    ]}
                   >
-                    Create FTP Account
+                    Single Directory
+                  </button>
+                  <button
+                    type="button"
+                    phx-click="set_ftp_mode"
+                    phx-value-mode="multi"
+                    class={[
+                      "px-4 py-2 text-xs font-medium transition-colors border-l border-gray-300 dark:border-gray-700",
+                      if(@ftp_access_mode == "multi",
+                        do: "bg-indigo-600 text-white",
+                        else:
+                          "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                      )
+                    ]}
+                  >
+                    Multi-Domain Virtual Root
                   </button>
                 </div>
-              </.form>
-            </div>
+              </div>
+              <%= if @ftp_access_mode == "single" do %>
+                <.input
+                  field={@ftp_form[:home_dir]}
+                  type="select"
+                  label="Home directory"
+                  options={@ftp_dir_options}
+                />
+              <% else %>
+                <div>
+                  <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
+                    Select directories to expose
+                  </p>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                    <%= for {label, path} <- @ftp_dir_options do %>
+                      <label class="flex items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          name="ftp_account[mount_paths][]"
+                          value={path}
+                          class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span class="text-sm text-gray-700 dark:text-gray-300">{label}</span>
+                      </label>
+                    <% end %>
+                  </div>
+                </div>
+              <% end %>
+              <div class="flex justify-end">
+                <button
+                  type="submit"
+                  class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+                >
+                  Create FTP Account
+                </button>
+              </div>
+            </.form>
           </div>
-        <% else %>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-8 text-center">
-            <.icon name="hero-folder" class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-600 mb-3" />
-            <p class="text-sm text-gray-500 dark:text-gray-400">
-              Add a domain first before creating FTP accounts.
-            </p>
-            <.link
-              navigate={~p"/domains"}
-              class="mt-3 inline-block text-sm text-indigo-500 hover:text-indigo-600 font-medium"
-            >
-              Go to Domains &rarr;
-            </.link>
-          </div>
-        <% end %>
+        </div>
 
         <%!-- Accounts list --%>
         <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
@@ -405,7 +370,8 @@ defmodule HostctlWeb.FtpLive.Index do
                       <p class="text-sm font-medium text-gray-900 dark:text-white">
                         {account.username}
                         <span class="ml-2 text-xs font-normal text-gray-400">
-                          {account.domain && account.domain.name}
+                          {if @current_scope.user.role != "client" and account.user,
+                            do: account.user.email}
                         </span>
                       </p>
                     </div>
@@ -504,9 +470,11 @@ defmodule HostctlWeb.FtpLive.Index do
                       <p class="text-sm font-medium text-gray-900 dark:text-white">
                         {account.username}
                       </p>
-                      <span class="text-xs text-gray-400 dark:text-gray-500">
-                        {account.domain && account.domain.name}
-                      </span>
+                      <%= if @current_scope.user.role != "client" and account.user do %>
+                        <span class="text-xs text-gray-400 dark:text-gray-500">
+                          {account.user.email}
+                        </span>
+                      <% end %>
                     </div>
                     <%= if account.mounts && account.mounts != [] do %>
                       <p class="text-xs text-gray-500">

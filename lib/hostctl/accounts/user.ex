@@ -2,6 +2,8 @@ defmodule Hostctl.Accounts.User do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Hostctl.Hosting.FtpAccount
+
   schema "users" do
     field :email, :string
     field :password, :string, virtual: true, redact: true
@@ -10,6 +12,9 @@ defmodule Hostctl.Accounts.User do
     field :authenticated_at, :utc_datetime, virtual: true
     field :name, :string
     field :role, :string, default: "client"
+
+    belongs_to :managed_by, __MODULE__, foreign_key: :managed_by_id
+    has_many :ftp_accounts, FtpAccount
 
     timestamps(type: :utc_datetime)
   end

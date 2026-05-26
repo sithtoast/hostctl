@@ -840,7 +840,7 @@ defmodule Hostctl.Backup.Runner do
     ftp_accounts =
       Repo.all(
         from f in FtpAccount,
-          where: f.domain_id == ^domain.id,
+          where: f.user_id == ^domain.user_id,
           order_by: [asc: f.username]
       )
 

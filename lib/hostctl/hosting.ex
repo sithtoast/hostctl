@@ -4,7 +4,7 @@ defmodule Hostctl.Hosting do
   import Ecto.Query
 
   alias Hostctl.Repo
-  alias Hostctl.Accounts.Scope
+  alias Hostctl.Accounts.{Scope, User}
   alias Hostctl.Settings
   alias Hostctl.DNS.Cloudflare
   alias Hostctl.MailgunClient
@@ -1026,28 +1026,48 @@ defmodule Hostctl.Hosting do
   # FTP Accounts
   # ---------------------------------------------------------------------------
 
+  # list_ftp_accounts/1 with a Domain returns all FTP accounts belonging to
+  # the domain's owner — used by the backup runner and Plesk importer.
   def list_ftp_accounts(%Domain{} = domain) do
-    Repo.all(from f in FtpAccount, where: f.domain_id == ^domain.id, order_by: [asc: f.username])
-  end
-
-  def list_all_ftp_accounts(%Scope{} = scope) do
     Repo.all(
       from f in FtpAccount,
-        join: d in Domain,
-        on: f.domain_id == d.id,
-        where: d.user_id == ^scope.user.id,
-        preload: [domain: d],
-        order_by: [asc: d.name, asc: f.username]
+        where: f.user_id == ^domain.user_id,
+        order_by: [asc: f.username]
     )
   end
 
-  def get_ftp_account_with_domain!(id) do
-    Repo.get!(FtpAccount, id) |> Repo.preload(:domain)
+  def list_all_ftp_accounts(%Scope{} = scope) do
+    base =
+      from f in FtpAccount,
+        join: u in User,
+        on: f.user_id == u.id,
+        preload: [user: u],
+        order_by: [asc: u.email, asc: f.username]
+
+    query =
+      case scope.user.role do
+        "admin" ->
+          base
+
+        "reseller" ->
+          from [f, u] in base,
+            where: f.user_id == ^scope.user.id or u.managed_by_id == ^scope.user.id
+
+        _ ->
+          from [f, _u] in base,
+            where: f.user_id == ^scope.user.id
+      end
+
+    Repo.all(query)
   end
 
-  def create_ftp_account(%Domain{} = domain, attrs) do
+  def get_ftp_account_with_user!(id) do
+    Repo.get!(FtpAccount, id) |> Repo.preload(:user)
+  end
+
+  def create_ftp_account(%User{} = user, attrs) do
     result =
-      %FtpAccount{domain_id: domain.id}
+      %FtpAccount{user_id: user.id}
       |> FtpAccount.changeset(attrs)
       |> Repo.insert()
 
@@ -1060,6 +1080,13 @@ defmodule Hostctl.Hosting do
       error ->
         error
     end
+  end
+
+  # Backward-compatible overload for Plesk importer and other callers that
+  # pass a Domain. Resolves the domain's owner and delegates.
+  def create_ftp_account(%Domain{} = domain, attrs) do
+    user = Repo.get!(User, domain.user_id)
+    create_ftp_account(user, attrs)
   end
 
   def update_ftp_account(%FtpAccount{} = account, attrs) do
