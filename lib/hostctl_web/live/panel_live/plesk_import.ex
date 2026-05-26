@@ -235,6 +235,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       |> put_s3_field(:s3_access_key, params["access_key"])
       |> put_s3_field(:s3_secret_key, params["secret_key"])
       |> put_s3_field(:s3_prefix, params["prefix"])
+      |> put_s3_field(:ftp_enabled, params["ftp_enabled"] == "true")
+      |> put_s3_field(:directory_listing, params["directory_listing"] == "true")
 
     s3_targets = Map.put(s3_targets, target, target_config)
     config = Map.put(config, :s3_targets, s3_targets)
@@ -1012,7 +1014,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                     secret_access_key: opts.secret_access_key,
                     region: opts.region,
                     subdomain: target,
-                    url_path: ""
+                    url_path: "",
+                    ftp_mount_enabled: Map.get(tc, :ftp_enabled, false),
+                    directory_listing: Map.get(tc, :directory_listing, false)
                   }
 
                   case Hostctl.Hosting.create_s3_backend(db_domain, attrs) do
@@ -2065,6 +2069,26 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                             placeholder="Key prefix (optional)"
                             class="col-span-2 block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
                           />
+                          <div class="col-span-2 flex items-center gap-4 pt-2">
+                            <label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                name="ftp_enabled"
+                                checked={Map.get(t_config, :ftp_enabled, false)}
+                                class="rounded border-sky-300 text-sky-600 focus:ring-sky-500"
+                              />
+                              <span>Enable FTP access (rclone mount)</span>
+                            </label>
+                            <label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                name="directory_listing"
+                                checked={Map.get(t_config, :directory_listing, false)}
+                                class="rounded border-sky-300 text-sky-600 focus:ring-sky-500"
+                              />
+                              <span>Directory listings</span>
+                            </label>
+                          </div>
                         </form>
                       <% end %>
                     <% end %>
@@ -2206,13 +2230,20 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                         >
                         </path>
                       </svg>
-                      <span class="text-xs font-medium text-indigo-800 dark:text-indigo-200">
-                        <%= if progress.category do %>
-                          {category_display_name(progress.category)}...
-                        <% else %>
-                          Starting...
+                      <div class="flex-1">
+                        <span class="text-xs font-medium text-indigo-800 dark:text-indigo-200 block">
+                          <%= if progress.category do %>
+                            {category_display_name(progress.category)}...
+                          <% else %>
+                            Starting...
+                          <% end %>
+                        </span>
+                        <%= if is_binary(progress.status) do %>
+                          <span class="text-[10px] text-indigo-600 dark:text-indigo-400 block mt-0.5">
+                            {progress.status}
+                          </span>
                         <% end %>
-                      </span>
+                      </div>
                       <span class="text-[10px] text-indigo-500 dark:text-indigo-400 ml-auto">
                         {progress.index}/{progress.total}
                       </span>

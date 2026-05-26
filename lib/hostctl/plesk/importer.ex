@@ -604,6 +604,7 @@ defmodule Hostctl.Plesk.Importer do
     ssh_opts = Map.get(restore_opts, :ssh_opts)
     web_files_path = Map.get(restore_opts, :web_files_path)
     s3_backend_opts = Map.get(restore_opts, :s3_backend_opts)
+    progress_pid = Map.get(restore_opts, :progress_pid)
 
     # Find the parent domain web_files item (the one matching our domain name).
     # Subdomain WEB entries also exist in inventory but are filtered by
@@ -639,7 +640,8 @@ defmodule Hostctl.Plesk.Importer do
           subdomains,
           ssh_opts,
           s3_backend_opts,
-          web_files_path
+          web_files_path,
+          progress_pid
         )
 
       # Legacy flat S3 opts map: all targets use the same bucket/credentials.
@@ -933,7 +935,8 @@ defmodule Hostctl.Plesk.Importer do
          subdomains,
          ssh_opts,
          s3_per_target,
-         local_base_path
+         local_base_path,
+         progress_pid
        ) do
     domain_name = domain.name
     {remote_docroot, remote_home_dir} = compute_remote_docroot(item, domain_name)
@@ -961,7 +964,8 @@ defmodule Hostctl.Plesk.Importer do
         local_base_path,
         tmp_base,
         ssh_opts,
-        errors
+        errors,
+        progress_pid
       )
 
     # Each subdomain
@@ -978,7 +982,8 @@ defmodule Hostctl.Plesk.Importer do
           local_base_path,
           tmp_base,
           ssh_opts,
-          acc
+          acc,
+          progress_pid
         )
       end)
 
@@ -1000,7 +1005,8 @@ defmodule Hostctl.Plesk.Importer do
          local_base,
          tmp_base,
          ssh_opts,
-         errors
+         errors,
+         progress_pid
        ) do
     if is_map(s3_opts) do
       tmp_dir = Path.join(tmp_base, dir_name)
@@ -1014,6 +1020,21 @@ defmodule Hostctl.Plesk.Importer do
           raw_prefix = Map.get(s3_opts, :prefix, "")
           s3_prefix = if raw_prefix != "", do: "#{raw_prefix}/#{dir_name}", else: dir_name
 
+          # Create progress callback that sends detailed upload progress
+          progress_callback =
+            if progress_pid do
+              fn current, total, filename, _result ->
+                status = "Uploading #{filename} (#{current}/#{total})"
+
+                send(
+                  progress_pid,
+                  {:restore_progress, label, "s3_upload", current, total, status}
+                )
+              end
+            else
+              nil
+            end
+
           case Hostctl.S3Client.upload_directory(
                  Map.fetch!(s3_opts, :endpoint),
                  Map.fetch!(s3_opts, :bucket),
@@ -1021,7 +1042,8 @@ defmodule Hostctl.Plesk.Importer do
                  tmp_dir,
                  Map.fetch!(s3_opts, :access_key_id),
                  Map.fetch!(s3_opts, :secret_access_key),
-                 Map.get(s3_opts, :region, "us-east-1")
+                 Map.get(s3_opts, :region, "us-east-1"),
+                 progress_callback
                ) do
             {:ok, count} ->
               Logger.info(

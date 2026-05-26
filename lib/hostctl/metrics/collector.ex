@@ -67,8 +67,11 @@ defmodule Hostctl.Metrics.Collector do
           "/var/www/#{domain.name}"
         end
 
-      case System.cmd("du", ["-sm", "--", site_root], stderr_to_stdout: true) do
-        {output, 0} ->
+      # Run du without stderr to avoid permission denied noise in logs
+      case System.cmd("sh", ["-c", "du -sm -- #{site_root} 2>/dev/null || echo 0"],
+             stderr_to_stdout: false
+           ) do
+        {output, _} ->
           mb =
             output
             |> String.split("\t")
@@ -81,9 +84,6 @@ defmodule Hostctl.Metrics.Collector do
             end
 
           Hosting.update_domain_metrics(domain, %{disk_usage_mb: mb})
-
-        {reason, _exit_code} ->
-          Logger.warning("Disk collection failed for #{domain.name}: #{String.trim(reason)}")
       end
     end
   end

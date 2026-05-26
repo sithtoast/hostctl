@@ -67,37 +67,45 @@ defmodule Hostctl.S3Client do
         local_dir,
         access_key_id,
         secret_access_key,
-        region \\ "us-east-1"
+        region \\ "us-east-1",
+        progress_callback \\ nil
       ) do
     files =
       local_dir
       |> list_files_recursive()
       |> Enum.sort()
 
+    total = length(files)
+
     results =
       files
+      |> Stream.with_index(1)
       |> Task.async_stream(
-        fn file_path ->
+        fn {file_path, index} ->
           relative = Path.relative_to(file_path, local_dir)
           key = if key_prefix && key_prefix != "", do: "#{key_prefix}/#{relative}", else: relative
 
-          case put_object(
-                 endpoint,
-                 bucket,
-                 key,
-                 file_path,
-                 access_key_id,
-                 secret_access_key,
-                 region
-               ) do
-            :ok ->
-              Logger.debug("[S3Client] Uploaded #{key}")
-              :ok
+          result =
+            case put_object(
+                   endpoint,
+                   bucket,
+                   key,
+                   file_path,
+                   access_key_id,
+                   secret_access_key,
+                   region
+                 ) do
+              :ok ->
+                Logger.debug("[S3Client] Uploaded #{key}")
+                :ok
 
-            {:error, reason} ->
-              Logger.warning("[S3Client] Failed to upload #{key}: #{inspect(reason)}")
-              {:error, "#{relative}: #{inspect(reason)}"}
-          end
+              {:error, reason} ->
+                Logger.warning("[S3Client] Failed to upload #{key}: #{inspect(reason)}")
+                {:error, "#{relative}: #{inspect(reason)}"}
+            end
+
+          if progress_callback, do: progress_callback.(index, total, relative, result)
+          result
         end,
         timeout: :infinity,
         max_concurrency: 8
