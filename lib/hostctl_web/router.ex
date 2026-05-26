@@ -89,6 +89,7 @@ defmodule HostctlWeb.Router do
       live "/panel/backup", PanelLive.Backup, :index
       live "/panel/backups", PanelLive.CompletedBackups, :index
       live "/panel/plesk-import", PanelLive.PleskImport, :index
+      live "/panel/ftp", PanelLive.Ftp, :index
     end
 
     get "/panel/backups/:id/download", BackupDownloadController, :show

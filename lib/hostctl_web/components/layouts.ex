@@ -98,6 +98,12 @@ defmodule HostctlWeb.Layouts do
               active={@active_tab == :panel_emails}
             />
             <.nav_item
+              icon="hero-server-stack"
+              label="All FTP"
+              href={~p"/panel/ftp"}
+              active={@active_tab == :panel_ftp}
+            />
+            <.nav_item
               icon="hero-puzzle-piece"
               label="Features"
               href={~p"/panel/features"}
