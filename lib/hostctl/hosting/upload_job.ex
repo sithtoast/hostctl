@@ -29,6 +29,15 @@ defmodule Hostctl.Hosting.UploadJob do
     field :started_at, :utc_datetime
     field :completed_at, :utc_datetime
     field :metadata, :map, default: %{}
+    # SSH credentials — stored encrypted so the background worker can do its own
+    # batched rsync from the remote server without pre-staging all files locally.
+    field :remote_source_path, :string
+    field :ssh_host, :string
+    field :ssh_port, :string
+    field :ssh_username, :string
+    field :ssh_auth_method, :string
+    field :ssh_private_key_path, :string
+    field :ssh_password, EncryptedField
 
     belongs_to :domain, Domain
     belongs_to :user, User
@@ -58,7 +67,14 @@ defmodule Hostctl.Hosting.UploadJob do
       :error_message,
       :started_at,
       :completed_at,
-      :metadata
+      :metadata,
+      :remote_source_path,
+      :ssh_host,
+      :ssh_port,
+      :ssh_username,
+      :ssh_auth_method,
+      :ssh_private_key_path,
+      :ssh_password
     ])
     |> validate_required([
       :domain_id,

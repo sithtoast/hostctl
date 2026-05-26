@@ -994,7 +994,10 @@ defmodule Hostctl.Plesk.Importer do
         )
       end)
 
-    File.rm_rf(tmp_base)
+    # Do NOT rm_rf tmp_base here — background UploadWorkers are still reading from
+    # their staging subdirectories (tmp_base/<dir_name>). Each worker runs with
+    # `cleanup_source: true` and will rm_rf its own subdir after uploading.
+    # The empty tmp_base parent dir is harmless in the system temp directory.
 
     errors = Enum.reverse(errors)
     total = 1 + length(subdomains)
@@ -1002,15 +1005,16 @@ defmodule Hostctl.Plesk.Importer do
     %{created: total - failed, skipped: 0, failed: failed, errors: errors}
   end
 
-  # Handles one web-files target: uploads to S3 (via temp staging) when `s3_opts`
-  # is a map, or rsyncs to the local filesystem otherwise.
+  # Handles one web-files target: for S3 targets, creates a background
+  # UploadWorker job that does its own batched rsync → upload → delete cycle
+  # so local disk usage stays bounded. For local targets, rsyncs directly.
   defp restore_target_web_files(
          label,
          dir_name,
          remote_path,
          s3_opts,
          local_base,
-         tmp_base,
+         _tmp_base,
          ssh_opts,
          errors,
          _progress_pid,
@@ -1018,48 +1022,59 @@ defmodule Hostctl.Plesk.Importer do
          user_id
        ) do
     if is_map(s3_opts) do
-      tmp_dir = Path.join(tmp_base, dir_name)
-      File.mkdir_p!(tmp_dir)
+      raw_prefix = Map.get(s3_opts, :prefix, "")
+      s3_prefix = if raw_prefix != "", do: "#{raw_prefix}/#{dir_name}", else: dir_name
 
-      case do_rsync(ssh_opts, remote_path, tmp_dir,
-             timeout: 3600,
-             excludes: @plesk_rsync_excludes
-           ) do
-        :ok ->
-          raw_prefix = Map.get(s3_opts, :prefix, "")
-          s3_prefix = if raw_prefix != "", do: "#{raw_prefix}/#{dir_name}", else: dir_name
+      # Pass SSH credentials to the worker so it can do batched rsync itself.
+      # This avoids pre-staging all files locally (which would overflow disk on
+      # large sites). The worker rsyncs @batch_size files at a time, uploads
+      # them, then frees the local copies before fetching the next batch.
+      job_attrs = %{
+        domain_id: domain_id,
+        user_id: user_id,
+        job_type: "plesk_import",
+        # source_path is used as the base staging dir by the worker (created per batch)
+        source_path:
+          Path.join(
+            System.tmp_dir!(),
+            "hostctl_s3_#{domain_id}_#{System.unique_integer([:positive])}"
+          ),
+        remote_source_path: remote_path,
+        ssh_host: normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host")),
+        ssh_port: to_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port") || "22"),
+        ssh_username:
+          normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username")),
+        ssh_auth_method:
+          normalize_string(Map.get(ssh_opts, :auth_method) || Map.get(ssh_opts, "auth_method")),
+        ssh_password:
+          normalize_string(Map.get(ssh_opts, :password) || Map.get(ssh_opts, "password")),
+        ssh_private_key_path:
+          normalize_string(
+            Map.get(ssh_opts, :private_key_path) || Map.get(ssh_opts, "private_key_path")
+          ),
+        s3_endpoint: Map.fetch!(s3_opts, :endpoint),
+        s3_bucket: Map.fetch!(s3_opts, :bucket),
+        s3_prefix: s3_prefix,
+        s3_region: Map.get(s3_opts, :region, "us-east-1"),
+        s3_access_key_id: Map.fetch!(s3_opts, :access_key_id),
+        s3_secret_access_key: Map.fetch!(s3_opts, :secret_access_key),
+        metadata: %{label: label}
+      }
 
-          # Create background upload job
-          case Hostctl.UploadWorker.start_upload(%{
-                 domain_id: domain_id,
-                 user_id: user_id,
-                 job_type: "plesk_import",
-                 source_path: tmp_dir,
-                 s3_endpoint: Map.fetch!(s3_opts, :endpoint),
-                 s3_bucket: Map.fetch!(s3_opts, :bucket),
-                 s3_prefix: s3_prefix,
-                 s3_region: Map.get(s3_opts, :region, "us-east-1"),
-                 s3_access_key_id: Map.fetch!(s3_opts, :access_key_id),
-                 s3_secret_access_key: Map.fetch!(s3_opts, :secret_access_key),
-                 metadata: %{label: label, cleanup_source: true}
-               }) do
-            {:ok, _job} ->
-              Logger.info(
-                "[Importer] web_files→S3 #{label}: background upload job started for #{s3_prefix}"
-              )
+      case Hostctl.UploadWorker.start_upload(job_attrs) do
+        {:ok, _job} ->
+          Logger.info(
+            "[Importer] web_files→S3 #{label}: background streaming upload job started for #{s3_prefix}"
+          )
 
-              errors
-
-            {:error, reason} ->
-              Logger.warning(
-                "[Importer] web_files→S3 #{label}: failed to start upload job - #{inspect(reason)}"
-              )
-
-              ["#{label}: failed to start upload job - #{inspect(reason)}" | errors]
-          end
+          errors
 
         {:error, reason} ->
-          ["#{label}: rsync failed - #{reason}" | errors]
+          Logger.warning(
+            "[Importer] web_files→S3 #{label}: failed to start upload job - #{inspect(reason)}"
+          )
+
+          ["#{label}: failed to start upload job - #{inspect(reason)}" | errors]
       end
     else
       if is_binary(local_base) and local_base != "" do

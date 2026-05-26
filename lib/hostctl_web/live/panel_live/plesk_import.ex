@@ -2250,6 +2250,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                               <input
                                 type="checkbox"
                                 name="ftp_enabled"
+                                value="true"
                                 checked={Map.get(t_config, :ftp_enabled, false)}
                                 class="rounded border-sky-300 text-sky-600 focus:ring-sky-500"
                               />
@@ -2259,6 +2260,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                               <input
                                 type="checkbox"
                                 name="directory_listing"
+                                value="true"
                                 checked={Map.get(t_config, :directory_listing, false)}
                                 class="rounded border-sky-300 text-sky-600 focus:ring-sky-500"
                               />

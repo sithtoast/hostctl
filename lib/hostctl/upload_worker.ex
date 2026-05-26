@@ -109,55 +109,16 @@ defmodule Hostctl.UploadWorker do
     {:ok, job} =
       Hosting.update_upload_job(job, %{status: "running", started_at: DateTime.utc_now()})
 
-    # Broadcast start
     broadcast_progress(job)
 
-    # Check which files already exist in S3 (for resume)
-    existing_keys =
-      case S3Client.list_all_keys(
-             job.s3_endpoint,
-             job.s3_bucket,
-             job.s3_prefix,
-             job.s3_access_key_id,
-             job.s3_secret_access_key,
-             job.s3_region
-           ) do
-        {:ok, keys} -> MapSet.new(keys)
-        {:error, _} -> MapSet.new()
+    result =
+      if streaming_mode?(job) do
+        run_streaming_upload(job)
+      else
+        run_staged_upload(job)
       end
 
-    # Get all files to upload
-    all_files =
-      job.source_path
-      |> list_files_recursive()
-      |> Enum.sort()
-
-    # Filter out files that already exist
-    files_to_upload =
-      Enum.reject(all_files, fn file_path ->
-        relative = Path.relative_to(file_path, job.source_path)
-
-        key =
-          if job.s3_prefix && job.s3_prefix != "",
-            do: "#{job.s3_prefix}/#{relative}",
-            else: relative
-
-        MapSet.member?(existing_keys, key)
-      end)
-
-    total = length(all_files)
-    already_uploaded = length(all_files) - length(files_to_upload)
-
-    Logger.info(
-      "[UploadWorker] Job #{job_id}: #{total} total files, #{already_uploaded} already uploaded, #{length(files_to_upload)} to upload"
-    )
-
-    # Update total files count
-    {:ok, job} =
-      Hosting.update_upload_job(job, %{total_files: total, uploaded_files: already_uploaded})
-
-    # Upload remaining files (pass worker pid so stream can check cancellation)
-    result = upload_files(job, files_to_upload, already_uploaded, self())
+    total = job.total_files
 
     case result do
       {:ok, uploaded_count} ->
@@ -172,12 +133,6 @@ defmodule Hostctl.UploadWorker do
         Logger.info(
           "[UploadWorker] Job #{job_id} completed: #{uploaded_count}/#{total} files uploaded"
         )
-
-        # Clean up source directory if requested
-        if get_in(job.metadata, ["cleanup_source"]) do
-          File.rm_rf(job.source_path)
-          Logger.debug("[UploadWorker] Cleaned up source directory: #{job.source_path}")
-        end
 
         broadcast_progress(Repo.reload!(job))
         {:stop, :normal, state}
@@ -212,6 +167,301 @@ defmodule Hostctl.UploadWorker do
   end
 
   # Private helpers
+
+  # ---------------------------------------------------------------------------
+  # Upload modes
+  # ---------------------------------------------------------------------------
+
+  # Streaming mode: the worker rsyncs files from the remote server in small
+  # batches, uploads each batch to S3, then deletes the local copies before
+  # fetching the next batch. This keeps local disk usage bounded to
+  # ~(batch_size × avg_file_size) regardless of total site size.
+  @batch_size 300
+
+  defp streaming_mode?(job) do
+    is_binary(job.remote_source_path) and job.remote_source_path != "" and
+      is_binary(job.ssh_host) and job.ssh_host != ""
+  end
+
+  defp run_streaming_upload(job) do
+    Logger.info("[UploadWorker] Job #{job.id}: streaming mode (batched rsync → S3)")
+
+    # 1. List all files on the remote server via SSH find
+    case list_remote_files(job) do
+      {:error, reason} ->
+        {:error, reason, 0, 0}
+
+      {:ok, all_relative_paths} ->
+        total = length(all_relative_paths)
+
+        # 2. Skip files already in S3 (resume support)
+        existing_keys = get_existing_s3_keys(job)
+
+        paths_to_upload =
+          Enum.reject(all_relative_paths, fn rel ->
+            MapSet.member?(existing_keys, s3_key(job, rel))
+          end)
+
+        already_done = total - length(paths_to_upload)
+
+        Logger.info(
+          "[UploadWorker] Job #{job.id}: #{total} remote files, #{already_done} already in S3, #{length(paths_to_upload)} to upload"
+        )
+
+        {:ok, job} =
+          Hosting.update_upload_job(job, %{total_files: total, uploaded_files: already_done})
+
+        broadcast_progress(job)
+
+        # 3. Process in batches
+        run_batches(job, paths_to_upload, already_done)
+    end
+  end
+
+  # Traditional mode: files are already staged locally in job.source_path.
+  defp run_staged_upload(job) do
+    Logger.info("[UploadWorker] Job #{job.id}: staged mode (files already local)")
+
+    existing_keys = get_existing_s3_keys(job)
+
+    all_files =
+      job.source_path
+      |> list_files_recursive()
+      |> Enum.sort()
+
+    files_to_upload =
+      Enum.reject(all_files, fn file_path ->
+        relative = Path.relative_to(file_path, job.source_path)
+        MapSet.member?(existing_keys, s3_key(job, relative))
+      end)
+
+    total = length(all_files)
+    already_uploaded = total - length(files_to_upload)
+
+    Logger.info(
+      "[UploadWorker] Job #{job.id}: #{total} total files, #{already_uploaded} already uploaded"
+    )
+
+    {:ok, job} =
+      Hosting.update_upload_job(job, %{total_files: total, uploaded_files: already_uploaded})
+
+    result = upload_files(job, files_to_upload, already_uploaded, self())
+
+    # Clean up source directory when done
+    if get_in(job.metadata, ["cleanup_source"]) do
+      File.rm_rf(job.source_path)
+      Logger.debug("[UploadWorker] Cleaned up staged source: #{job.source_path}")
+    end
+
+    result
+  end
+
+  # ---------------------------------------------------------------------------
+  # Batched rsync streaming helpers
+  # ---------------------------------------------------------------------------
+
+  defp run_batches(job, paths, done_count) do
+    staging_base =
+      System.tmp_dir!()
+      |> Path.join("hostctl_batch_#{job.id}_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(staging_base)
+
+    result =
+      paths
+      |> Enum.chunk_every(@batch_size)
+      |> Enum.reduce_while({:ok, done_count, 0}, fn batch_paths, {:ok, uploaded, failed} ->
+        if Process.get(:cancel_upload, false) do
+          {:halt, {:paused, uploaded}}
+        else
+          batch_dir =
+            Path.join(staging_base, "b#{System.unique_integer([:positive])}")
+
+          File.mkdir_p!(batch_dir)
+
+          batch_result = process_one_batch(job, batch_paths, batch_dir, uploaded)
+          File.rm_rf(batch_dir)
+
+          case batch_result do
+            {:ok, new_count} ->
+              {:cont, {:ok, new_count, failed}}
+
+            {:paused, new_count} ->
+              {:halt, {:paused, new_count}}
+
+            {:error, _errors, new_count, new_failed} ->
+              # Continue with remaining batches even if this one had failures
+              {:cont, {:ok, new_count, failed + new_failed}}
+          end
+        end
+      end)
+
+    File.rm_rf(staging_base)
+
+    case result do
+      {:ok, count, 0} -> {:ok, count}
+      {:ok, count, failed} -> {:error, ["#{failed} files failed to upload"], count, failed}
+      other -> other
+    end
+  end
+
+  defp process_one_batch(job, relative_paths, batch_dir, done_count) do
+    case rsync_batch(job, relative_paths, batch_dir) do
+      :ok ->
+        # Only upload files that actually arrived (rsync may skip some)
+        local_files =
+          relative_paths
+          |> Enum.map(&Path.join(batch_dir, &1))
+          |> Enum.filter(&File.exists?/1)
+
+        upload_files(%{job | source_path: batch_dir}, local_files, done_count, self())
+
+      {:error, reason} ->
+        {:error, ["rsync batch failed: #{reason}"], done_count, length(relative_paths)}
+    end
+  end
+
+  # Rsyncs a specific list of relative file paths from the remote source.
+  defp rsync_batch(job, relative_paths, local_dir) do
+    # Write the file list to a temp file for --files-from
+    list_file = Path.join(local_dir, ".rsync_files_list")
+
+    File.write!(list_file, Enum.join(relative_paths, "\n"))
+
+    remote_path =
+      if String.ends_with?(job.remote_source_path, "/"),
+        do: job.remote_source_path,
+        else: job.remote_source_path <> "/"
+
+    remote = "#{job.ssh_username}@#{job.ssh_host}:#{remote_path}"
+    port = job.ssh_port || "22"
+
+    with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts_from_job(job) do
+      ssh_cmd = String.trim("#{sshpass_prefix} ssh #{Enum.join(["-p", port] ++ auth_args, " ")}")
+      rsync = System.find_executable("rsync") || "rsync"
+
+      env_args = Enum.flat_map(env, fn {k, v} -> ["--setenv=#{k}=#{v}"] end)
+
+      args =
+        ["systemd-run", "--pipe", "--wait", "--collect", "--quiet"] ++
+          env_args ++
+          [
+            rsync,
+            "-rltzD",
+            "--chmod=D755,F644",
+            "--timeout=120",
+            "--files-from=#{list_file}",
+            "--relative",
+            "-e",
+            ssh_cmd,
+            remote,
+            local_dir <> "/"
+          ]
+
+      case System.cmd("sudo", args, stderr_to_stdout: true, env: env) do
+        {_, code} when code in [0, 24] ->
+          File.rm(list_file)
+          :ok
+
+        {output, code} ->
+          File.rm(list_file)
+          {:error, "exit #{code}: #{String.slice(output, 0, 300)}"}
+      end
+    end
+  end
+
+  # Lists all regular files under `job.remote_source_path` via SSH, returning
+  # relative paths (relative to the remote source directory).
+  defp list_remote_files(job) do
+    port = job.ssh_port || "22"
+
+    # Escape the remote path for shell use
+    remote_path = job.remote_source_path |> String.replace("'", "'\\''")
+
+    find_cmd =
+      "find '#{remote_path}' -type f -printf '%P\\n' 2>/dev/null | sort"
+
+    with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts_from_job(job) do
+      ssh = System.find_executable("ssh") || "ssh"
+
+      ssh_cmd_parts =
+        if(sshpass_prefix != "", do: [sshpass_prefix], else: []) ++
+          [ssh, "-p", port] ++ auth_args ++ ["#{job.ssh_username}@#{job.ssh_host}", find_cmd]
+
+      {output, code} =
+        System.cmd("sh", ["-c", Enum.join(ssh_cmd_parts, " ")],
+          stderr_to_stdout: false,
+          env: env
+        )
+
+      if code == 0 do
+        files =
+          output
+          |> String.split("\n")
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+
+        {:ok, files}
+      else
+        {:error, "SSH file listing failed (exit #{code})"}
+      end
+    end
+  end
+
+  # Builds SSH auth args from the job's stored credentials.
+  # Mirrors the logic in Hostctl.Plesk.Importer.ssh_auth_parts/1.
+  defp ssh_auth_parts_from_job(job) do
+    case job.ssh_auth_method do
+      "password" ->
+        password = job.ssh_password || ""
+
+        case System.find_executable("sshpass") do
+          nil ->
+            {:error, "sshpass not found"}
+
+          sshpass ->
+            {:ok, "#{sshpass} -e", ["-o", "StrictHostKeyChecking=accept-new"],
+             [{"SSHPASS", password}]}
+        end
+
+      _ ->
+        key_path = job.ssh_private_key_path || ""
+
+        {:ok, "",
+         [
+           "-o",
+           "BatchMode=yes",
+           "-o",
+           "StrictHostKeyChecking=accept-new",
+           "-i",
+           key_path
+         ], []}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Shared upload helpers
+  # ---------------------------------------------------------------------------
+
+  defp get_existing_s3_keys(job) do
+    case S3Client.list_all_keys(
+           job.s3_endpoint,
+           job.s3_bucket,
+           job.s3_prefix,
+           job.s3_access_key_id,
+           job.s3_secret_access_key,
+           job.s3_region
+         ) do
+      {:ok, keys} -> MapSet.new(keys)
+      {:error, _} -> MapSet.new()
+    end
+  end
+
+  defp s3_key(job, relative) do
+    if job.s3_prefix && job.s3_prefix != "",
+      do: "#{job.s3_prefix}/#{relative}",
+      else: relative
+  end
 
   defp upload_files(job, files, current_count, worker_pid) do
     # Process files in batches; check cancellation flag between batches
