@@ -213,6 +213,23 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   end
 
   @impl true
+  def handle_event("set_s3_config", %{"domain" => domain} = params, socket) do
+    configs = socket.assigns.domain_configs
+    config = Map.get(configs, domain, %{})
+
+    config =
+      config
+      |> put_s3_field(:s3_endpoint, params["endpoint"])
+      |> put_s3_field(:s3_bucket, params["bucket"])
+      |> put_s3_field(:s3_region, params["region"])
+      |> put_s3_field(:s3_access_key, params["access_key"])
+      |> put_s3_field(:s3_secret_key, params["secret_key"])
+      |> put_s3_field(:s3_prefix, params["prefix"])
+
+    {:noreply, assign(socket, :domain_configs, Map.put(configs, domain, config))}
+  end
+
+  @impl true
   def handle_event("toggle_s3_import", %{"domain" => domain}, socket) do
     configs = socket.assigns.domain_configs
     config = Map.get(configs, domain, %{})
@@ -735,6 +752,10 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
     results = Map.put(socket.assigns.restore_results, domain, status)
 
+    # When inline S3 credentials were used and restore succeeded, persist them
+    # as a DomainS3Backend so nginx is configured to serve from S3.
+    socket = maybe_persist_inline_s3_backend(socket, domain, result)
+
     {:noreply,
      socket
      |> assign(:restore_task_refs, task_refs)
@@ -813,11 +834,16 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     s3_import = Map.get(config, :s3_import, false)
     lv_pid = self()
 
-    # Build S3 backend opts when the domain has an S3 backend configured with
-    # credentials and the user has opted in to upload imports directly to S3.
+    # Build S3 backend opts when the user has opted in to upload imports directly
+    # to S3. Uses a pre-configured DomainS3Backend if one exists; otherwise falls
+    # back to the inline credentials entered in the import UI.
     s3_backend_opts =
       if s3_import do
-        build_s3_backend_opts(domain)
+        if Map.has_key?(socket.assigns.domain_s3_backends, domain) do
+          build_s3_backend_opts(domain)
+        else
+          build_s3_backend_opts_from_config(config)
+        end
       else
         nil
       end
@@ -888,6 +914,74 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       end
     else
       nil
+    end
+  end
+
+  # Builds S3 backend opts from inline credentials stored in the domain config
+  # (entered directly in the import UI when no pre-configured backend exists).
+  defp build_s3_backend_opts_from_config(config) do
+    endpoint = Map.get(config, :s3_endpoint, "")
+    bucket = Map.get(config, :s3_bucket, "")
+
+    if is_binary(endpoint) && endpoint != "" && is_binary(bucket) && bucket != "" do
+      %{
+        endpoint: endpoint,
+        bucket: bucket,
+        prefix: Map.get(config, :s3_prefix, ""),
+        access_key_id: Map.get(config, :s3_access_key, ""),
+        secret_access_key: Map.get(config, :s3_secret_key, ""),
+        region:
+          case Map.get(config, :s3_region, "") do
+            "" -> "us-east-1"
+            r -> r
+          end
+      }
+    else
+      nil
+    end
+  end
+
+  # After a successful restore, if the user supplied inline S3 credentials (no
+  # pre-existing DomainS3Backend for this domain), persist them as a new backend
+  # so nginx is reconfigured to serve files from S3 going forward.
+  defp maybe_persist_inline_s3_backend(socket, domain_name, result) do
+    config = Map.get(socket.assigns.domain_configs, domain_name, %{})
+
+    with true <- Map.get(config, :s3_import, false),
+         false <- Map.has_key?(socket.assigns.domain_s3_backends, domain_name),
+         opts when not is_nil(opts) <- build_s3_backend_opts_from_config(config),
+         {:ok, _} <- result do
+      import Ecto.Query
+      alias Hostctl.Repo
+      alias Hostctl.Hosting.Domain
+
+      db_domain = Repo.one(from d in Domain, where: d.name == ^domain_name, limit: 1)
+
+      if db_domain do
+        attrs = %{
+          endpoint_url: opts.endpoint,
+          bucket: opts.bucket,
+          path_prefix: opts.prefix,
+          access_key_id: opts.access_key_id,
+          secret_access_key: opts.secret_access_key,
+          region: opts.region,
+          subdomain: "",
+          url_path: ""
+        }
+
+        case Hostctl.Hosting.create_s3_backend(db_domain, attrs) do
+          {:ok, backend} ->
+            new_backends = Map.put(socket.assigns.domain_s3_backends, domain_name, backend)
+            assign(socket, :domain_s3_backends, new_backends)
+
+          {:error, _} ->
+            socket
+        end
+      else
+        socket
+      end
+    else
+      _ -> socket
     end
   end
 
@@ -1738,32 +1832,82 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                   />
                 </form>
               <% end %>
-              <%!-- S3 import toggle — only shown when the domain has an S3 backend with credentials --%>
-              <%= if Map.has_key?(@domain_s3_backends, sub.domain) do %>
-                <button
-                  id={"s3-import-toggle-#{sub.domain}"}
-                  type="button"
-                  phx-click="toggle_s3_import"
-                  phx-value-domain={sub.domain}
-                  title={
-                    if Map.get(config, :s3_import, false),
-                      do: "Switch to local path",
-                      else: "Upload directly to S3 bucket"
-                  }
-                  class={[
-                    "flex-shrink-0 inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border text-xs font-medium transition-colors",
-                    if(Map.get(config, :s3_import, false),
-                      do:
-                        "border-sky-300 dark:border-sky-700 bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300",
-                      else:
-                        "border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-sky-50 dark:hover:bg-sky-950/30 hover:border-sky-300 dark:hover:border-sky-700 hover:text-sky-700 dark:hover:text-sky-300"
-                    )
-                  ]}
-                >
-                  <.icon name="hero-cloud-arrow-up" class="w-3 h-3" /> S3
-                </button>
-              <% end %>
+              <%!-- S3 import toggle — always shown when web_files is selected --%>
+              <button
+                id={"s3-import-toggle-#{sub.domain}"}
+                type="button"
+                phx-click="toggle_s3_import"
+                phx-value-domain={sub.domain}
+                title={
+                  if Map.get(config, :s3_import, false),
+                    do: "Switch to local path",
+                    else: "Upload directly to S3 bucket"
+                }
+                class={[
+                  "flex-shrink-0 inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border text-xs font-medium transition-colors",
+                  if(Map.get(config, :s3_import, false),
+                    do:
+                      "border-sky-300 dark:border-sky-700 bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300",
+                    else:
+                      "border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-sky-50 dark:hover:bg-sky-950/30 hover:border-sky-300 dark:hover:border-sky-700 hover:text-sky-700 dark:hover:text-sky-300"
+                  )
+                ]}
+              >
+                <.icon name="hero-cloud-arrow-up" class="w-3 h-3" /> S3
+              </button>
             </div>
+            <%!-- Inline S3 credentials — shown when S3 import is on and no pre-configured backend exists --%>
+            <%= if Map.get(config, :s3_import, false) && not Map.has_key?(@domain_s3_backends, sub.domain) do %>
+              <form
+                id={"s3-config-form-#{sub.domain}"}
+                phx-change="set_s3_config"
+                class="mt-2 grid grid-cols-2 gap-2"
+              >
+                <input type="hidden" name="domain" value={sub.domain} />
+                <input
+                  type="text"
+                  name="endpoint"
+                  value={Map.get(config, :s3_endpoint, "")}
+                  placeholder="Endpoint (https://s3.amazonaws.com)"
+                  class="col-span-2 block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                />
+                <input
+                  type="text"
+                  name="bucket"
+                  value={Map.get(config, :s3_bucket, "")}
+                  placeholder="Bucket name"
+                  class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                />
+                <input
+                  type="text"
+                  name="region"
+                  value={Map.get(config, :s3_region, "us-east-1")}
+                  placeholder="Region (us-east-1)"
+                  class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                />
+                <input
+                  type="text"
+                  name="access_key"
+                  value={Map.get(config, :s3_access_key, "")}
+                  placeholder="Access key ID"
+                  class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                />
+                <input
+                  type="password"
+                  name="secret_key"
+                  value={Map.get(config, :s3_secret_key, "")}
+                  placeholder="Secret access key"
+                  class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                />
+                <input
+                  type="text"
+                  name="prefix"
+                  value={Map.get(config, :s3_prefix, "")}
+                  placeholder="Key prefix (optional)"
+                  class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                />
+              </form>
+            <% end %>
           <% end %>
 
           <%!-- Select/deselect all and restore --%>
@@ -2299,6 +2443,10 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   defp normalize_string(value) when is_binary(value), do: String.trim(value)
   defp normalize_string(_), do: ""
+
+  # Updates a config field only when the value is a non-nil string.
+  defp put_s3_field(config, _key, nil), do: config
+  defp put_s3_field(config, key, value) when is_binary(value), do: Map.put(config, key, value)
 
   defp normalize_form_params(params) when is_map(params) do
     @default_params
