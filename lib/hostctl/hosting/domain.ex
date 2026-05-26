@@ -27,6 +27,7 @@ defmodule Hostctl.Hosting.Domain do
     field :bandwidth_used_mb, :integer, default: 0
     field :apply_dns_template, :boolean, default: true
     field :autoindex, :boolean, default: false
+    field :cr_date, :date
 
     belongs_to :user, User
     has_many :subdomains, Subdomain
@@ -56,7 +57,8 @@ defmodule Hostctl.Hosting.Domain do
       :status,
       :ssl_enabled,
       :apply_dns_template,
-      :autoindex
+      :autoindex,
+      :cr_date
     ])
     |> validate_required([:name])
     |> validate_format(:name, ~r/^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?(\.[a-z]{2,})+$/i,

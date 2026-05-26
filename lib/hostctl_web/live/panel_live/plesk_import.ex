@@ -409,6 +409,18 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                 %{name: name, email: email}
               end
 
+            user_attrs =
+              case Map.get(sample, :owner_cr_date) do
+                s when is_binary(s) ->
+                  case Date.from_iso8601(s) do
+                    {:ok, d} -> Map.put(user_attrs, :cr_date, d)
+                    _ -> user_attrs
+                  end
+
+                _ ->
+                  user_attrs
+              end
+
             case Accounts.create_panel_user(user_attrs) do
               {:ok, _user} ->
                 configs =

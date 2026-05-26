@@ -1039,7 +1039,13 @@ defmodule Hostctl.Plesk.SSHProbe do
         |> Enum.filter(fn sub -> root_parents[sub.domain] == root.domain end)
         |> Enum.map(fn sub ->
           prefix = String.replace_suffix(sub.domain, "." <> root.domain, "")
-          %{name: prefix, full_name: sub.domain, system_user: sub.system_user}
+
+          entry = %{name: prefix, full_name: sub.domain, system_user: sub.system_user}
+
+          case Map.get(sub, :cr_date) do
+            nil -> entry
+            cr_date -> Map.put(entry, :cr_date, cr_date)
+          end
         end)
         |> Enum.sort_by(& &1.name)
 

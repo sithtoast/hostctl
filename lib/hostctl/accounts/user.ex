@@ -12,6 +12,7 @@ defmodule Hostctl.Accounts.User do
     field :authenticated_at, :utc_datetime, virtual: true
     field :name, :string
     field :role, :string, default: "client"
+    field :cr_date, :date
 
     belongs_to :managed_by, __MODULE__, foreign_key: :managed_by_id
     has_many :ftp_accounts, FtpAccount
@@ -43,7 +44,7 @@ defmodule Hostctl.Accounts.User do
   def panel_user_changeset(user, attrs, opts \\ []) do
     changeset =
       user
-      |> cast(attrs, [:name, :email, :password])
+      |> cast(attrs, [:name, :email, :password, :cr_date])
       |> validate_required([:name])
       |> validate_length(:name, min: 2, max: 100)
       |> validate_email(opts)

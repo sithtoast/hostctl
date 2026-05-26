@@ -51,10 +51,13 @@ defmodule Hostctl.Plesk.Importer do
         end)
 
       if object_index_subscriptions != [] do
-        {:ok,
-         object_index_subscriptions
-         |> Enum.uniq_by(& &1.domain)
-         |> Enum.sort_by(& &1.domain)}
+        enriched =
+          object_index_subscriptions
+          |> Enum.uniq_by(& &1.domain)
+          |> enrich_subscriptions_with_sites(backup_path)
+          |> enrich_subscriptions_with_owner_cr_dates(backup_path)
+
+        {:ok, Enum.sort_by(enriched, & &1.domain)}
       else
         from_root_backup_info_xml_subscriptions(backup_path)
       end
@@ -381,10 +384,15 @@ defmodule Hostctl.Plesk.Importer do
     {domain, domain_status} =
       case Hosting.get_domain_by_name(scope, domain_name) do
         nil ->
-          case Hosting.create_domain(scope, %{
-                 name: domain_name,
-                 apply_dns_template: apply_dns_template
-               }) do
+          attrs = %{name: domain_name, apply_dns_template: apply_dns_template}
+
+          attrs =
+            case parse_cr_date(subscription) do
+              nil -> attrs
+              cr_date -> Map.put(attrs, :cr_date, cr_date)
+            end
+
+          case Hosting.create_domain(scope, attrs) do
             {:ok, domain} -> {domain, :created}
             {:error, cs} -> {nil, {:failed, changeset_error_summary(cs)}}
           end
@@ -722,6 +730,7 @@ defmodule Hostctl.Plesk.Importer do
   defp restore_category("ftp_accounts", domain, _subscription, inventory, restore_opts) do
     accounts = Map.get(inventory, "ftp_accounts", [])
     ftpuser_passwords = get_in(restore_opts, [:backup_credentials, :ftpuser_passwords]) || %{}
+    sysuser_passwords = get_in(restore_opts, [:backup_credentials, :sysuser_passwords]) || %{}
 
     # All domains owned by this user — needed to build multi-mount accounts
     # when the Plesk FTP home was the subscription root.
@@ -733,7 +742,7 @@ defmodule Hostctl.Plesk.Importer do
     )
 
     do_restore_items(accounts, fn item ->
-      restore_ftp_account(domain, item, ftpuser_passwords, user_domains)
+      restore_ftp_account(domain, item, ftpuser_passwords, sysuser_passwords, user_domains)
     end)
   end
 
@@ -779,7 +788,15 @@ defmodule Hostctl.Plesk.Importer do
     else
       # Skip auto-creating DNS records — the "dns" restore category handles
       # those with the actual records from Plesk (with IP replacement).
-      case Hosting.create_subdomain(domain, %{name: sub.name}, skip_dns_records: true) do
+      attrs = %{name: sub.name}
+
+      attrs =
+        case parse_cr_date(sub) do
+          nil -> attrs
+          cr_date -> Map.put(attrs, :cr_date, cr_date)
+        end
+
+      case Hosting.create_subdomain(domain, attrs, skip_dns_records: true) do
         {:ok, _} -> :created
         {:error, cs} -> {:failed, "#{sub.full_name}: #{changeset_error_summary(cs)}"}
       end
@@ -2403,21 +2420,45 @@ defmodule Hostctl.Plesk.Importer do
       Path.wildcard("#{extract_dir}/**/backup_info_*.xml") ++
         Path.wildcard("#{extract_dir}/**/dump.xml")
 
-    xml_files
-    |> Enum.flat_map(fn xml_file ->
-      case File.read(xml_file) do
-        {:ok, content} ->
-          ~r/<ftpuser\s[^>]*name="([^"]+)"[^>]*>(.*?)<\/ftpuser>/s
-          |> Regex.scan(content)
-          |> Enum.map(fn [_full, name, block] ->
-            %{login: name, home: extract_sysuser_home(block)}
-          end)
+    ftp_users =
+      xml_files
+      |> Enum.flat_map(fn xml_file ->
+        case File.read(xml_file) do
+          {:ok, content} ->
+            ~r/<ftpuser\s[^>]*name="([^"]+)"[^>]*>(.*?)<\/ftpuser>/s
+            |> Regex.scan(content)
+            |> Enum.map(fn [_full, name, block] ->
+              %{login: name, home: extract_sysuser_home(block)}
+            end)
 
-        {:error, _} ->
-          []
-      end
-    end)
-    |> Enum.uniq_by(& &1.login)
+          {:error, _} ->
+            []
+        end
+      end)
+      |> Enum.uniq_by(& &1.login)
+
+    # Also pick up subscription-level sysusers. The `shell=` attribute marks
+    # them as subscription sysusers (as opposed to the nested <sysuser> inside
+    # <ftpuser> blocks, which use `home=` instead).
+    sysusers =
+      xml_files
+      |> Enum.flat_map(fn xml_file ->
+        case File.read(xml_file) do
+          {:ok, content} ->
+            ~r/<sysuser\s[^>]*name="([^"]+)"[^>]*shell="[^"]*"/
+            |> Regex.scan(content)
+            |> Enum.map(fn [_, name] -> %{login: name, home: nil, source: :sysuser} end)
+
+          {:error, _} ->
+            []
+        end
+      end)
+      |> Enum.uniq_by(& &1.login)
+
+    # Explicit FTP entries take priority; sysusers only appended when not
+    # already covered by a <ftpuser> block.
+    ftp_logins = MapSet.new(ftp_users, & &1.login)
+    ftp_users ++ Enum.reject(sysusers, &MapSet.member?(ftp_logins, &1.login))
   end
 
   # Extract a plaintext password from an XML block.
@@ -2758,7 +2799,7 @@ defmodule Hostctl.Plesk.Importer do
 
   defp maybe_replace_ip(_type, value, _replacements), do: value
 
-  defp restore_ftp_account(domain, item, ftpuser_passwords, user_domains) do
+  defp restore_ftp_account(domain, item, ftpuser_passwords, sysuser_passwords, user_domains) do
     existing =
       domain
       |> Hosting.list_ftp_accounts()
@@ -2769,8 +2810,16 @@ defmodule Hostctl.Plesk.Importer do
     else
       password =
         case Map.get(ftpuser_passwords, item.login) do
-          p when is_binary(p) and byte_size(p) >= 8 -> p
-          _ -> generate_random_password()
+          p when is_binary(p) and byte_size(p) >= 8 ->
+            p
+
+          _ ->
+            # Fall back to the subscription sysuser password (for sysuser-sourced
+            # FTP accounts that have no dedicated <ftpuser> block)
+            case Map.get(sysuser_passwords, item.login) do
+              p when is_binary(p) and byte_size(p) >= 8 -> p
+              _ -> generate_random_password()
+            end
         end
 
       attrs = ftp_attrs_from_item(item, domain, user_domains, password)
@@ -2991,6 +3040,200 @@ defmodule Hostctl.Plesk.Importer do
 
   defp object_index_paths(backup_path) do
     Path.wildcard(Path.join([backup_path, ".discovered", "*", "object_index"]))
+  end
+
+  # For each subscription, read the domain-level object_index files and extract
+  # `site` entries. Sites that share the same TLD are added as flat subscription
+  # entries (subdomains of the parent), and addon domains get their own entry.
+  # Both will be processed by `SSHProbe.merge_subdomains/1` to build the
+  # final hierarchy.
+  # Also reads per-domain backup XMLs to extract `cr-date` for each domain/site
+  # and stores it as an ISO 8601 string on the subscription map.
+  defp enrich_subscriptions_with_sites(subscriptions, backup_path) do
+    existing_domains = MapSet.new(subscriptions, & &1.domain)
+
+    {additional, cr_dates} =
+      Enum.reduce(subscriptions, {[], %{}}, fn sub, {acc_sites, acc_dates} ->
+        main_domain = sub.domain
+
+        # Domain-level object_index files are nested inside .../domains/{main_domain}/
+        # at any depth (admin, client, or reseller-owned).
+        domain_index_paths =
+          Path.wildcard("#{backup_path}/**/#{main_domain}/.discovered/*/object_index")
+
+        # Per-domain backup XMLs (same directory, not inside .discovered/)
+        xml_paths =
+          Path.wildcard("#{backup_path}/**/#{main_domain}/backup_info_*.xml")
+
+        sites =
+          domain_index_paths
+          |> Enum.flat_map(fn path ->
+            case File.read(path) do
+              {:ok, content} -> sites_from_domain_object_index(content, sub)
+              _ -> []
+            end
+          end)
+          |> Enum.uniq_by(& &1.domain)
+
+        dates = extract_cr_dates_from_xmls(xml_paths, main_domain)
+        {acc_sites ++ sites, Map.merge(acc_dates, dates)}
+      end)
+
+    # Apply cr_dates to existing subscriptions (ISO 8601 string to survive JSON roundtrip)
+    subscriptions_with_dates =
+      Enum.map(subscriptions, fn sub ->
+        case Map.get(cr_dates, sub.domain) do
+          nil -> sub
+          date -> Map.put(sub, :cr_date, date)
+        end
+      end)
+
+    # Apply cr_dates to additional site entries
+    additional_with_dates =
+      Enum.map(additional, fn sub ->
+        case Map.get(cr_dates, sub.domain) do
+          nil -> sub
+          date -> Map.put(sub, :cr_date, date)
+        end
+      end)
+
+    # Append new entries, deduplicating against already-known domains
+    subscriptions_with_dates ++
+      Enum.reject(additional_with_dates, &MapSet.member?(existing_domains, &1.domain))
+  end
+
+  # Extracts cr-dates for the main domain and any <site> elements from backup XMLs.
+  # Returns a map of %{"domain.name" => "YYYY-MM-DD"} with ISO 8601 date strings.
+  defp extract_cr_dates_from_xmls(xml_paths, main_domain) do
+    Enum.reduce(xml_paths, %{}, fn xml_path, acc ->
+      case File.read(xml_path) do
+        {:ok, content} ->
+          main_dates =
+            case Regex.run(~r/<domain\b[^>]*\bcr-date="(\d{4}-\d{2}-\d{2})"/, content) do
+              [_, date] -> %{main_domain => date}
+              _ -> %{}
+            end
+
+          site_dates =
+            ~r/<site\b([^>]*)>/
+            |> Regex.scan(content, capture: :all_but_first)
+            |> Enum.flat_map(fn [attrs] ->
+              with [_, name] <- Regex.run(~r/\bname="([^"]+)"/, attrs),
+                   [_, date] <- Regex.run(~r/\bcr-date="(\d{4}-\d{2}-\d{2})"/, attrs) do
+                [{name, date}]
+              else
+                _ -> []
+              end
+            end)
+            |> Map.new()
+
+          acc |> Map.merge(main_dates) |> Map.merge(site_dates)
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  # Parses an ISO 8601 cr_date string from a subscription map into a Date struct.
+  # Returns nil when the value is absent or invalid.
+  defp parse_cr_date(map) do
+    case Map.get(map, :cr_date) do
+      s when is_binary(s) ->
+        case Date.from_iso8601(s) do
+          {:ok, d} -> d
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # Parses `site` tab-delimited lines from a domain-level object_index.
+  # Skips the main domain itself (Plesk lists it as a site in its own index).
+  defp sites_from_domain_object_index(content, parent_sub) do
+    content
+    |> String.split("\n", trim: true)
+    |> Enum.flat_map(fn line ->
+      case String.split(line, "\t", trim: false) do
+        ["site", name | _rest]
+        when is_binary(name) and name != "" and name != parent_sub.domain ->
+          [
+            %{
+              domain: name,
+              owner_login: parent_sub.owner_login,
+              owner_type: parent_sub.owner_type,
+              owner_name: parent_sub.owner_name,
+              owner_email: parent_sub.owner_email,
+              system_user: parent_sub.system_user
+            }
+          ]
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  # Reads reseller and client backup XMLs to extract their `cr-date` attributes,
+  # then stamps each subscription with an `owner_cr_date` ISO 8601 string.
+  # Paths searched:
+  #   {backup_path}/resellers/{login}/backup_info_*.xml  → <reseller cr-date="...">
+  #   {backup_path}/clients/{login}/backup_info_*.xml    → <client cr-date="...">
+  defp enrich_subscriptions_with_owner_cr_dates(subscriptions, backup_path) do
+    owner_dates = extract_owner_cr_dates(backup_path)
+
+    if owner_dates == %{} do
+      subscriptions
+    else
+      Enum.map(subscriptions, fn sub ->
+        case Map.get(owner_dates, sub.owner_login) do
+          nil -> sub
+          date -> Map.put(sub, :owner_cr_date, date)
+        end
+      end)
+    end
+  end
+
+  defp extract_owner_cr_dates(backup_path) do
+    reseller_dates =
+      Path.wildcard("#{backup_path}/resellers/*/backup_info_*.xml")
+      |> Enum.flat_map(fn xml_path ->
+        login = xml_path |> Path.dirname() |> Path.basename()
+
+        case File.read(xml_path) do
+          {:ok, content} ->
+            case Regex.run(~r/<reseller\b[^>]*\bcr-date="(\d{4}-\d{2}-\d{2})"/, content) do
+              [_, date] -> [{login, date}]
+              _ -> []
+            end
+
+          _ ->
+            []
+        end
+      end)
+      |> Map.new()
+
+    client_dates =
+      Path.wildcard("#{backup_path}/clients/*/backup_info_*.xml")
+      |> Enum.flat_map(fn xml_path ->
+        login = xml_path |> Path.dirname() |> Path.basename()
+
+        case File.read(xml_path) do
+          {:ok, content} ->
+            case Regex.run(~r/<client\b[^>]*\bcr-date="(\d{4}-\d{2}-\d{2})"/, content) do
+              [_, date] -> [{login, date}]
+              _ -> []
+            end
+
+          _ ->
+            []
+        end
+      end)
+      |> Map.new()
+
+    Map.merge(reseller_dates, client_dates)
   end
 
   defp ensure_directory(path) do
