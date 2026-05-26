@@ -311,13 +311,17 @@ defmodule Hostctl.Plesk.Importer do
     web_files_path = Keyword.get(opts, :web_files_path)
     progress_pid = Keyword.get(opts, :progress_pid)
     server_credentials = Keyword.get(opts, :server_credentials)
+    s3_backend_opts = Keyword.get(opts, :s3_backend_opts)
+    user_id = Keyword.get(opts, :user_id)
     domain_name = subscription.domain
 
     restore_opts = %{
       ssh_opts: ssh_opts,
       web_files_path: web_files_path,
       progress_pid: progress_pid,
-      server_credentials: server_credentials
+      server_credentials: server_credentials,
+      s3_backend_opts: s3_backend_opts,
+      user_id: user_id
     }
 
     result = %{
