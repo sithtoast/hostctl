@@ -552,20 +552,10 @@ defmodule Hostctl.UploadWorker do
     results =
       files
       |> Stream.with_index(current_count + 1)
-      |> Stream.transform(:cont, fn {file_path, index}, _acc ->
-        # Check the cancel flag (readable from worker process via send+receive)
-        cancelled =
-          if worker_pid == self() do
-            Process.get(:cancel_upload, false)
-          else
-            false
-          end
-
-        if cancelled do
-          {:halt, :halted}
-        else
-          {{:cont, {file_path, index}}, :cont}
-        end
+      |> Stream.take_while(fn _ ->
+        if worker_pid == self(),
+          do: not Process.get(:cancel_upload, false),
+          else: true
       end)
       |> Task.async_stream(
         fn {file_path, index} ->
