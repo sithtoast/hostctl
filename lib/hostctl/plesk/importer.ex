@@ -603,6 +603,11 @@ defmodule Hostctl.Plesk.Importer do
     parent_item = Enum.find(all_items, fn item -> item.domain == domain.name end)
     subdomains = Map.get(subscription, :subdomains, [])
 
+    item =
+      parent_item ||
+        List.first(all_items) ||
+        %{domain: domain.name, system_user: nil, document_root: nil}
+
     cond do
       is_nil(ssh_opts) ->
         if parent_item == nil and all_items == [] do
@@ -617,13 +622,20 @@ defmodule Hostctl.Plesk.Importer do
           }
         end
 
-      not is_nil(s3_backend_opts) ->
-        # Upload directly to S3 using a temporary staging directory
-        item =
-          parent_item ||
-            List.first(all_items) ||
-            %{domain: domain.name, system_user: nil, document_root: nil}
+      # Per-target S3 map: keys are strings ("" = main domain, "sub1" = subdomain).
+      # Each target can independently go to S3 or fall back to a local path.
+      is_map(s3_backend_opts) && per_target_s3_opts?(s3_backend_opts) ->
+        restore_web_files_per_target(
+          domain,
+          item,
+          subdomains,
+          ssh_opts,
+          s3_backend_opts,
+          web_files_path
+        )
 
+      # Legacy flat S3 opts map: all targets use the same bucket/credentials.
+      not is_nil(s3_backend_opts) ->
         restore_web_files_to_s3(domain, item, subdomains, ssh_opts, s3_backend_opts)
 
       is_nil(web_files_path) || web_files_path == "" ->
@@ -636,13 +648,6 @@ defmodule Hostctl.Plesk.Importer do
         }
 
       true ->
-        # When no web_files entry exists in inventory, build a synthetic item
-        # using the default Plesk path so we still attempt to rsync.
-        item =
-          parent_item ||
-            List.first(all_items) ||
-            %{domain: domain.name, system_user: nil, document_root: nil}
-
         restore_web_files_restructured(domain, item, subdomains, ssh_opts, web_files_path)
     end
   end
@@ -873,6 +878,173 @@ defmodule Hostctl.Plesk.Importer do
   ]
 
   @plesk_docroot_dirs ~w(httpdocs htdocs public public_html)
+
+  # Returns true when `opts` is a per-target S3 map (string keys like "", "sub1")
+  # rather than a flat credential map (atom keys like :endpoint, :bucket).
+  defp per_target_s3_opts?(%{} = opts) do
+    opts |> Map.keys() |> Enum.all?(&is_binary/1)
+  end
+
+  defp per_target_s3_opts?(_), do: false
+
+  # Extracts the remote docroot and parent home directory from the inventory item.
+  defp compute_remote_docroot(item, domain_name) do
+    if is_binary(item.document_root) and item.document_root != "" do
+      docroot = item.document_root
+      {docroot, Path.dirname(docroot)}
+    else
+      home = "/var/www/vhosts/#{domain_name}"
+      {home <> "/httpdocs", home}
+    end
+  end
+
+  # Restores web files with per-target S3 configuration. Each target (main domain
+  # or a named subdomain) can independently be uploaded to its own S3 bucket or
+  # synced to a local directory. `s3_per_target` is a map of string keys:
+  #   - `""` → opts for the main domain document root
+  #   - `"sub1"` → opts for the "sub1" subdomain
+  # Targets absent from the map fall back to `local_base_path`.
+  defp restore_web_files_per_target(
+         domain,
+         item,
+         subdomains,
+         ssh_opts,
+         s3_per_target,
+         local_base_path
+       ) do
+    domain_name = domain.name
+    {remote_docroot, remote_home_dir} = compute_remote_docroot(item, domain_name)
+
+    Logger.info(
+      "[Importer] web_files per-target #{domain_name}: " <>
+        "docroot=#{remote_docroot}, s3_targets=#{inspect(Map.keys(s3_per_target))}, " <>
+        "subdomains=#{length(subdomains)}"
+    )
+
+    # Shared temp dir for any S3 staging; created lazily only when needed.
+    tmp_base =
+      System.tmp_dir!()
+      |> Path.join("hostctl_s3_import_#{domain_name}_#{System.unique_integer([:positive])}")
+
+    errors = []
+
+    # Main domain
+    errors =
+      restore_target_web_files(
+        domain_name,
+        "httpdocs",
+        remote_docroot,
+        Map.get(s3_per_target, ""),
+        local_base_path,
+        tmp_base,
+        ssh_opts,
+        errors
+      )
+
+    # Each subdomain
+    errors =
+      Enum.reduce(subdomains, errors, fn sub, acc ->
+        sub_dir = "#{sub.name}.#{domain_name}"
+        remote_sub = "#{remote_home_dir}/#{sub_dir}"
+
+        restore_target_web_files(
+          sub.full_name,
+          sub_dir,
+          remote_sub,
+          Map.get(s3_per_target, sub.name),
+          local_base_path,
+          tmp_base,
+          ssh_opts,
+          acc
+        )
+      end)
+
+    File.rm_rf(tmp_base)
+
+    errors = Enum.reverse(errors)
+    total = 1 + length(subdomains)
+    failed = length(errors)
+    %{created: total - failed, skipped: 0, failed: failed, errors: errors}
+  end
+
+  # Handles one web-files target: uploads to S3 (via temp staging) when `s3_opts`
+  # is a map, or rsyncs to the local filesystem otherwise.
+  defp restore_target_web_files(
+         label,
+         dir_name,
+         remote_path,
+         s3_opts,
+         local_base,
+         tmp_base,
+         ssh_opts,
+         errors
+       ) do
+    if is_map(s3_opts) do
+      tmp_dir = Path.join(tmp_base, dir_name)
+      File.mkdir_p!(tmp_dir)
+
+      case do_rsync(ssh_opts, remote_path, tmp_dir,
+             timeout: 3600,
+             excludes: @plesk_rsync_excludes
+           ) do
+        :ok ->
+          raw_prefix = Map.get(s3_opts, :prefix, "")
+          s3_prefix = if raw_prefix != "", do: "#{raw_prefix}/#{dir_name}", else: dir_name
+
+          case Hostctl.S3Client.upload_directory(
+                 Map.fetch!(s3_opts, :endpoint),
+                 Map.fetch!(s3_opts, :bucket),
+                 s3_prefix,
+                 tmp_dir,
+                 Map.fetch!(s3_opts, :access_key_id),
+                 Map.fetch!(s3_opts, :secret_access_key),
+                 Map.get(s3_opts, :region, "us-east-1")
+               ) do
+            {:ok, count} ->
+              Logger.info(
+                "[Importer] web_files→S3 #{label}: uploaded #{count} files to #{s3_prefix}"
+              )
+
+              errors
+
+            {:error, upload_errors} ->
+              Logger.warning(
+                "[Importer] web_files→S3 #{label}: #{length(upload_errors)} upload failures"
+              )
+
+              errors ++ upload_errors
+          end
+
+        {:error, reason} ->
+          ["#{label}: rsync failed - #{reason}" | errors]
+      end
+    else
+      if is_binary(local_base) and local_base != "" do
+        local_dir = Path.join(local_base, dir_name)
+
+        case ensure_local_directory(local_dir) do
+          :ok ->
+            case do_rsync(ssh_opts, remote_path, local_dir,
+                   timeout: 3600,
+                   excludes: @plesk_rsync_excludes,
+                   chown: "www-data:www-data"
+                 ) do
+              :ok ->
+                Logger.info("[Importer] web_files #{label}: synced to #{local_dir}")
+                errors
+
+              {:error, reason} ->
+                ["#{label}: rsync failed - #{reason}" | errors]
+            end
+
+          {:error, reason} ->
+            ["#{label}: #{reason}" | errors]
+        end
+      else
+        ["#{label}: no destination path configured" | errors]
+      end
+    end
+  end
 
   defp restore_web_files_restructured(domain, item, subdomains, ssh_opts, local_base_path) do
     # Plesk groups all domains for a system user under one home directory.
