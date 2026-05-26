@@ -176,14 +176,15 @@ defmodule Hostctl.FtpServer do
   defp upsert_user_entry(username, raw_password) do
     file = virtual_users_file()
 
-    with {:ok, existing} <- read_user_entries(file) do
+    with {:ok, existing} <- read_user_entries(file),
+         {:ok, hashed} <- sha512_crypt(raw_password) do
       # Remove any pre-existing entry for this username, then append the new one.
       kept =
         existing
         |> Enum.reject(fn [u, _p] -> u == username end)
         |> Enum.flat_map(& &1)
 
-      content = Enum.join(kept ++ [username, raw_password], "\n")
+      content = Enum.join(kept ++ [username, hashed], "\n")
 
       with :ok <- escaped_mkdir_p(Path.dirname(file)),
            :ok <- escaped_write(file, content <> "\n"),
@@ -205,10 +206,10 @@ defmodule Hostctl.FtpServer do
 
       case remaining do
         [] ->
-          case escaped_cmd("rm", ["-f", file]) do
-            {_, 0} -> :ok
-            {output, code} -> {:error, {:rm_failed, code, output}}
-          end
+          # Write an empty file rather than deleting it so that rebuild_user_db
+          # always has a source file and db_load does not fail with "No such
+          # file or directory".  An empty DB means pam_userdb denies all logins.
+          escaped_write(file, "")
 
         lines ->
           escaped_write(file, Enum.join(lines, "\n") <> "\n")
@@ -249,10 +250,17 @@ defmodule Hostctl.FtpServer do
       {_, 0} ->
         :ok
 
-      {output, exit_code} ->
-        Logger.error("[FtpServer] db_load failed (exit #{exit_code}): #{String.trim(output)}")
-
-        {:error, {:db_load_failed, exit_code, output}}
+      {output, _exit_code} when is_binary(output) ->
+        if output =~ "No such file or directory" do
+          # Source file was removed before rebuild was called. Remove the stale
+          # DB so pam_userdb denies all logins cleanly rather than using old data.
+          Logger.info("[FtpServer] Virtual users file absent — removing stale DB")
+          escaped_cmd("rm", ["-f", "#{db}.db"])
+          :ok
+        else
+          Logger.error("[FtpServer] db_load failed: #{String.trim(output)}")
+          {:error, {:db_load_failed, output}}
+        end
     end
   end
 
@@ -313,6 +321,30 @@ defmodule Hostctl.FtpServer do
          ) do
       {_, 0} -> :ok
       {output, code} -> {:error, {:write_failed, code, output}}
+    end
+  end
+
+  # Hashes a plaintext password with SHA-512 crypt (the $6$ format understood
+  # by pam_userdb when configured with crypt=crypt). The password is passed via
+  # an environment variable so it never appears in the process list.
+  defp sha512_crypt(password) do
+    # Build a 16-char salt from the crypt(3)-safe alphabet [./A-Za-z0-9].
+    chars = ~c"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+    salt =
+      :crypto.strong_rand_bytes(16)
+      |> :binary.bin_to_list()
+      |> Enum.map(&Enum.at(chars, rem(&1, 64)))
+      |> to_string()
+
+    case System.cmd(
+           "sh",
+           ["-c", "printf '%s' \"$_FTP_PW\" | openssl passwd -6 -salt \"$_FTP_SALT\" -stdin"],
+           env: [{"_FTP_PW", password}, {"_FTP_SALT", salt}],
+           stderr_to_stdout: true
+         ) do
+      {hash, 0} -> {:ok, String.trim(hash)}
+      {output, code} -> {:error, {:hash_failed, code, output}}
     end
   end
 

@@ -627,7 +627,7 @@ defmodule Hostctl.FeatureSetup do
     broadcast(key, :log, "Writing PAM config for vsftpd virtual users...")
 
     pam_content = """
-    auth required pam_userdb.so db=/etc/vsftpd/virtual_users
+    auth required pam_userdb.so db=/etc/vsftpd/virtual_users crypt=crypt
     account required pam_userdb.so db=/etc/vsftpd/virtual_users
     """
 

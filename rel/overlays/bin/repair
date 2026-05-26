@@ -605,18 +605,21 @@ if dpkg -l vsftpd &>/dev/null 2>&1; then
       vsftpd_changed=true
     fi
 
-    # Ensure /etc/pam.d/vsftpd.virtual exists with the pam_userdb configuration.
-    # If this file is missing, vsftpd cannot authenticate virtual users even
-    # when pam_service_name is set correctly.
+    # Ensure /etc/pam.d/vsftpd.virtual exists with pam_userdb and crypt=crypt.
+    # Without crypt=crypt, passwords are compared in plaintext. With it,
+    # pam_userdb calls crypt(3) so SHA-512 crypt hashes ($6$...) are used.
+    # NOTE: updating this requires all FTP account passwords to be reset via
+    # the web UI so they are re-hashed and stored in the correct format.
     PAM_VIRT="/etc/pam.d/vsftpd.virtual"
-    if [[ -f "$PAM_VIRT" ]] && grep -q "pam_userdb" "$PAM_VIRT"; then
-      ok "/etc/pam.d/vsftpd.virtual already configured"
+    if [[ -f "$PAM_VIRT" ]] && grep -q "pam_userdb" "$PAM_VIRT" && grep -q "crypt=crypt" "$PAM_VIRT"; then
+      ok "/etc/pam.d/vsftpd.virtual already configured with crypt=crypt"
     else
       cat > "$PAM_VIRT" <<'PAMEOF'
-auth required pam_userdb.so db=/etc/vsftpd/virtual_users
+auth required pam_userdb.so db=/etc/vsftpd/virtual_users crypt=crypt
 account required pam_userdb.so db=/etc/vsftpd/virtual_users
 PAMEOF
-      fix "wrote /etc/pam.d/vsftpd.virtual (pam_userdb)"
+      fix "wrote /etc/pam.d/vsftpd.virtual (pam_userdb crypt=crypt)"
+      warn "FTP passwords are now hashed — all FTP accounts must have their passwords reset via the web UI"
       FIXED=$((FIXED + 1))
       vsftpd_changed=true
     fi
@@ -721,6 +724,23 @@ PAMEOF
       FIXED=$((FIXED + 1))
     else
       ok "secure_chroot_dir $SECURE_CHROOT_DIR exists"
+    fi
+
+    # Warn about per-user conf files whose username is not present in
+    # virtual_users.txt. This means provisioning partially succeeded
+    # (write_user_conf ran) but upsert_user_entry failed, leaving the FTP
+    # account unable to authenticate. The fix is to reset the account's
+    # password in the web UI which re-runs full provisioning.
+    if [[ -d "$VSFTPD_USER_CONF_DIR" ]]; then
+      for uconf in "$VSFTPD_USER_CONF_DIR"/*; do
+        [[ -f "$uconf" ]] || continue
+        uname="$(basename "$uconf")"
+        if [[ -f "$VUSERS_TXT" ]] && grep -q "^${uname}$" "$VUSERS_TXT" 2>/dev/null; then
+          ok "FTP user '$uname' present in virtual_users.txt"
+        else
+          warn "FTP user '$uname' has a vsftpd config but is missing from virtual_users.txt — reset their password in the web UI to re-sync"
+        fi
+      done
     fi
   else
     ok "vsftpd.conf not found — skipping"
