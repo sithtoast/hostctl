@@ -398,8 +398,28 @@ defmodule Hostctl.UploadWorker do
     # Escape the remote path for shell use
     remote_path = job.remote_source_path |> String.replace("'", "'\\''")
 
+    # For password auth we need a SUDO_ASKPASS helper so sudo doesn't try to
+    # prompt on the TTY (which is unavailable over SSH). For key auth, sudo is
+    # assumed to be configured to run find without a password.
+    # We intentionally avoid piping through `sort` so that sudo/find's real
+    # exit code propagates back — a pipe's exit code is from the last stage
+    # (sort), which is always 0 even when find fails.
     find_cmd =
-      "sudo find '#{remote_path}' -type f -printf '%P\\n' 2>/dev/null | sort"
+      if job.ssh_auth_method == "password" and job.ssh_password not in [nil, ""] do
+        escaped = String.replace(job.ssh_password, "'", "'\\''")
+
+        "AP=/tmp/.findask_$$; " <>
+          "printf '#!/bin/sh\\necho '\"'\"'#{escaped}'\"'\"'\\n' > $AP; " <>
+          "chmod 700 $AP; " <>
+          "SUDO_ASKPASS=$AP sudo -A find '#{remote_path}' -type f -printf '%P\\n' 2>/dev/null; " <>
+          "RC=$?; rm -f $AP; exit $RC"
+      else
+        "sudo find '#{remote_path}' -type f -printf '%P\\n' 2>/dev/null"
+      end
+
+    Logger.debug(
+      "[UploadWorker] Job #{job.id}: listing #{job.remote_source_path} on #{job.ssh_host}"
+    )
 
     with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts_from_job(job) do
       ssh = System.find_executable("ssh") || "ssh"
@@ -423,7 +443,7 @@ defmodule Hostctl.UploadWorker do
 
         {:ok, files}
       else
-        {:error, "SSH file listing failed (exit #{code})"}
+        {:error, "SSH file listing failed (exit #{code}) for path: #{job.remote_source_path}"}
       end
     end
   end
