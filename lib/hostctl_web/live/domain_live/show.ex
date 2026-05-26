@@ -73,19 +73,33 @@ defmodule HostctlWeb.DomainLive.Show do
     ftp_dir_options =
       Enum.flat_map(all_domains, fn d ->
         d_root = Path.dirname(d.document_root)
+        doc_root_name = Path.basename(d.document_root)
 
         base_options =
           if d.document_root == d_root do
             [{"#{d.name}", d_root}]
           else
-            [{"#{d.name}", d_root}, {"#{d.name} (web root)", d.document_root}]
+            [{"#{d.name}", d_root}, {"#{d.name}/#{doc_root_name}", d.document_root}]
           end
 
+        # Regular subdomains stored in the subdomains table
         sub_options =
           Hosting.list_subdomains(d)
           |> Enum.map(fn sub -> {"#{sub.name}.#{d.name}", sub.document_root} end)
 
-        base_options ++ sub_options
+        # S3 backend subdomains (not stored in subdomains table — subdomain field only)
+        sub_fqdns = MapSet.new(sub_options, fn {label, _} -> label end)
+
+        s3_sub_options =
+          Hosting.list_s3_backends(d)
+          |> Enum.filter(&(is_binary(&1.subdomain) && &1.subdomain != ""))
+          |> Enum.map(fn b ->
+            fqdn = "#{b.subdomain}.#{d.name}"
+            {fqdn, "/var/www/#{d.name}/#{fqdn}"}
+          end)
+          |> Enum.reject(fn {label, _} -> MapSet.member?(sub_fqdns, label) end)
+
+        base_options ++ sub_options ++ s3_sub_options
       end)
 
     {:ok,
@@ -322,7 +336,23 @@ defmodule HostctlWeb.DomainLive.Show do
 
   def handle_event("set_ftp_edit_mode", %{"mode" => mode}, socket)
       when mode in ["single", "multi"] do
-    {:noreply, assign(socket, :ftp_edit_access_mode, mode)}
+    # Must re-insert the account being edited so the stream item re-renders
+    # with the updated ftp_edit_access_mode assign.
+    socket = assign(socket, :ftp_edit_access_mode, mode)
+
+    socket =
+      if socket.assigns.editing_ftp_id do
+        account =
+          socket.assigns.domain
+          |> Hosting.list_ftp_accounts()
+          |> Enum.find(&(&1.id == socket.assigns.editing_ftp_id))
+
+        if account, do: stream_insert(socket, :ftp_accounts, account), else: socket
+      else
+        socket
+      end
+
+    {:noreply, socket}
   end
 
   def handle_event("validate_ftp", %{"ftp_account" => params}, socket) do
