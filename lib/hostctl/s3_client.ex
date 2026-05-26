@@ -36,13 +36,17 @@ defmodule Hostctl.S3Client do
         secret_access_key,
         region \\ "us-east-1"
       ) do
-    with {:ok, body} <- File.read(local_path) do
+    with {:ok, %File.Stat{size: file_size}} <- File.stat(local_path) do
       content_type = mime_type(local_path)
+      body_hash = stream_file_sha256(local_path)
+      body_stream = File.stream!(local_path, 64 * 1024)
 
       put_object_body(
         key,
         bucket,
-        body,
+        body_stream,
+        file_size,
+        body_hash,
         content_type,
         access_key_id,
         secret_access_key,
@@ -326,6 +330,8 @@ defmodule Hostctl.S3Client do
          key,
          bucket,
          body,
+         file_size,
+         body_hash,
          content_type,
          access_key_id,
          secret_access_key,
@@ -336,7 +342,6 @@ defmodule Hostctl.S3Client do
     amzdate = amz_datetime(now)
     datestamp = amz_date(now)
     host = uri_host(endpoint)
-    body_hash = hex_sha256(body)
     encoded_key = encode_s3_key(key)
 
     headers_to_sign = [
@@ -369,6 +374,7 @@ defmodule Hostctl.S3Client do
 
     request_headers =
       [
+        {"content-length", to_string(file_size)},
         {"content-type", content_type},
         {"x-amz-date", amzdate},
         {"x-amz-content-sha256", body_hash},
@@ -616,6 +622,18 @@ defmodule Hostctl.S3Client do
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
+
+  # Streams a file in chunks to compute its SHA-256 hash without loading
+  # the whole file into memory.
+  defp stream_file_sha256(path) do
+    path
+    |> File.stream!(64 * 1024)
+    |> Enum.reduce(:crypto.hash_init(:sha256), fn chunk, acc ->
+      :crypto.hash_update(acc, chunk)
+    end)
+    |> :crypto.hash_final()
+    |> Base.encode16(case: :lower)
+  end
 
   defp s3_encode(value) do
     URI.encode(to_string(value), &URI.char_unreserved?/1)

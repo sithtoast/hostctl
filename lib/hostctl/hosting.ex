@@ -1543,6 +1543,29 @@ defmodule Hostctl.Hosting do
   end
 
   @doc """
+  Resets any upload jobs stuck in "running" state (e.g. after a server crash)
+  to "failed" so they can be resumed by the user.
+  """
+  def reset_orphaned_upload_jobs do
+    {count, _} =
+      Repo.update_all(
+        from(u in UploadJob, where: u.status == "running"),
+        set: [
+          status: "failed",
+          error_message: "Job interrupted by server restart",
+          current_file: nil
+        ]
+      )
+
+    if count > 0 do
+      require Logger
+      Logger.warning("[Hosting] Reset #{count} orphaned upload job(s) to failed after restart")
+    end
+
+    :ok
+  end
+
+  @doc """
   Updates an upload job.
   """
   def update_upload_job(%UploadJob{} = job, attrs) do
