@@ -2830,6 +2830,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   # Updates a config field only when the value is a non-nil string.
   defp put_s3_field(config, _key, nil), do: config
   defp put_s3_field(config, key, value) when is_binary(value), do: Map.put(config, key, value)
+  defp put_s3_field(config, key, value) when is_boolean(value), do: Map.put(config, key, value)
 
   defp normalize_form_params(params) when is_map(params) do
     @default_params
