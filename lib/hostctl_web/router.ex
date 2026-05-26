@@ -60,7 +60,7 @@ defmodule HostctlWeb.Router do
       live "/databases", DatabaseLive.Index, :index
 
       # FTP
-      live "/ftp", DomainLive.Index, :index
+      live "/ftp", FtpLive.Index, :index
 
       # Cron
       live "/cron", DomainLive.Index, :index

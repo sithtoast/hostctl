@@ -1030,6 +1030,21 @@ defmodule Hostctl.Hosting do
     Repo.all(from f in FtpAccount, where: f.domain_id == ^domain.id, order_by: [asc: f.username])
   end
 
+  def list_all_ftp_accounts(%Scope{} = scope) do
+    Repo.all(
+      from f in FtpAccount,
+        join: d in Domain,
+        on: f.domain_id == d.id,
+        where: d.user_id == ^scope.user.id,
+        preload: [domain: d],
+        order_by: [asc: d.name, asc: f.username]
+    )
+  end
+
+  def get_ftp_account_with_domain!(id) do
+    Repo.get!(FtpAccount, id) |> Repo.preload(:domain)
+  end
+
   def create_ftp_account(%Domain{} = domain, attrs) do
     result =
       %FtpAccount{domain_id: domain.id}

@@ -29,8 +29,6 @@ defmodule HostctlWeb.DomainLive.Show do
     subdomains = Hosting.list_subdomains(domain)
     ssl_cert = Hosting.get_ssl_certificate(domain)
     cron_jobs = Hosting.list_cron_jobs(domain)
-    ftp_accounts = Hosting.list_ftp_accounts(domain)
-
     # If an active cert exists but ssl_enabled is still false (e.g. cert was
     # provisioned before the auto-enable logic was added), fix it now.
     domain =
@@ -58,50 +56,6 @@ defmodule HostctlWeb.DomainLive.Show do
         []
       end
 
-    # Build home directory options from the domain's document_root
-    domain_root = Path.dirname(domain.document_root)
-
-    ftp_home_options =
-      [
-        {domain_root, domain_root},
-        {domain.document_root, domain.document_root}
-      ]
-
-    # Build multi-domain directory options from all domains/subdomains in scope
-    all_domains = Hosting.list_domains(domain_scope)
-
-    ftp_dir_options =
-      Enum.flat_map(all_domains, fn d ->
-        d_root = Path.dirname(d.document_root)
-        doc_root_name = Path.basename(d.document_root)
-
-        base_options =
-          if d.document_root == d_root do
-            [{"#{d.name}", d_root}]
-          else
-            [{"#{d.name}", d_root}, {"#{d.name}/#{doc_root_name}", d.document_root}]
-          end
-
-        # Regular subdomains stored in the subdomains table
-        sub_options =
-          Hosting.list_subdomains(d)
-          |> Enum.map(fn sub -> {"#{sub.name}.#{d.name}", sub.document_root} end)
-
-        # S3 backend subdomains (not stored in subdomains table — subdomain field only)
-        sub_fqdns = MapSet.new(sub_options, fn {label, _} -> label end)
-
-        s3_sub_options =
-          Hosting.list_s3_backends(d)
-          |> Enum.filter(&(is_binary(&1.subdomain) && &1.subdomain != ""))
-          |> Enum.map(fn b ->
-            fqdn = "#{b.subdomain}.#{d.name}"
-            {fqdn, "/var/www/#{d.name}/#{fqdn}"}
-          end)
-          |> Enum.reject(fn {label, _} -> MapSet.member?(sub_fqdns, label) end)
-
-        base_options ++ sub_options ++ s3_sub_options
-      end)
-
     {:ok,
      socket
      |> stream(:ssl_log_lines, existing_log_lines)
@@ -111,21 +65,12 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign(:domain, domain)
      |> assign(:ssl_cert, ssl_cert)
      |> assign(:active_section, :overview)
-     |> assign(:editing_ftp_id, nil)
-     |> assign(:ftp_edit_form, nil)
-     |> assign(:ftp_home_options, ftp_home_options)
-     |> assign(:ftp_dir_options, ftp_dir_options)
-     |> assign(:ftp_access_mode, "single")
-     |> assign(:ftp_edit_access_mode, "single")
-     |> assign(:ftp_edit_selected_paths, [])
      |> stream(:subdomains, subdomains)
      |> assign(:subdomain_names, Enum.map(subdomains, & &1.name))
      |> stream(:cron_jobs, cron_jobs)
-     |> stream(:ftp_accounts, ftp_accounts)
      |> assign_ssl_form()
      |> assign_subdomain_form()
      |> assign_cron_form()
-     |> assign_ftp_form()
      |> assign_smarthost_form()
      |> assign_s3_backends()
      |> assign(:s3_editing, nil)
@@ -173,9 +118,6 @@ defmodule HostctlWeb.DomainLive.Show do
 
         :cron ->
           stream(socket, :cron_jobs, Hosting.list_cron_jobs(domain), reset: true)
-
-        :ftp ->
-          stream(socket, :ftp_accounts, Hosting.list_ftp_accounts(domain), reset: true)
 
         :smarthost ->
           socket
@@ -324,138 +266,6 @@ defmodule HostctlWeb.DomainLive.Show do
     if cron_job do
       {:ok, _} = Hosting.delete_cron_job(cron_job)
       {:noreply, stream_delete(socket, :cron_jobs, cron_job)}
-    else
-      {:noreply, socket}
-    end
-  end
-
-  # FTP events
-  def handle_event("set_ftp_mode", %{"mode" => mode}, socket) when mode in ["single", "multi"] do
-    {:noreply, assign(socket, :ftp_access_mode, mode)}
-  end
-
-  def handle_event("set_ftp_edit_mode", %{"mode" => mode}, socket)
-      when mode in ["single", "multi"] do
-    # Must re-insert the account being edited so the stream item re-renders
-    # with the updated ftp_edit_access_mode assign.
-    socket = assign(socket, :ftp_edit_access_mode, mode)
-
-    socket =
-      if socket.assigns.editing_ftp_id do
-        account =
-          socket.assigns.domain
-          |> Hosting.list_ftp_accounts()
-          |> Enum.find(&(&1.id == socket.assigns.editing_ftp_id))
-
-        if account, do: stream_insert(socket, :ftp_accounts, account), else: socket
-      else
-        socket
-      end
-
-    {:noreply, socket}
-  end
-
-  def handle_event("validate_ftp", %{"ftp_account" => params}, socket) do
-    params = prepare_ftp_params(params, socket.assigns.ftp_access_mode)
-
-    form =
-      socket.assigns.domain
-      |> Ecto.build_assoc(:ftp_accounts)
-      |> Hosting.change_ftp_account(params)
-      |> to_form(action: :validate)
-
-    {:noreply, assign(socket, :ftp_form, form)}
-  end
-
-  def handle_event("save_ftp", %{"ftp_account" => params}, socket) do
-    params = prepare_ftp_params(params, socket.assigns.ftp_access_mode)
-
-    case Hosting.create_ftp_account(socket.assigns.domain, params) do
-      {:ok, account} ->
-        {:noreply,
-         socket
-         |> stream_insert(:ftp_accounts, account)
-         |> assign_ftp_form()
-         |> assign(:ftp_access_mode, "single")
-         |> put_flash(:info, "FTP account #{account.username} created.")}
-
-      {:error, changeset} ->
-        {:noreply, assign(socket, :ftp_form, to_form(changeset))}
-    end
-  end
-
-  def handle_event("edit_ftp", %{"id" => id}, socket) do
-    ftp_accounts = Hosting.list_ftp_accounts(socket.assigns.domain)
-    account = Enum.find(ftp_accounts, &(to_string(&1.id) == id))
-
-    if account do
-      form = Hosting.change_ftp_account_for_update(account) |> to_form()
-      edit_mode = if account.mounts && account.mounts != [], do: "multi", else: "single"
-      selected_paths = Enum.map(account.mounts || [], & &1["path"])
-
-      {:noreply,
-       socket
-       |> assign(:editing_ftp_id, account.id)
-       |> assign(:ftp_edit_form, form)
-       |> assign(:ftp_edit_access_mode, edit_mode)
-       |> assign(:ftp_edit_selected_paths, selected_paths)
-       |> stream_insert(:ftp_accounts, account)}
-    else
-      {:noreply, socket}
-    end
-  end
-
-  def handle_event("cancel_edit_ftp", _params, socket) do
-    {:noreply, assign(socket, :editing_ftp_id, nil)}
-  end
-
-  def handle_event("validate_edit_ftp", %{"ftp_account" => params}, socket) do
-    ftp_accounts = Hosting.list_ftp_accounts(socket.assigns.domain)
-    account = Enum.find(ftp_accounts, &(&1.id == socket.assigns.editing_ftp_id))
-
-    if account do
-      params = prepare_ftp_params(params, socket.assigns.ftp_edit_access_mode)
-
-      form =
-        Hosting.change_ftp_account_for_update(account, params)
-        |> to_form(action: :validate)
-
-      {:noreply, assign(socket, :ftp_edit_form, form)}
-    else
-      {:noreply, socket}
-    end
-  end
-
-  def handle_event("save_edit_ftp", %{"ftp_account" => params}, socket) do
-    ftp_accounts = Hosting.list_ftp_accounts(socket.assigns.domain)
-    account = Enum.find(ftp_accounts, &(&1.id == socket.assigns.editing_ftp_id))
-
-    if account do
-      params = prepare_ftp_params(params, socket.assigns.ftp_edit_access_mode)
-
-      case Hosting.update_ftp_account(account, params) do
-        {:ok, updated} ->
-          {:noreply,
-           socket
-           |> stream_insert(:ftp_accounts, updated)
-           |> assign(:editing_ftp_id, nil)
-           |> put_flash(:info, "FTP account #{updated.username} updated.")}
-
-        {:error, changeset} ->
-          {:noreply, assign(socket, :ftp_edit_form, to_form(changeset))}
-      end
-    else
-      {:noreply, socket}
-    end
-  end
-
-  def handle_event("delete_ftp", %{"id" => id}, socket) do
-    ftp_accounts = Hosting.list_ftp_accounts(socket.assigns.domain)
-    account = Enum.find(ftp_accounts, &(to_string(&1.id) == id))
-
-    if account do
-      {:ok, _} = Hosting.delete_ftp_account(account)
-      {:noreply, stream_delete(socket, :ftp_accounts, account)}
     else
       {:noreply, socket}
     end
@@ -687,38 +497,6 @@ defmodule HostctlWeb.DomainLive.Show do
     assign(socket, :cron_form, to_form(Hosting.change_cron_job(%Hostctl.Hosting.CronJob{})))
   end
 
-  defp assign_ftp_form(socket) do
-    assign(socket, :ftp_form, to_form(Hosting.change_ftp_account(%Hostctl.Hosting.FtpAccount{})))
-  end
-
-  # Converts raw form params into params ready for create/update changeset.
-  # In "multi" mode, converts the list of checked paths into a mounts list and
-  # clears home_dir. In "single" mode, clears mounts.
-  defp prepare_ftp_params(params, "multi") do
-    mount_paths =
-      params
-      |> Map.get("mount_paths", [])
-      |> List.wrap()
-      |> Enum.reject(&(&1 == ""))
-
-    mounts =
-      Enum.map(mount_paths, fn path ->
-        name = path |> String.replace(~r|^/var/www/|, "") |> String.replace("/", "-")
-        %{"name" => name, "path" => path}
-      end)
-
-    params
-    |> Map.put("mounts", mounts)
-    |> Map.put("home_dir", nil)
-    |> Map.delete("mount_paths")
-  end
-
-  defp prepare_ftp_params(params, _mode) do
-    params
-    |> Map.put("mounts", [])
-    |> Map.delete("mount_paths")
-  end
-
   defp assign_smarthost_form(socket) do
     setting = Hosting.get_domain_smarthost_setting(socket.assigns.domain)
 
@@ -778,20 +556,13 @@ defmodule HostctlWeb.DomainLive.Show do
 
         <%!-- Section tabs --%>
         <div class="flex gap-1 p-1 bg-gray-100 dark:bg-gray-800 rounded-lg w-fit">
-          <% base_tabs = [
+          <% tabs = [
             {"Overview", :overview, "hero-home"},
             {"Subdomains", :subdomains, "hero-link"},
             {"DNS", :dns, "hero-server"},
             {"SSL", :ssl, "hero-lock-closed"},
             {"Cron Jobs", :cron, "hero-clock"}
           ]
-
-          tabs =
-            if Settings.feature_enabled?("ftp") do
-              base_tabs ++ [{"FTP", :ftp, "hero-folder"}]
-            else
-              base_tabs
-            end
 
           tabs =
             if Settings.feature_enabled?("email") do
@@ -1258,267 +1029,6 @@ defmodule HostctlWeb.DomainLive.Show do
                 >
                   Delete
                 </button>
-              </div>
-            </div>
-          </div>
-        <% end %>
-
-        <%!-- FTP --%>
-        <%= if @active_section == :ftp do %>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
-            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
-              <h3 class="text-base font-semibold text-gray-900 dark:text-white">FTP Accounts</h3>
-            </div>
-            <div class="p-6 border-b border-gray-200 dark:border-gray-800">
-              <.form
-                for={@ftp_form}
-                id="ftp-form"
-                phx-change="validate_ftp"
-                phx-submit="save_ftp"
-                class="space-y-4"
-              >
-                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <.input
-                    field={@ftp_form[:username]}
-                    type="text"
-                    placeholder="ftpuser"
-                    label="Username"
-                  />
-                  <.input field={@ftp_form[:password]} type="password" label="Password" />
-                </div>
-                <%!-- Access mode toggle --%>
-                <div>
-                  <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
-                    Directory access
-                  </p>
-                  <div class="flex rounded-lg border border-gray-300 dark:border-gray-700 w-fit overflow-hidden">
-                    <button
-                      type="button"
-                      phx-click="set_ftp_mode"
-                      phx-value-mode="single"
-                      class={[
-                        "px-4 py-2 text-xs font-medium transition-colors",
-                        if(@ftp_access_mode == "single",
-                          do: "bg-indigo-600 text-white",
-                          else:
-                            "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
-                        )
-                      ]}
-                    >
-                      Single Directory
-                    </button>
-                    <button
-                      type="button"
-                      phx-click="set_ftp_mode"
-                      phx-value-mode="multi"
-                      class={[
-                        "px-4 py-2 text-xs font-medium transition-colors border-l border-gray-300 dark:border-gray-700",
-                        if(@ftp_access_mode == "multi",
-                          do: "bg-indigo-600 text-white",
-                          else:
-                            "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
-                        )
-                      ]}
-                    >
-                      Multi-Domain Virtual Root
-                    </button>
-                  </div>
-                </div>
-                <%= if @ftp_access_mode == "single" do %>
-                  <.input
-                    field={@ftp_form[:home_dir]}
-                    type="select"
-                    label="Home directory"
-                    options={@ftp_home_options}
-                  />
-                <% else %>
-                  <div>
-                    <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
-                      Select directories to expose
-                    </p>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                      <%= for {label, path} <- @ftp_dir_options do %>
-                        <label class="flex items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            name="ftp_account[mount_paths][]"
-                            value={path}
-                            class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                          />
-                          <span class="text-sm text-gray-700 dark:text-gray-300">{label}</span>
-                        </label>
-                      <% end %>
-                    </div>
-                  </div>
-                <% end %>
-                <div class="flex justify-end">
-                  <button
-                    type="submit"
-                    class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
-                  >
-                    Create FTP Account
-                  </button>
-                </div>
-              </.form>
-            </div>
-            <div
-              id="ftp-accounts"
-              phx-update="stream"
-              class="divide-y divide-gray-100 dark:divide-gray-800"
-            >
-              <div class="hidden only:flex items-center justify-center py-10 text-sm text-gray-400">
-                No FTP accounts yet.
-              </div>
-              <div
-                :for={{id, account} <- @streams.ftp_accounts}
-                id={id}
-                class="px-6 py-3"
-              >
-                <%= if @editing_ftp_id == account.id do %>
-                  <.form
-                    for={@ftp_edit_form}
-                    id={"ftp-edit-form-#{account.id}"}
-                    phx-change="validate_edit_ftp"
-                    phx-submit="save_edit_ftp"
-                    class="space-y-3"
-                  >
-                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <div>
-                        <p class="text-xs text-gray-500 mb-1">Username</p>
-                        <p class="text-sm font-medium text-gray-900 dark:text-white">
-                          {account.username}
-                        </p>
-                      </div>
-                      <.input
-                        field={@ftp_edit_form[:password]}
-                        type="password"
-                        label="New password (optional)"
-                      />
-                    </div>
-                    <%!-- Access mode toggle --%>
-                    <div>
-                      <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
-                        Directory access
-                      </p>
-                      <div class="flex rounded-lg border border-gray-300 dark:border-gray-700 w-fit overflow-hidden">
-                        <button
-                          type="button"
-                          phx-click="set_ftp_edit_mode"
-                          phx-value-mode="single"
-                          class={[
-                            "px-4 py-2 text-xs font-medium transition-colors",
-                            if(@ftp_edit_access_mode == "single",
-                              do: "bg-indigo-600 text-white",
-                              else:
-                                "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
-                            )
-                          ]}
-                        >
-                          Single Directory
-                        </button>
-                        <button
-                          type="button"
-                          phx-click="set_ftp_edit_mode"
-                          phx-value-mode="multi"
-                          class={[
-                            "px-4 py-2 text-xs font-medium transition-colors border-l border-gray-300 dark:border-gray-700",
-                            if(@ftp_edit_access_mode == "multi",
-                              do: "bg-indigo-600 text-white",
-                              else:
-                                "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
-                            )
-                          ]}
-                        >
-                          Multi-Domain Virtual Root
-                        </button>
-                      </div>
-                    </div>
-                    <%= if @ftp_edit_access_mode == "single" do %>
-                      <.input
-                        field={@ftp_edit_form[:home_dir]}
-                        type="select"
-                        label="Home directory"
-                        options={@ftp_home_options}
-                      />
-                    <% else %>
-                      <div>
-                        <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
-                          Select directories to expose
-                        </p>
-                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                          <%= for {label, path} <- @ftp_dir_options do %>
-                            <label class="flex items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                name="ftp_account[mount_paths][]"
-                                value={path}
-                                checked={path in @ftp_edit_selected_paths}
-                                class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                              />
-                              <span class="text-sm text-gray-700 dark:text-gray-300">{label}</span>
-                            </label>
-                          <% end %>
-                        </div>
-                      </div>
-                    <% end %>
-                    <div class="flex items-center gap-2">
-                      <button
-                        type="submit"
-                        class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded-lg transition-colors"
-                      >
-                        Save
-                      </button>
-                      <button
-                        type="button"
-                        phx-click="cancel_edit_ftp"
-                        class="px-3 py-1.5 text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-700 transition-colors"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </.form>
-                <% else %>
-                  <div class="flex items-center justify-between">
-                    <div>
-                      <p class="text-sm font-medium text-gray-900 dark:text-white">
-                        {account.username}
-                      </p>
-                      <%= if account.mounts && account.mounts != [] do %>
-                        <p class="text-xs text-gray-500">
-                          Virtual: {Enum.map_join(account.mounts, ", ", & &1["name"])}
-                        </p>
-                      <% else %>
-                        <p class="text-xs text-gray-500">{account.home_dir || "/"}</p>
-                      <% end %>
-                    </div>
-                    <div class="flex items-center gap-3">
-                      <span class={[
-                        "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
-                        if(account.status == "active",
-                          do: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-                          else: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                        )
-                      ]}>
-                        {account.status}
-                      </span>
-                      <button
-                        phx-click="edit_ftp"
-                        phx-value-id={account.id}
-                        class="text-xs text-indigo-500 hover:text-indigo-600"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        phx-click="delete_ftp"
-                        phx-value-id={account.id}
-                        data-confirm="Delete this FTP account?"
-                        class="text-xs text-red-500 hover:text-red-600"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                <% end %>
               </div>
             </div>
           </div>
