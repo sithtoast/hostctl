@@ -67,6 +67,27 @@ defmodule HostctlWeb.DomainLive.Show do
         {domain.document_root, domain.document_root}
       ]
 
+    # Build multi-domain directory options from all domains/subdomains in scope
+    all_domains = Hosting.list_domains(domain_scope)
+
+    ftp_dir_options =
+      Enum.flat_map(all_domains, fn d ->
+        d_root = Path.dirname(d.document_root)
+
+        base_options =
+          if d.document_root == d_root do
+            [{"#{d.name}", d_root}]
+          else
+            [{"#{d.name}", d_root}, {"#{d.name} (web root)", d.document_root}]
+          end
+
+        sub_options =
+          Hosting.list_subdomains(d)
+          |> Enum.map(fn sub -> {"#{sub.name}.#{d.name}", sub.document_root} end)
+
+        base_options ++ sub_options
+      end)
+
     {:ok,
      socket
      |> stream(:ssl_log_lines, existing_log_lines)
@@ -79,6 +100,10 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign(:editing_ftp_id, nil)
      |> assign(:ftp_edit_form, nil)
      |> assign(:ftp_home_options, ftp_home_options)
+     |> assign(:ftp_dir_options, ftp_dir_options)
+     |> assign(:ftp_access_mode, "single")
+     |> assign(:ftp_edit_access_mode, "single")
+     |> assign(:ftp_edit_selected_paths, [])
      |> stream(:subdomains, subdomains)
      |> assign(:subdomain_names, Enum.map(subdomains, & &1.name))
      |> stream(:cron_jobs, cron_jobs)
@@ -291,7 +316,18 @@ defmodule HostctlWeb.DomainLive.Show do
   end
 
   # FTP events
+  def handle_event("set_ftp_mode", %{"mode" => mode}, socket) when mode in ["single", "multi"] do
+    {:noreply, assign(socket, :ftp_access_mode, mode)}
+  end
+
+  def handle_event("set_ftp_edit_mode", %{"mode" => mode}, socket)
+      when mode in ["single", "multi"] do
+    {:noreply, assign(socket, :ftp_edit_access_mode, mode)}
+  end
+
   def handle_event("validate_ftp", %{"ftp_account" => params}, socket) do
+    params = prepare_ftp_params(params, socket.assigns.ftp_access_mode)
+
     form =
       socket.assigns.domain
       |> Ecto.build_assoc(:ftp_accounts)
@@ -302,12 +338,15 @@ defmodule HostctlWeb.DomainLive.Show do
   end
 
   def handle_event("save_ftp", %{"ftp_account" => params}, socket) do
+    params = prepare_ftp_params(params, socket.assigns.ftp_access_mode)
+
     case Hosting.create_ftp_account(socket.assigns.domain, params) do
       {:ok, account} ->
         {:noreply,
          socket
          |> stream_insert(:ftp_accounts, account)
          |> assign_ftp_form()
+         |> assign(:ftp_access_mode, "single")
          |> put_flash(:info, "FTP account #{account.username} created.")}
 
       {:error, changeset} ->
@@ -321,11 +360,15 @@ defmodule HostctlWeb.DomainLive.Show do
 
     if account do
       form = Hosting.change_ftp_account_for_update(account) |> to_form()
+      edit_mode = if account.mounts && account.mounts != [], do: "multi", else: "single"
+      selected_paths = Enum.map(account.mounts || [], & &1["path"])
 
       {:noreply,
        socket
        |> assign(:editing_ftp_id, account.id)
        |> assign(:ftp_edit_form, form)
+       |> assign(:ftp_edit_access_mode, edit_mode)
+       |> assign(:ftp_edit_selected_paths, selected_paths)
        |> stream_insert(:ftp_accounts, account)}
     else
       {:noreply, socket}
@@ -341,6 +384,8 @@ defmodule HostctlWeb.DomainLive.Show do
     account = Enum.find(ftp_accounts, &(&1.id == socket.assigns.editing_ftp_id))
 
     if account do
+      params = prepare_ftp_params(params, socket.assigns.ftp_edit_access_mode)
+
       form =
         Hosting.change_ftp_account_for_update(account, params)
         |> to_form(action: :validate)
@@ -356,6 +401,8 @@ defmodule HostctlWeb.DomainLive.Show do
     account = Enum.find(ftp_accounts, &(&1.id == socket.assigns.editing_ftp_id))
 
     if account do
+      params = prepare_ftp_params(params, socket.assigns.ftp_edit_access_mode)
+
       case Hosting.update_ftp_account(account, params) do
         {:ok, updated} ->
           {:noreply,
@@ -612,6 +659,34 @@ defmodule HostctlWeb.DomainLive.Show do
 
   defp assign_ftp_form(socket) do
     assign(socket, :ftp_form, to_form(Hosting.change_ftp_account(%Hostctl.Hosting.FtpAccount{})))
+  end
+
+  # Converts raw form params into params ready for create/update changeset.
+  # In "multi" mode, converts the list of checked paths into a mounts list and
+  # clears home_dir. In "single" mode, clears mounts.
+  defp prepare_ftp_params(params, "multi") do
+    mount_paths =
+      params
+      |> Map.get("mount_paths", [])
+      |> List.wrap()
+      |> Enum.reject(&(&1 == ""))
+
+    mounts =
+      Enum.map(mount_paths, fn path ->
+        name = path |> String.replace(~r|^/var/www/|, "") |> String.replace("/", "-")
+        %{"name" => name, "path" => path}
+      end)
+
+    params
+    |> Map.put("mounts", mounts)
+    |> Map.put("home_dir", nil)
+    |> Map.delete("mount_paths")
+  end
+
+  defp prepare_ftp_params(params, _mode) do
+    params
+    |> Map.put("mounts", [])
+    |> Map.delete("mount_paths")
   end
 
   defp assign_smarthost_form(socket) do
@@ -1170,22 +1245,83 @@ defmodule HostctlWeb.DomainLive.Show do
                 id="ftp-form"
                 phx-change="validate_ftp"
                 phx-submit="save_ftp"
-                class="grid grid-cols-1 gap-3 sm:grid-cols-3"
+                class="space-y-4"
               >
-                <.input
-                  field={@ftp_form[:username]}
-                  type="text"
-                  placeholder="ftpuser"
-                  label="Username"
-                />
-                <.input field={@ftp_form[:password]} type="password" label="Password" />
-                <.input
-                  field={@ftp_form[:home_dir]}
-                  type="select"
-                  label="Home directory"
-                  options={@ftp_home_options}
-                />
-                <div class="sm:col-span-3 flex justify-end">
+                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <.input
+                    field={@ftp_form[:username]}
+                    type="text"
+                    placeholder="ftpuser"
+                    label="Username"
+                  />
+                  <.input field={@ftp_form[:password]} type="password" label="Password" />
+                </div>
+                <%!-- Access mode toggle --%>
+                <div>
+                  <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
+                    Directory access
+                  </p>
+                  <div class="flex rounded-lg border border-gray-300 dark:border-gray-700 w-fit overflow-hidden">
+                    <button
+                      type="button"
+                      phx-click="set_ftp_mode"
+                      phx-value-mode="single"
+                      class={[
+                        "px-4 py-2 text-xs font-medium transition-colors",
+                        if(@ftp_access_mode == "single",
+                          do: "bg-indigo-600 text-white",
+                          else:
+                            "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                        )
+                      ]}
+                    >
+                      Single Directory
+                    </button>
+                    <button
+                      type="button"
+                      phx-click="set_ftp_mode"
+                      phx-value-mode="multi"
+                      class={[
+                        "px-4 py-2 text-xs font-medium transition-colors border-l border-gray-300 dark:border-gray-700",
+                        if(@ftp_access_mode == "multi",
+                          do: "bg-indigo-600 text-white",
+                          else:
+                            "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                        )
+                      ]}
+                    >
+                      Multi-Domain Virtual Root
+                    </button>
+                  </div>
+                </div>
+                <%= if @ftp_access_mode == "single" do %>
+                  <.input
+                    field={@ftp_form[:home_dir]}
+                    type="select"
+                    label="Home directory"
+                    options={@ftp_home_options}
+                  />
+                <% else %>
+                  <div>
+                    <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
+                      Select directories to expose
+                    </p>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                      <%= for {label, path} <- @ftp_dir_options do %>
+                        <label class="flex items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            name="ftp_account[mount_paths][]"
+                            value={path}
+                            class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span class="text-sm text-gray-700 dark:text-gray-300">{label}</span>
+                        </label>
+                      <% end %>
+                    </div>
+                  </div>
+                <% end %>
+                <div class="flex justify-end">
                   <button
                     type="submit"
                     class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
@@ -1214,25 +1350,87 @@ defmodule HostctlWeb.DomainLive.Show do
                     id={"ftp-edit-form-#{account.id}"}
                     phx-change="validate_edit_ftp"
                     phx-submit="save_edit_ftp"
-                    class="grid grid-cols-1 gap-3 sm:grid-cols-4 items-end"
+                    class="space-y-3"
                   >
-                    <div>
-                      <p class="text-xs text-gray-500 mb-1">Username</p>
-                      <p class="text-sm font-medium text-gray-900 dark:text-white">
-                        {account.username}
-                      </p>
+                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <p class="text-xs text-gray-500 mb-1">Username</p>
+                        <p class="text-sm font-medium text-gray-900 dark:text-white">
+                          {account.username}
+                        </p>
+                      </div>
+                      <.input
+                        field={@ftp_edit_form[:password]}
+                        type="password"
+                        label="New password (optional)"
+                      />
                     </div>
-                    <.input
-                      field={@ftp_edit_form[:password]}
-                      type="password"
-                      label="New password (optional)"
-                    />
-                    <.input
-                      field={@ftp_edit_form[:home_dir]}
-                      type="select"
-                      label="Home directory"
-                      options={@ftp_home_options}
-                    />
+                    <%!-- Access mode toggle --%>
+                    <div>
+                      <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
+                        Directory access
+                      </p>
+                      <div class="flex rounded-lg border border-gray-300 dark:border-gray-700 w-fit overflow-hidden">
+                        <button
+                          type="button"
+                          phx-click="set_ftp_edit_mode"
+                          phx-value-mode="single"
+                          class={[
+                            "px-4 py-2 text-xs font-medium transition-colors",
+                            if(@ftp_edit_access_mode == "single",
+                              do: "bg-indigo-600 text-white",
+                              else:
+                                "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                            )
+                          ]}
+                        >
+                          Single Directory
+                        </button>
+                        <button
+                          type="button"
+                          phx-click="set_ftp_edit_mode"
+                          phx-value-mode="multi"
+                          class={[
+                            "px-4 py-2 text-xs font-medium transition-colors border-l border-gray-300 dark:border-gray-700",
+                            if(@ftp_edit_access_mode == "multi",
+                              do: "bg-indigo-600 text-white",
+                              else:
+                                "text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                            )
+                          ]}
+                        >
+                          Multi-Domain Virtual Root
+                        </button>
+                      </div>
+                    </div>
+                    <%= if @ftp_edit_access_mode == "single" do %>
+                      <.input
+                        field={@ftp_edit_form[:home_dir]}
+                        type="select"
+                        label="Home directory"
+                        options={@ftp_home_options}
+                      />
+                    <% else %>
+                      <div>
+                        <p class="block text-sm font-semibold leading-6 text-zinc-800 dark:text-zinc-200 mb-2">
+                          Select directories to expose
+                        </p>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                          <%= for {label, path} <- @ftp_dir_options do %>
+                            <label class="flex items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                name="ftp_account[mount_paths][]"
+                                value={path}
+                                checked={path in @ftp_edit_selected_paths}
+                                class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <span class="text-sm text-gray-700 dark:text-gray-300">{label}</span>
+                            </label>
+                          <% end %>
+                        </div>
+                      </div>
+                    <% end %>
                     <div class="flex items-center gap-2">
                       <button
                         type="submit"
@@ -1255,7 +1453,13 @@ defmodule HostctlWeb.DomainLive.Show do
                       <p class="text-sm font-medium text-gray-900 dark:text-white">
                         {account.username}
                       </p>
-                      <p class="text-xs text-gray-500">{account.home_dir || "/"}</p>
+                      <%= if account.mounts && account.mounts != [] do %>
+                        <p class="text-xs text-gray-500">
+                          Virtual: {Enum.map_join(account.mounts, ", ", & &1["name"])}
+                        </p>
+                      <% else %>
+                        <p class="text-xs text-gray-500">{account.home_dir || "/"}</p>
+                      <% end %>
                     </div>
                     <div class="flex items-center gap-3">
                       <span class={[

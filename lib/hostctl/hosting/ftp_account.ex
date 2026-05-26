@@ -10,6 +10,7 @@ defmodule Hostctl.Hosting.FtpAccount do
     field :hashed_password, :string, redact: true
     field :home_dir, :string
     field :status, :string, default: "active"
+    field :mounts, {:array, :map}, default: []
 
     belongs_to :domain, Domain
 
@@ -19,7 +20,7 @@ defmodule Hostctl.Hosting.FtpAccount do
   @doc "Changeset for creating a new FTP account. Username and password are required."
   def changeset(ftp_account, attrs) do
     ftp_account
-    |> cast(attrs, [:username, :password, :home_dir, :status])
+    |> cast(attrs, [:username, :password, :home_dir, :status, :mounts])
     |> validate_required([:username, :password])
     |> validate_format(:username, ~r/^[a-z0-9._\-]+$/i,
       message: "must contain only letters, numbers, dots, underscores, and hyphens"
@@ -28,6 +29,7 @@ defmodule Hostctl.Hosting.FtpAccount do
     |> validate_length(:password, min: 8, max: 72)
     |> validate_inclusion(:status, ~w(active suspended))
     |> validate_home_dir()
+    |> validate_mounts()
     |> unique_constraint(:username)
     |> put_hashed_password()
   end
@@ -35,11 +37,12 @@ defmodule Hostctl.Hosting.FtpAccount do
   @doc "Changeset for updating an existing FTP account. Password is optional."
   def update_changeset(ftp_account, attrs) do
     ftp_account
-    |> cast(attrs, [:password, :home_dir, :status])
+    |> cast(attrs, [:password, :home_dir, :status, :mounts])
     |> clear_empty_password()
     |> validate_length(:password, min: 8, max: 72)
     |> validate_inclusion(:status, ~w(active suspended))
     |> validate_home_dir()
+    |> validate_mounts()
     |> put_hashed_password()
   end
 
@@ -53,15 +56,48 @@ defmodule Hostctl.Hosting.FtpAccount do
   end
 
   defp validate_home_dir(changeset) do
-    case get_field(changeset, :home_dir) do
+    mounts = get_field(changeset, :mounts)
+    # home_dir is only required/validated in single-directory mode (no mounts)
+    if mounts && mounts != [] do
+      changeset
+    else
+      case get_field(changeset, :home_dir) do
+        nil ->
+          changeset
+
+        home_dir ->
+          if String.match?(home_dir, ~r|^/var/www/[^/]+(/.*)?$|) do
+            changeset
+          else
+            add_error(changeset, :home_dir, "must be within /var/www/<domain>")
+          end
+      end
+    end
+  end
+
+  defp validate_mounts(changeset) do
+    case get_field(changeset, :mounts) do
       nil ->
         changeset
 
-      home_dir ->
-        if String.match?(home_dir, ~r|^/var/www/[^/]+(/.*)?$|) do
+      [] ->
+        changeset
+
+      mounts ->
+        valid? =
+          Enum.all?(mounts, fn
+            %{"name" => name, "path" => path}
+            when is_binary(name) and is_binary(path) and name != "" and path != "" ->
+              String.match?(path, ~r|^/var/www/|)
+
+            _ ->
+              false
+          end)
+
+        if valid? do
           changeset
         else
-          add_error(changeset, :home_dir, "must be within /var/www/<domain>")
+          add_error(changeset, :mounts, "each mount must have a name and a valid /var/www/ path")
         end
     end
   end

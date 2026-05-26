@@ -39,6 +39,9 @@ defmodule Hostctl.FtpServer do
 
   alias Hostctl.Hosting.FtpAccount
 
+  @ftp_roots_base "/var/ftproots"
+  @systemd_unit_dir "/etc/systemd/system"
+
   @doc """
   Provisions a new or updated FTP account on the vsftpd instance.
 
@@ -101,7 +104,9 @@ defmodule Hostctl.FtpServer do
 
   defp do_provision(%FtpAccount{} = account, raw_password) do
     with :ok <- write_user_conf(account),
-         :ok <- ensure_home_dir_writable(account),
+         :ok <- teardown_all_mounts(account.username),
+         :ok <- provision_mounts(account),
+         :ok <- maybe_ensure_home_dir_writable(account),
          :ok <- upsert_user_entry(account.username, raw_password),
          :ok <- rebuild_user_db(),
          :ok <- reload() do
@@ -111,6 +116,7 @@ defmodule Hostctl.FtpServer do
 
   defp do_remove(%FtpAccount{} = account) do
     with :ok <- remove_user_conf(account),
+         :ok <- teardown_all_mounts(account.username),
          :ok <- delete_user_entry(account.username),
          :ok <- rebuild_user_db(),
          :ok <- reload() do
@@ -118,7 +124,138 @@ defmodule Hostctl.FtpServer do
     end
   end
 
-  # Ensures the account's home directory exists and is owned by www-data.
+  # ---------------------------------------------------------------------------
+  # Virtual directory / bind mount management
+  # ---------------------------------------------------------------------------
+
+  defp ftp_virtual_root(username), do: Path.join(@ftp_roots_base, username)
+  defp mount_point(username, name), do: Path.join([@ftp_roots_base, username, name])
+
+  # Provisions bind mounts for a multi-directory FTP account.
+  # Creates /var/ftproots/<username>/ and one bind-mounted subdirectory per
+  # mount entry, backed by a systemd .mount unit.
+  defp provision_mounts(%FtpAccount{mounts: mounts}) when mounts in [nil, []], do: :ok
+
+  defp provision_mounts(%FtpAccount{username: username, mounts: mounts}) do
+    virtual_root = ftp_virtual_root(username)
+
+    with :ok <- escaped_mkdir_p(virtual_root),
+         {_, 0} <- escaped_cmd("chown", ["www-data:www-data", virtual_root]) do
+      Enum.reduce_while(mounts, :ok, fn %{"name" => name, "path" => path}, :ok ->
+        mp = mount_point(username, name)
+        unit_name = systemd_mount_unit_name(mp)
+        unit_path = Path.join(@systemd_unit_dir, unit_name)
+        unit_content = mount_unit_content(username, name, path, mp)
+
+        case provision_one_mount(mp, unit_name, unit_path, unit_content) do
+          :ok -> {:cont, :ok}
+          {:error, _} = err -> {:halt, err}
+        end
+      end)
+    else
+      {:error, _} = err -> err
+      {output, code} -> {:error, {:setup_virtual_root_failed, code, output}}
+    end
+  end
+
+  defp provision_one_mount(mp, unit_name, unit_path, unit_content) do
+    with :ok <- escaped_mkdir_p(mp),
+         {_, 0} <- escaped_cmd("chown", ["www-data:www-data", mp]),
+         :ok <- escaped_write(unit_path, unit_content),
+         {_, 0} <- escaped_cmd("systemctl", ["daemon-reload"]),
+         {_, 0} <- escaped_cmd("systemctl", ["enable", "--now", unit_name]) do
+      :ok
+    else
+      {:error, _} = err -> err
+      {output, code} -> {:error, {:command_failed, code, output}}
+    end
+  end
+
+  # Tears down all systemd .mount units and the virtual root for a user.
+  # Safe to call even if no mounts exist — it becomes a no-op.
+  defp teardown_all_mounts(username) do
+    escaped_username = systemd_escape_component(username)
+    prefix = "var-ftproots-#{escaped_username}-"
+
+    case escaped_cmd("sh", ["-c", "ls /etc/systemd/system/*.mount 2>/dev/null || true"],
+           stderr_to_stdout: true
+         ) do
+      {output, _} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.filter(&(Path.basename(&1) |> String.starts_with?(prefix)))
+        |> Enum.each(fn unit_path ->
+          unit_name = Path.basename(unit_path)
+          escaped_cmd("systemctl", ["disable", "--now", unit_name], stderr_to_stdout: true)
+          escaped_cmd("rm", ["-f", unit_path], stderr_to_stdout: true)
+        end)
+    end
+
+    escaped_cmd("systemctl", ["daemon-reload"], stderr_to_stdout: true)
+    escaped_cmd("rm", ["-rf", ftp_virtual_root(username)], stderr_to_stdout: true)
+    :ok
+  end
+
+  # Computes the systemd .mount unit name for a given absolute path.
+  # Strips the leading "/", splits on "/", escapes each component
+  # (replacing any non-alphanumeric/non-dot/non-underscore character with
+  # \xNN hex notation), then joins with "-" and appends ".mount".
+  # Example: /var/ftproots/john/example.com  => var-ftproots-john-example.com.mount
+  # Example: /var/ftproots/my-user/site.com  => var-ftproots-my\x2duser-site.com.mount
+  defp systemd_mount_unit_name(path) do
+    path
+    |> String.trim_leading("/")
+    |> String.split("/")
+    |> Enum.map(&systemd_escape_component/1)
+    |> Enum.join("-")
+    |> Kernel.<>(".mount")
+  end
+
+  defp systemd_escape_component(component) do
+    for <<byte <- component>>, into: "" do
+      char = <<byte>>
+
+      if char =~ ~r/[A-Za-z0-9_.]/ do
+        char
+      else
+        hex =
+          byte
+          |> Integer.to_string(16)
+          |> String.downcase()
+          |> String.pad_leading(2, "0")
+
+        "\\x#{hex}"
+      end
+    end
+  end
+
+  defp mount_unit_content(username, name, source_path, mount_point) do
+    """
+    [Unit]
+    Description=hostctl FTP virtual directory #{username}/#{name}
+    Before=vsftpd.service
+
+    [Mount]
+    What=#{source_path}
+    Where=#{mount_point}
+    Type=none
+    Options=bind
+
+    [Install]
+    WantedBy=multi-user.target
+    """
+  end
+
+  # Ensures the home directory is set up for single-directory accounts.
+  # Skipped when the account uses virtual bind mounts.
+  defp maybe_ensure_home_dir_writable(%FtpAccount{mounts: mounts}) when mounts not in [nil, []] do
+    :ok
+  end
+
+  defp maybe_ensure_home_dir_writable(%FtpAccount{} = account) do
+    ensure_home_dir_writable(account)
+  end
+
   # vsftpd maps all virtual users to guest_username=www-data, so the home
   # directory must be writable by www-data for uploads to succeed.
   defp ensure_home_dir_writable(%FtpAccount{home_dir: nil}), do: :ok
@@ -142,14 +279,22 @@ defmodule Hostctl.FtpServer do
   end
 
   # Writes /etc/vsftpd/vsftpd_user_conf/<username> with a `local_root` override
-  # so vsftpd chroots the virtual user to their configured home directory.
+  # so vsftpd chroots the virtual user to their configured root directory.
+  # For multi-directory accounts, local_root points to the virtual bind-mount
+  # root rather than a single home_dir.
   defp write_user_conf(%FtpAccount{} = account) do
     dir = user_conf_dir()
     path = Path.join(dir, account.username)
-    home_dir = account.home_dir || "/"
+
+    local_root =
+      if account.mounts && account.mounts != [] do
+        ftp_virtual_root(account.username)
+      else
+        account.home_dir || "/"
+      end
 
     content = """
-    local_root=#{home_dir}
+    local_root=#{local_root}
     write_enable=YES
     virtual_use_local_privs=YES
     """
