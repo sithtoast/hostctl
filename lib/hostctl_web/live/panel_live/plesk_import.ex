@@ -98,6 +98,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:limited_categories, @limited_categories)
      |> assign(:saved_migrations, [])
      |> assign(:show_saved, false)
+     |> assign(:ssh_needs_password, false)
      |> load_saved_migrations()}
   end
 
@@ -107,10 +108,15 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   def handle_event("validate", %{"import" => params}, socket) do
     params = normalize_form_params(params)
 
+    ssh_needs_password =
+      socket.assigns.ssh_needs_password and
+        params["ssh_password"] in [nil, ""]
+
     {:noreply,
      socket
      |> assign(:form_params, params)
-     |> assign(:form, to_form(params, as: :import))}
+     |> assign(:form, to_form(params, as: :import))
+     |> assign(:ssh_needs_password, ssh_needs_password)}
   end
 
   @impl true
@@ -150,7 +156,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:restore_task_refs, %{})
      |> assign(:server_credentials, nil)
      |> assign(:server_creds_task_ref, nil)
-     |> assign(:server_creds_loading, false)}
+     |> assign(:server_creds_loading, false)
+     |> assign(:ssh_needs_password, false)}
   end
 
   @impl true
@@ -604,18 +611,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:domain_s3_backends, load_domain_s3_backends(subscriptions))
      |> assign(:restore_results, restore_results)
      |> assign(:server_credentials, server_credentials)
-     |> put_flash(:info, creds_flash)
-     |> then(fn socket ->
-       if form_params["source"] == "ssh" and form_params["ssh_auth_method"] == "password" do
-         put_flash(
-           socket,
-           :warning,
-           "SSH password was not saved — re-enter it in the connection settings before running."
-         )
-       else
-         socket
-       end
-     end)}
+     |> assign(
+       :ssh_needs_password,
+       form_params["source"] == "ssh" and form_params["ssh_auth_method"] == "password"
+     )
+     |> put_flash(:info, creds_flash)}
   end
 
   @impl true
@@ -1600,8 +1600,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       </div>
     </div>
 
-    <%!-- SSH credentials (shown when password auth is used but password is missing) --%>
-    <%= if @form_params["source"] == "ssh" and @form_params["ssh_auth_method"] == "password" and @form_params["ssh_password"] in [nil, ""] do %>
+    <%!-- SSH credentials (shown when a loaded migration is missing its SSH password) --%>
+    <%= if @ssh_needs_password do %>
       <div class="bg-amber-50 dark:bg-amber-900/20 rounded-xl border border-amber-200 dark:border-amber-700 px-6 py-4">
         <div class="flex flex-col sm:flex-row items-start sm:items-center gap-4">
           <div class="flex items-center gap-2 shrink-0">
