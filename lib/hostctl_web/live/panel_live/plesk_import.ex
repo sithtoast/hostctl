@@ -267,6 +267,24 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   end
 
   @impl true
+  def handle_event("set_account_for_group", %{"group_key" => group_key, "email" => email}, socket) do
+    email = normalize_string(email)
+
+    group_subs =
+      Enum.filter(socket.assigns.subscriptions, fn sub ->
+        (Map.get(sub, :owner_login) || Map.get(sub, :system_user) || sub.domain) == group_key
+      end)
+
+    configs =
+      Enum.reduce(group_subs, socket.assigns.domain_configs, fn sub, acc ->
+        config = Map.get(acc, sub.domain, %{})
+        Map.put(acc, sub.domain, Map.put(config, :account_email, email))
+      end)
+
+    {:noreply, assign(socket, :domain_configs, configs)}
+  end
+
+  @impl true
   def handle_event("show_create_account", _params, socket) do
     {:noreply, assign(socket, :creating_account, true)}
   end
@@ -1736,498 +1754,564 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       </div>
     <% end %>
 
-    <%!-- Domain restore cards --%>
-    <div class="space-y-4">
-      <%= for sub <- @subscriptions do %>
-        <% config = Map.get(@domain_configs, sub.domain, %{}) %>
-        <% categories = Map.get(config, :categories, MapSet.new()) %>
-        <% counts = Map.get(config, :inventory_counts, %{}) %>
-        <% result = Map.get(@restore_results, sub.domain) %>
-        <% progress = Map.get(@restore_progress, sub.domain) %>
-        <% restoring = progress != nil %>
-        <% has_result = result != nil %>
-        <% result_ok = match?({:ok, _}, result) %>
-        <div
-          id={"domain-card-#{sub.domain}"}
-          class={[
-            "bg-white dark:bg-gray-900 rounded-xl border p-5 transition-all",
-            if(has_result and result_ok, do: "border-emerald-300 dark:border-emerald-700", else: ""),
-            if(has_result and not result_ok, do: "border-red-300 dark:border-red-700", else: ""),
-            if(restoring, do: "border-indigo-300 dark:border-indigo-700", else: ""),
-            if(not has_result and not restoring, do: "border-gray-200 dark:border-gray-800", else: "")
-          ]}
-        >
-          <%!-- Header --%>
-          <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <div class="flex items-center gap-3">
-              <div class={[
-                "w-2 h-2 rounded-full shrink-0",
-                if(has_result and result_ok, do: "bg-emerald-500", else: ""),
-                if(has_result and not result_ok, do: "bg-red-500", else: ""),
-                if(restoring, do: "bg-indigo-500 animate-pulse", else: ""),
-                if(not has_result and not restoring, do: "bg-gray-300 dark:bg-gray-600", else: "")
-              ]}>
-              </div>
-              <div>
-                <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{sub.domain}</h3>
-                <%= if Map.get(sub, :owner_login) || Map.get(sub, :owner_email) do %>
-                  <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
-                    <.icon name="hero-user" class="w-3 h-3 inline" />
-                    <span :if={Map.get(sub, :owner_name)}>{sub.owner_name}</span>
-                    <span :if={Map.get(sub, :owner_email)} class="text-gray-400">
-                      {sub.owner_email}
-                    </span>
-                    <span
-                      :if={Map.get(sub, :owner_login) && !Map.get(sub, :owner_email)}
-                      class="text-gray-400"
-                    >
-                      {sub.owner_login}
-                    </span>
-                  </p>
+    <%!-- Domain restore cards grouped by owner --%>
+    <% sub_groups =
+      @subscriptions
+      |> Enum.group_by(fn sub ->
+        Map.get(sub, :owner_login) || Map.get(sub, :system_user) || sub.domain
+      end)
+      |> Enum.sort_by(fn {k, _} -> String.downcase(k) end) %>
+    <div class="space-y-6">
+      <%= for {group_key, group_subs} <- sub_groups do %>
+        <% sample = hd(group_subs) %>
+        <% g_name = Map.get(sample, :owner_name) %>
+        <% g_email = Map.get(sample, :owner_email) %>
+        <% g_login = Map.get(sample, :owner_login) %>
+        <% g_sysusers =
+          group_subs
+          |> Enum.map(&Map.get(&1, :system_user))
+          |> Enum.filter(&is_binary/1)
+          |> Enum.uniq()
+          |> Enum.sort() %>
+        <% g_assigned =
+          group_subs
+          |> Enum.map(&get_in(@domain_configs, [&1.domain, :account_email]))
+          |> Enum.filter(&(is_binary(&1) and &1 != ""))
+          |> List.first() %>
+        <div class="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+          <%!-- Group header --%>
+          <div class="px-5 py-3 bg-gray-50 dark:bg-gray-800/60 border-b border-gray-200 dark:border-gray-700 flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <.icon name="hero-user-circle" class="w-4 h-4 text-gray-400 shrink-0" />
+                <span class="text-sm font-semibold text-gray-900 dark:text-white">
+                  {g_name || g_login || group_key}
+                </span>
+                <%= if g_email do %>
+                  <span class="text-xs text-gray-400">{g_email}</span>
                 <% end %>
-                <%= if Map.get(sub, :subdomains, []) != [] do %>
-                  <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
-                    <.icon name="hero-arrow-turn-down-right" class="w-3 h-3 inline" />
-                    {sub.subdomains |> Enum.map(& &1.name) |> Enum.join(", ")}
-                  </p>
-                <% end %>
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 shrink-0">
+                  {length(group_subs)} {if length(group_subs) == 1, do: "domain", else: "domains"}
+                </span>
               </div>
+              <%= if g_sysusers != [] do %>
+                <p class="text-xs text-gray-400 dark:text-gray-500 mt-1 ml-6">
+                  <.icon name="hero-command-line" class="w-3 h-3 inline mr-1" />{Enum.join(
+                    g_sysusers,
+                    ", "
+                  )}
+                </p>
+              <% end %>
             </div>
-
-            <div class="flex items-center gap-2 w-full sm:w-auto">
-              <form id={"account-form-#{sub.domain}"} phx-change="set_account">
-                <input type="hidden" name="domain" value={sub.domain} />
-                <select
-                  id={"account-select-#{sub.domain}"}
-                  name="email"
-                  class="block w-full sm:w-56 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+            <form
+              id={"group-account-form-#{group_key}"}
+              phx-change="set_account_for_group"
+              class="shrink-0"
+            >
+              <input type="hidden" name="group_key" value={group_key} />
+              <select
+                id={"group-account-select-#{group_key}"}
+                name="email"
+                class="block w-full sm:w-56 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              >
+                <option value="">— Assign all to account —</option>
+                <option
+                  :for={account <- @accounts}
+                  value={account.email}
+                  selected={g_assigned == account.email}
                 >
-                  <option value="">— Account —</option>
-                  <option
-                    :for={account <- @accounts}
-                    value={account.email}
-                    selected={Map.get(config, :account_email) == account.email}
-                  >
-                    {account.name} ({account.email}) [{account.role}]
-                  </option>
-                </select>
-              </form>
-            </div>
+                  {account.name} ({account.email}) [{account.role}]
+                </option>
+              </select>
+            </form>
           </div>
-
-          <%!-- Categories --%>
-          <div class="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
-            <%= for {key, label, icon} <- @restore_categories do %>
-              <% count = Map.get(counts, key, 0) %>
-              <% selected = MapSet.member?(categories, key) %>
-              <% limited_warning = Map.get(@limited_categories, key) %>
-              <button
-                type="button"
-                phx-click="toggle_category"
-                phx-value-domain={sub.domain}
-                phx-value-category={key}
-                disabled={count == 0}
-                title={limited_warning}
+          <%!-- Domain cards within group --%>
+          <div class="p-4 space-y-4">
+            <%= for sub <- group_subs do %>
+              <% config = Map.get(@domain_configs, sub.domain, %{}) %>
+              <% categories = Map.get(config, :categories, MapSet.new()) %>
+              <% counts = Map.get(config, :inventory_counts, %{}) %>
+              <% result = Map.get(@restore_results, sub.domain) %>
+              <% progress = Map.get(@restore_progress, sub.domain) %>
+              <% restoring = progress != nil %>
+              <% has_result = result != nil %>
+              <% result_ok = match?({:ok, _}, result) %>
+              <div
+                id={"domain-card-#{sub.domain}"}
                 class={[
-                  "flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all",
-                  if(count == 0,
-                    do: "opacity-40 cursor-not-allowed border-gray-100 dark:border-gray-800",
-                    else: "cursor-pointer"
-                  ),
-                  if(selected and count > 0,
-                    do:
-                      "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300",
+                  "bg-white dark:bg-gray-900 rounded-xl border p-5 transition-all",
+                  if(has_result and result_ok,
+                    do: "border-emerald-300 dark:border-emerald-700",
                     else: ""
                   ),
-                  if(not selected and count > 0,
-                    do:
-                      "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600 text-gray-600 dark:text-gray-400",
+                  if(has_result and not result_ok,
+                    do: "border-red-300 dark:border-red-700",
+                    else: ""
+                  ),
+                  if(restoring, do: "border-indigo-300 dark:border-indigo-700", else: ""),
+                  if(not has_result and not restoring,
+                    do: "border-gray-200 dark:border-gray-800",
                     else: ""
                   )
                 ]}
               >
-                <.icon name={icon} class="w-3.5 h-3.5 shrink-0" />
-                <span class="truncate">{label}</span>
-                <.icon
-                  :if={limited_warning && count > 0}
-                  name="hero-exclamation-triangle"
-                  class="w-3 h-3 text-amber-500 shrink-0"
-                />
-                <span class={[
-                  "ml-auto text-[10px] font-semibold rounded-full px-1.5 py-0.5 shrink-0",
-                  if(selected and count > 0,
-                    do: "bg-indigo-200 dark:bg-indigo-800 text-indigo-700 dark:text-indigo-300",
-                    else: "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
-                  )
-                ]}>
-                  {count}
-                </span>
-              </button>
-            <% end %>
-          </div>
-
-          <%!-- Web files destination — one row per target (main domain + each subdomain) --%>
-          <%= if MapSet.member?(categories, "web_files") do %>
-            <% web_targets = [
-              {"", sub.domain}
-              | Enum.map(Map.get(sub, :subdomains, []), fn sd -> {sd.name, sd.full_name} end)
-            ] %>
-            <div class="mt-3 space-y-2">
-              <%= for {target, target_label} <- web_targets do %>
-                <% t_config = get_in(config, [:s3_targets, target]) || %{} %>
-                <% t_s3_import = Map.get(t_config, :s3_import, false) %>
-                <% has_backend = not is_nil(get_in(@domain_s3_backends, [sub.domain, target])) %>
-                <div class="flex items-center gap-2">
-                  <span
-                    class="text-xs text-gray-500 dark:text-gray-400 w-28 truncate shrink-0"
-                    title={target_label}
-                  >
-                    <.icon name="hero-folder" class="w-3 h-3 inline" />
-                    {if(target == "", do: "(root)", else: target)}
-                  </span>
-                  <%= if t_s3_import do %>
-                    <span class="flex-1 rounded-lg border border-sky-300 dark:border-sky-700 bg-sky-50 dark:bg-sky-950/30 px-2.5 py-1.5 text-xs text-sky-700 dark:text-sky-300 font-mono">
-                      <.icon name="hero-cloud-arrow-up" class="w-3 h-3 inline" />
-                      <%= if has_backend do %>
-                        {get_in(@domain_s3_backends, [sub.domain, target]).bucket}
-                      <% else %>
-                        {Map.get(t_config, :s3_bucket, "S3 bucket")}
+                <%!-- Header --%>
+                <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div class="flex items-center gap-3">
+                    <div class={[
+                      "w-2 h-2 rounded-full shrink-0",
+                      if(has_result and result_ok, do: "bg-emerald-500", else: ""),
+                      if(has_result and not result_ok, do: "bg-red-500", else: ""),
+                      if(restoring, do: "bg-indigo-500 animate-pulse", else: ""),
+                      if(not has_result and not restoring,
+                        do: "bg-gray-300 dark:bg-gray-600",
+                        else: ""
+                      )
+                    ]}>
+                    </div>
+                    <div>
+                      <div class="flex items-center gap-2">
+                        <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+                          {sub.domain}
+                        </h3>
+                        <%= if Map.get(sub, :system_user) do %>
+                          <span class="text-xs font-mono text-gray-400 dark:text-gray-500">
+                            {sub.system_user}
+                          </span>
+                        <% end %>
+                      </div>
+                      <%= if Map.get(sub, :subdomains, []) != [] do %>
+                        <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                          <.icon name="hero-arrow-turn-down-right" class="w-3 h-3 inline" />
+                          {sub.subdomains |> Enum.map(& &1.name) |> Enum.join(", ")}
+                        </p>
                       <% end %>
-                    </span>
-                  <% else %>
-                    <%= if target == "" do %>
-                      <form
-                        id={"web-path-form-#{sub.domain}"}
-                        phx-change="set_web_path"
-                        class="flex-1"
-                      >
-                        <input type="hidden" name="domain" value={sub.domain} />
-                        <input
-                          type="text"
-                          id={"web-path-#{sub.domain}"}
-                          name="path"
-                          value={Map.get(config, :web_files_path, "/var/www/#{sub.domain}")}
-                          class="block w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                          placeholder="/var/www/#{sub.domain}"
-                        />
-                      </form>
-                    <% else %>
-                      <span class="flex-1 px-2.5 py-1.5 text-xs text-gray-400 dark:text-gray-500 font-mono truncate">
-                        {Map.get(config, :web_files_path, "/var/www/#{sub.domain}")}/{target}.{sub.domain}/
+                    </div>
+                  </div>
+                </div>
+
+                <%!-- Categories --%>
+                <div class="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <%= for {key, label, icon} <- @restore_categories do %>
+                    <% count = Map.get(counts, key, 0) %>
+                    <% selected = MapSet.member?(categories, key) %>
+                    <% limited_warning = Map.get(@limited_categories, key) %>
+                    <button
+                      type="button"
+                      phx-click="toggle_category"
+                      phx-value-domain={sub.domain}
+                      phx-value-category={key}
+                      disabled={count == 0}
+                      title={limited_warning}
+                      class={[
+                        "flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all",
+                        if(count == 0,
+                          do: "opacity-40 cursor-not-allowed border-gray-100 dark:border-gray-800",
+                          else: "cursor-pointer"
+                        ),
+                        if(selected and count > 0,
+                          do:
+                            "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300",
+                          else: ""
+                        ),
+                        if(not selected and count > 0,
+                          do:
+                            "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600 text-gray-600 dark:text-gray-400",
+                          else: ""
+                        )
+                      ]}
+                    >
+                      <.icon name={icon} class="w-3.5 h-3.5 shrink-0" />
+                      <span class="truncate">{label}</span>
+                      <.icon
+                        :if={limited_warning && count > 0}
+                        name="hero-exclamation-triangle"
+                        class="w-3 h-3 text-amber-500 shrink-0"
+                      />
+                      <span class={[
+                        "ml-auto text-[10px] font-semibold rounded-full px-1.5 py-0.5 shrink-0",
+                        if(selected and count > 0,
+                          do: "bg-indigo-200 dark:bg-indigo-800 text-indigo-700 dark:text-indigo-300",
+                          else: "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+                        )
+                      ]}>
+                        {count}
                       </span>
-                    <% end %>
+                    </button>
                   <% end %>
+                </div>
+
+                <%!-- Web files destination — one row per target (main domain + each subdomain) --%>
+                <%= if MapSet.member?(categories, "web_files") do %>
+                  <% web_targets = [
+                    {"", sub.domain}
+                    | Enum.map(Map.get(sub, :subdomains, []), fn sd -> {sd.name, sd.full_name} end)
+                  ] %>
+                  <div class="mt-3 space-y-2">
+                    <%= for {target, target_label} <- web_targets do %>
+                      <% t_config = get_in(config, [:s3_targets, target]) || %{} %>
+                      <% t_s3_import = Map.get(t_config, :s3_import, false) %>
+                      <% has_backend = not is_nil(get_in(@domain_s3_backends, [sub.domain, target])) %>
+                      <div class="flex items-center gap-2">
+                        <span
+                          class="text-xs text-gray-500 dark:text-gray-400 w-28 truncate shrink-0"
+                          title={target_label}
+                        >
+                          <.icon name="hero-folder" class="w-3 h-3 inline" />
+                          {if(target == "", do: "(root)", else: target)}
+                        </span>
+                        <%= if t_s3_import do %>
+                          <span class="flex-1 rounded-lg border border-sky-300 dark:border-sky-700 bg-sky-50 dark:bg-sky-950/30 px-2.5 py-1.5 text-xs text-sky-700 dark:text-sky-300 font-mono">
+                            <.icon name="hero-cloud-arrow-up" class="w-3 h-3 inline" />
+                            <%= if has_backend do %>
+                              {get_in(@domain_s3_backends, [sub.domain, target]).bucket}
+                            <% else %>
+                              {Map.get(t_config, :s3_bucket, "S3 bucket")}
+                            <% end %>
+                          </span>
+                        <% else %>
+                          <%= if target == "" do %>
+                            <form
+                              id={"web-path-form-#{sub.domain}"}
+                              phx-change="set_web_path"
+                              class="flex-1"
+                            >
+                              <input type="hidden" name="domain" value={sub.domain} />
+                              <input
+                                type="text"
+                                id={"web-path-#{sub.domain}"}
+                                name="path"
+                                value={Map.get(config, :web_files_path, "/var/www/#{sub.domain}")}
+                                class="block w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-900 dark:text-gray-100 font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                                placeholder="/var/www/#{sub.domain}"
+                              />
+                            </form>
+                          <% else %>
+                            <span class="flex-1 px-2.5 py-1.5 text-xs text-gray-400 dark:text-gray-500 font-mono truncate">
+                              {Map.get(config, :web_files_path, "/var/www/#{sub.domain}")}/{target}.{sub.domain}/
+                            </span>
+                          <% end %>
+                        <% end %>
+                        <button
+                          id={"s3-import-toggle-#{sub.domain}-#{target}"}
+                          type="button"
+                          phx-click="toggle_s3_import"
+                          phx-value-domain={sub.domain}
+                          phx-value-target={target}
+                          title={
+                            if(t_s3_import, do: "Switch to local path", else: "Upload to S3 bucket")
+                          }
+                          class={[
+                            "flex-shrink-0 inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border text-xs font-medium transition-colors",
+                            if(t_s3_import,
+                              do:
+                                "border-sky-300 dark:border-sky-700 bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300",
+                              else:
+                                "border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-sky-50 dark:hover:bg-sky-950/30 hover:border-sky-300 dark:hover:border-sky-700 hover:text-sky-700 dark:hover:text-sky-300"
+                            )
+                          ]}
+                        >
+                          <.icon name="hero-cloud-arrow-up" class="w-3 h-3" /> S3
+                        </button>
+                      </div>
+                      <%!-- Inline S3 credentials for this target --%>
+                      <%= if t_s3_import && not has_backend do %>
+                        <form
+                          id={"s3-config-form-#{sub.domain}-#{target}"}
+                          phx-change="set_s3_config"
+                          class="ml-[7.5rem] grid grid-cols-2 gap-2"
+                        >
+                          <input type="hidden" name="domain" value={sub.domain} />
+                          <input type="hidden" name="target" value={target} />
+                          <input
+                            type="text"
+                            name="endpoint"
+                            value={Map.get(t_config, :s3_endpoint, "")}
+                            placeholder="Endpoint (https://s3.amazonaws.com)"
+                            class="col-span-2 block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                          />
+                          <input
+                            type="text"
+                            name="bucket"
+                            value={Map.get(t_config, :s3_bucket, "")}
+                            placeholder="Bucket name"
+                            class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                          />
+                          <input
+                            type="text"
+                            name="region"
+                            value={Map.get(t_config, :s3_region, "us-east-1")}
+                            placeholder="Region (us-east-1)"
+                            class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                          />
+                          <input
+                            type="text"
+                            name="access_key"
+                            value={Map.get(t_config, :s3_access_key, "")}
+                            placeholder="Access key ID"
+                            class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                          />
+                          <input
+                            type="password"
+                            name="secret_key"
+                            value={Map.get(t_config, :s3_secret_key, "")}
+                            placeholder="Secret access key"
+                            class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                          />
+                          <input
+                            type="text"
+                            name="prefix"
+                            value={Map.get(t_config, :s3_prefix, "")}
+                            placeholder="Key prefix (optional)"
+                            class="col-span-2 block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                          />
+                        </form>
+                      <% end %>
+                    <% end %>
+                  </div>
+                <% end %>
+
+                <%!-- Select/deselect all and restore --%>
+                <div class="mt-3 flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      phx-click="select_all_categories"
+                      phx-value-domain={sub.domain}
+                      class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+                    >
+                      Select all
+                    </button>
+                    <span class="text-gray-300 dark:text-gray-600">·</span>
+                    <button
+                      type="button"
+                      phx-click="deselect_all_categories"
+                      phx-value-domain={sub.domain}
+                      class="text-xs text-gray-500 dark:text-gray-400 hover:underline"
+                    >
+                      Clear
+                    </button>
+                  </div>
+
                   <button
-                    id={"s3-import-toggle-#{sub.domain}-#{target}"}
+                    id={"restore-btn-#{sub.domain}"}
                     type="button"
-                    phx-click="toggle_s3_import"
+                    phx-click="restore_domain"
                     phx-value-domain={sub.domain}
-                    phx-value-target={target}
-                    title={if(t_s3_import, do: "Switch to local path", else: "Upload to S3 bucket")}
+                    disabled={restoring or (has_result and result_ok)}
                     class={[
-                      "flex-shrink-0 inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border text-xs font-medium transition-colors",
-                      if(t_s3_import,
+                      "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
+                      if(has_result and result_ok,
                         do:
-                          "border-sky-300 dark:border-sky-700 bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300",
-                        else:
-                          "border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-sky-50 dark:hover:bg-sky-950/30 hover:border-sky-300 dark:hover:border-sky-700 hover:text-sky-700 dark:hover:text-sky-300"
+                          "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 cursor-default",
+                        else: ""
+                      ),
+                      if(restoring,
+                        do:
+                          "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 cursor-not-allowed",
+                        else: ""
+                      ),
+                      if(not restoring and not (has_result and result_ok),
+                        do: "bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm",
+                        else: ""
                       )
                     ]}
                   >
-                    <.icon name="hero-cloud-arrow-up" class="w-3 h-3" /> S3
+                    <%= cond do %>
+                      <% has_result and result_ok -> %>
+                        <.icon name="hero-check" class="w-3.5 h-3.5" /> Restored
+                      <% restoring -> %>
+                        <svg
+                          class="animate-spin w-3.5 h-3.5"
+                          xmlns="http://www.w3.org/2000/svg"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                        >
+                          <circle
+                            class="opacity-25"
+                            cx="12"
+                            cy="12"
+                            r="10"
+                            stroke="currentColor"
+                            stroke-width="4"
+                          >
+                          </circle>
+                          <path
+                            class="opacity-75"
+                            fill="currentColor"
+                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                          >
+                          </path>
+                        </svg>
+                        Restoring...
+                      <% true -> %>
+                        <.icon name="hero-arrow-down-tray" class="w-3.5 h-3.5" /> Restore
+                    <% end %>
                   </button>
                 </div>
-                <%!-- Inline S3 credentials for this target --%>
-                <%= if t_s3_import && not has_backend do %>
-                  <form
-                    id={"s3-config-form-#{sub.domain}-#{target}"}
-                    phx-change="set_s3_config"
-                    class="ml-[7.5rem] grid grid-cols-2 gap-2"
-                  >
-                    <input type="hidden" name="domain" value={sub.domain} />
-                    <input type="hidden" name="target" value={target} />
-                    <input
-                      type="text"
-                      name="endpoint"
-                      value={Map.get(t_config, :s3_endpoint, "")}
-                      placeholder="Endpoint (https://s3.amazonaws.com)"
-                      class="col-span-2 block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                    />
-                    <input
-                      type="text"
-                      name="bucket"
-                      value={Map.get(t_config, :s3_bucket, "")}
-                      placeholder="Bucket name"
-                      class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                    />
-                    <input
-                      type="text"
-                      name="region"
-                      value={Map.get(t_config, :s3_region, "us-east-1")}
-                      placeholder="Region (us-east-1)"
-                      class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                    />
-                    <input
-                      type="text"
-                      name="access_key"
-                      value={Map.get(t_config, :s3_access_key, "")}
-                      placeholder="Access key ID"
-                      class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                    />
-                    <input
-                      type="password"
-                      name="secret_key"
-                      value={Map.get(t_config, :s3_secret_key, "")}
-                      placeholder="Secret access key"
-                      class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                    />
-                    <input
-                      type="text"
-                      name="prefix"
-                      value={Map.get(t_config, :s3_prefix, "")}
-                      placeholder="Key prefix (optional)"
-                      class="col-span-2 block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                    />
-                  </form>
+
+                <%!-- Restore progress --%>
+                <%= if restoring do %>
+                  <% completed = Map.get(progress, :completed, %{}) %>
+                  <div class="mt-3 rounded-lg px-4 py-3 bg-indigo-50 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/40">
+                    <%!-- Completed categories --%>
+                    <%= for {cat, cat_result} <- completed do %>
+                      <div class="flex items-center gap-1.5 mb-1">
+                        <.icon
+                          name="hero-check-circle-solid"
+                          class={[
+                            "w-3.5 h-3.5 shrink-0",
+                            if(cat_result.failed > 0,
+                              do: "text-amber-500",
+                              else: "text-emerald-500"
+                            )
+                          ]}
+                        />
+                        <span class="text-xs text-gray-600 dark:text-gray-400">
+                          {category_display_name(cat)}
+                          <span class="text-[10px] text-gray-400 dark:text-gray-500 ml-1">
+                            {cat_result.created} created{if(cat_result.skipped > 0,
+                              do: ", #{cat_result.skipped} skipped",
+                              else: ""
+                            )}{if(cat_result.failed > 0,
+                              do: ", #{cat_result.failed} failed",
+                              else: ""
+                            )}
+                          </span>
+                        </span>
+                      </div>
+                    <% end %>
+
+                    <%!-- Current category --%>
+                    <div class="flex items-center gap-1.5 mb-2">
+                      <svg
+                        class="w-3.5 h-3.5 shrink-0 animate-spin text-indigo-500"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                      >
+                        <circle
+                          class="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          stroke-width="4"
+                        >
+                        </circle>
+                        <path
+                          class="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                        >
+                        </path>
+                      </svg>
+                      <span class="text-xs font-medium text-indigo-800 dark:text-indigo-200">
+                        <%= if progress.category do %>
+                          {category_display_name(progress.category)}...
+                        <% else %>
+                          Starting...
+                        <% end %>
+                      </span>
+                      <span class="text-[10px] text-indigo-500 dark:text-indigo-400 ml-auto">
+                        {progress.index}/{progress.total}
+                      </span>
+                    </div>
+
+                    <div class="h-1.5 w-full rounded-full bg-indigo-100 dark:bg-indigo-900/40 overflow-hidden">
+                      <div
+                        class="h-full rounded-full bg-indigo-500 transition-all duration-500 ease-out"
+                        style={"width: #{if(progress.total > 0, do: round(progress.index / progress.total * 100), else: 0)}%"}
+                      >
+                      </div>
+                    </div>
+                  </div>
                 <% end %>
-              <% end %>
-            </div>
-          <% end %>
 
-          <%!-- Select/deselect all and restore --%>
-          <div class="mt-3 flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <button
-                type="button"
-                phx-click="select_all_categories"
-                phx-value-domain={sub.domain}
-                class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
-              >
-                Select all
-              </button>
-              <span class="text-gray-300 dark:text-gray-600">·</span>
-              <button
-                type="button"
-                phx-click="deselect_all_categories"
-                phx-value-domain={sub.domain}
-                class="text-xs text-gray-500 dark:text-gray-400 hover:underline"
-              >
-                Clear
-              </button>
-            </div>
-
-            <button
-              id={"restore-btn-#{sub.domain}"}
-              type="button"
-              phx-click="restore_domain"
-              phx-value-domain={sub.domain}
-              disabled={restoring or (has_result and result_ok)}
-              class={[
-                "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
-                if(has_result and result_ok,
-                  do:
-                    "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 cursor-default",
-                  else: ""
-                ),
-                if(restoring,
-                  do:
-                    "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 cursor-not-allowed",
-                  else: ""
-                ),
-                if(not restoring and not (has_result and result_ok),
-                  do: "bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm",
-                  else: ""
-                )
-              ]}
-            >
-              <%= cond do %>
-                <% has_result and result_ok -> %>
-                  <.icon name="hero-check" class="w-3.5 h-3.5" /> Restored
-                <% restoring -> %>
-                  <svg
-                    class="animate-spin w-3.5 h-3.5"
-                    xmlns="http://www.w3.org/2000/svg"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      class="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      stroke-width="4"
-                    >
-                    </circle>
-                    <path
-                      class="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                    >
-                    </path>
-                  </svg>
-                  Restoring...
-                <% true -> %>
-                  <.icon name="hero-arrow-down-tray" class="w-3.5 h-3.5" /> Restore
-              <% end %>
-            </button>
-          </div>
-
-          <%!-- Restore progress --%>
-          <%= if restoring do %>
-            <% completed = Map.get(progress, :completed, %{}) %>
-            <div class="mt-3 rounded-lg px-4 py-3 bg-indigo-50 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/40">
-              <%!-- Completed categories --%>
-              <%= for {cat, cat_result} <- completed do %>
-                <div class="flex items-center gap-1.5 mb-1">
-                  <.icon
-                    name="hero-check-circle-solid"
-                    class={[
-                      "w-3.5 h-3.5 shrink-0",
-                      if(cat_result.failed > 0,
-                        do: "text-amber-500",
-                        else: "text-emerald-500"
+                <%!-- Restore result --%>
+                <%= if has_result do %>
+                  <% {status, result_data} = result %>
+                  <div class={[
+                    "mt-3 rounded-lg px-4 py-3 text-xs",
+                    if(status == :ok,
+                      do:
+                        "bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/40",
+                      else:
+                        "bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900/40"
+                    )
+                  ]}>
+                    <p class={[
+                      "font-semibold mb-1",
+                      if(status == :ok,
+                        do: "text-emerald-800 dark:text-emerald-200",
+                        else: "text-red-800 dark:text-red-200"
                       )
-                    ]}
-                  />
-                  <span class="text-xs text-gray-600 dark:text-gray-400">
-                    {category_display_name(cat)}
-                    <span class="text-[10px] text-gray-400 dark:text-gray-500 ml-1">
-                      {cat_result.created} created{if(cat_result.skipped > 0,
-                        do: ", #{cat_result.skipped} skipped",
-                        else: ""
-                      )}{if(cat_result.failed > 0, do: ", #{cat_result.failed} failed", else: "")}
-                    </span>
-                  </span>
-                </div>
-              <% end %>
+                    ]}>
+                      <%= cond do %>
+                        <% status == :ok -> %>
+                          Domain {format_domain_status(result_data.domain_status)}
+                        <% true -> %>
+                          Failed: {format_domain_status(result_data.domain_status)}
+                      <% end %>
+                    </p>
 
-              <%!-- Current category --%>
-              <div class="flex items-center gap-1.5 mb-2">
-                <svg
-                  class="w-3.5 h-3.5 shrink-0 animate-spin text-indigo-500"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    class="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    stroke-width="4"
-                  >
-                  </circle>
-                  <path
-                    class="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                  >
-                  </path>
-                </svg>
-                <span class="text-xs font-medium text-indigo-800 dark:text-indigo-200">
-                  <%= if progress.category do %>
-                    {category_display_name(progress.category)}...
-                  <% else %>
-                    Starting...
-                  <% end %>
-                </span>
-                <span class="text-[10px] text-indigo-500 dark:text-indigo-400 ml-auto">
-                  {progress.index}/{progress.total}
-                </span>
-              </div>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-1 mt-2">
+                      <%= for {cat, cat_result} <- Map.get(result_data, :categories, %{}) do %>
+                        <div class="flex items-center justify-between rounded px-2 py-1 bg-white/60 dark:bg-gray-900/40">
+                          <span class="text-gray-600 dark:text-gray-400">{cat}</span>
+                          <span>
+                            <span
+                              :if={Map.get(cat_result, :created, 0) > 0}
+                              class="text-emerald-600 dark:text-emerald-400"
+                            >
+                              {cat_result.created}✓
+                            </span>
+                            <span
+                              :if={Map.get(cat_result, :skipped, 0) > 0}
+                              class="text-amber-600 dark:text-amber-400 ml-1"
+                            >
+                              {cat_result.skipped}⊘
+                            </span>
+                            <span
+                              :if={Map.get(cat_result, :failed, 0) > 0}
+                              class="text-red-600 dark:text-red-400 ml-1"
+                            >
+                              {cat_result.failed}✗
+                            </span>
+                            <span
+                              :if={Map.get(cat_result, :note)}
+                              class="text-gray-400 ml-1"
+                              title={cat_result.note}
+                            >
+                              ℹ
+                            </span>
+                          </span>
+                        </div>
+                      <% end %>
+                    </div>
 
-              <div class="h-1.5 w-full rounded-full bg-indigo-100 dark:bg-indigo-900/40 overflow-hidden">
-                <div
-                  class="h-full rounded-full bg-indigo-500 transition-all duration-500 ease-out"
-                  style={"width: #{if(progress.total > 0, do: round(progress.index / progress.total * 100), else: 0)}%"}
-                >
-                </div>
-              </div>
-            </div>
-          <% end %>
-
-          <%!-- Restore result --%>
-          <%= if has_result do %>
-            <% {status, result_data} = result %>
-            <div class={[
-              "mt-3 rounded-lg px-4 py-3 text-xs",
-              if(status == :ok,
-                do:
-                  "bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/40",
-                else: "bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900/40"
-              )
-            ]}>
-              <p class={[
-                "font-semibold mb-1",
-                if(status == :ok,
-                  do: "text-emerald-800 dark:text-emerald-200",
-                  else: "text-red-800 dark:text-red-200"
-                )
-              ]}>
-                <%= cond do %>
-                  <% status == :ok -> %>
-                    Domain {format_domain_status(result_data.domain_status)}
-                  <% true -> %>
-                    Failed: {format_domain_status(result_data.domain_status)}
-                <% end %>
-              </p>
-
-              <div class="grid grid-cols-2 md:grid-cols-4 gap-1 mt-2">
-                <%= for {cat, cat_result} <- Map.get(result_data, :categories, %{}) do %>
-                  <div class="flex items-center justify-between rounded px-2 py-1 bg-white/60 dark:bg-gray-900/40">
-                    <span class="text-gray-600 dark:text-gray-400">{cat}</span>
-                    <span>
-                      <span
-                        :if={Map.get(cat_result, :created, 0) > 0}
-                        class="text-emerald-600 dark:text-emerald-400"
-                      >
-                        {cat_result.created}✓
-                      </span>
-                      <span
-                        :if={Map.get(cat_result, :skipped, 0) > 0}
-                        class="text-amber-600 dark:text-amber-400 ml-1"
-                      >
-                        {cat_result.skipped}⊘
-                      </span>
-                      <span
-                        :if={Map.get(cat_result, :failed, 0) > 0}
-                        class="text-red-600 dark:text-red-400 ml-1"
-                      >
-                        {cat_result.failed}✗
-                      </span>
-                      <span
-                        :if={Map.get(cat_result, :note)}
-                        class="text-gray-400 ml-1"
-                        title={cat_result.note}
-                      >
-                        ℹ
-                      </span>
-                    </span>
+                    <%!-- Show errors --%>
+                    <% all_errors =
+                      result_data
+                      |> Map.get(:categories, %{})
+                      |> Enum.flat_map(fn {cat, r} ->
+                        Enum.map(Map.get(r, :errors, []), &"#{cat}: #{&1}")
+                      end) %>
+                    <%= if all_errors != [] do %>
+                      <details class="mt-2">
+                        <summary class="text-red-600 dark:text-red-400 cursor-pointer">
+                          {length(all_errors)} error(s)
+                        </summary>
+                        <ul class="mt-1 space-y-0.5 text-red-600 dark:text-red-300">
+                          <li :for={err <- all_errors}>{err}</li>
+                        </ul>
+                      </details>
+                    <% end %>
                   </div>
                 <% end %>
               </div>
-
-              <%!-- Show errors --%>
-              <% all_errors =
-                result_data
-                |> Map.get(:categories, %{})
-                |> Enum.flat_map(fn {cat, r} ->
-                  Enum.map(Map.get(r, :errors, []), &"#{cat}: #{&1}")
-                end) %>
-              <%= if all_errors != [] do %>
-                <details class="mt-2">
-                  <summary class="text-red-600 dark:text-red-400 cursor-pointer">
-                    {length(all_errors)} error(s)
-                  </summary>
-                  <ul class="mt-1 space-y-0.5 text-red-600 dark:text-red-300">
-                    <li :for={err <- all_errors}>{err}</li>
-                  </ul>
-                </details>
-              <% end %>
-            </div>
-          <% end %>
+            <% end %>
+          </div>
         </div>
       <% end %>
     </div>
