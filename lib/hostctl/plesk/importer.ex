@@ -605,6 +605,7 @@ defmodule Hostctl.Plesk.Importer do
     web_files_path = Map.get(restore_opts, :web_files_path)
     s3_backend_opts = Map.get(restore_opts, :s3_backend_opts)
     progress_pid = Map.get(restore_opts, :progress_pid)
+    user_id = Map.get(restore_opts, :user_id)
 
     # Find the parent domain web_files item (the one matching our domain name).
     # Subdomain WEB entries also exist in inventory but are filtered by
@@ -641,7 +642,8 @@ defmodule Hostctl.Plesk.Importer do
           ssh_opts,
           s3_backend_opts,
           web_files_path,
-          progress_pid
+          progress_pid,
+          user_id
         )
 
       # Legacy flat S3 opts map: all targets use the same bucket/credentials.
@@ -936,7 +938,8 @@ defmodule Hostctl.Plesk.Importer do
          ssh_opts,
          s3_per_target,
          local_base_path,
-         progress_pid
+         progress_pid,
+         user_id
        ) do
     domain_name = domain.name
     {remote_docroot, remote_home_dir} = compute_remote_docroot(item, domain_name)
@@ -965,7 +968,9 @@ defmodule Hostctl.Plesk.Importer do
         tmp_base,
         ssh_opts,
         errors,
-        progress_pid
+        progress_pid,
+        domain.id,
+        user_id
       )
 
     # Each subdomain
@@ -983,7 +988,9 @@ defmodule Hostctl.Plesk.Importer do
           tmp_base,
           ssh_opts,
           acc,
-          progress_pid
+          progress_pid,
+          domain.id,
+          user_id
         )
       end)
 
@@ -1006,7 +1013,9 @@ defmodule Hostctl.Plesk.Importer do
          tmp_base,
          ssh_opts,
          errors,
-         progress_pid
+         _progress_pid,
+         domain_id,
+         user_id
        ) do
     if is_map(s3_opts) do
       tmp_dir = Path.join(tmp_base, dir_name)
@@ -1020,44 +1029,33 @@ defmodule Hostctl.Plesk.Importer do
           raw_prefix = Map.get(s3_opts, :prefix, "")
           s3_prefix = if raw_prefix != "", do: "#{raw_prefix}/#{dir_name}", else: dir_name
 
-          # Create progress callback that sends detailed upload progress
-          progress_callback =
-            if progress_pid do
-              fn current, total, filename, _result ->
-                status = "Uploading #{filename} (#{current}/#{total})"
-
-                send(
-                  progress_pid,
-                  {:restore_progress, label, "s3_upload", current, total, status}
-                )
-              end
-            else
-              nil
-            end
-
-          case Hostctl.S3Client.upload_directory(
-                 Map.fetch!(s3_opts, :endpoint),
-                 Map.fetch!(s3_opts, :bucket),
-                 s3_prefix,
-                 tmp_dir,
-                 Map.fetch!(s3_opts, :access_key_id),
-                 Map.fetch!(s3_opts, :secret_access_key),
-                 Map.get(s3_opts, :region, "us-east-1"),
-                 progress_callback
-               ) do
-            {:ok, count} ->
+          # Create background upload job
+          case Hostctl.UploadWorker.start_upload(%{
+                 domain_id: domain_id,
+                 user_id: user_id,
+                 job_type: "plesk_import",
+                 source_path: tmp_dir,
+                 s3_endpoint: Map.fetch!(s3_opts, :endpoint),
+                 s3_bucket: Map.fetch!(s3_opts, :bucket),
+                 s3_prefix: s3_prefix,
+                 s3_region: Map.get(s3_opts, :region, "us-east-1"),
+                 s3_access_key_id: Map.fetch!(s3_opts, :access_key_id),
+                 s3_secret_access_key: Map.fetch!(s3_opts, :secret_access_key),
+                 metadata: %{label: label, cleanup_source: true}
+               }) do
+            {:ok, _job} ->
               Logger.info(
-                "[Importer] web_files→S3 #{label}: uploaded #{count} files to #{s3_prefix}"
+                "[Importer] web_files→S3 #{label}: background upload job started for #{s3_prefix}"
               )
 
               errors
 
-            {:error, upload_errors} ->
+            {:error, reason} ->
               Logger.warning(
-                "[Importer] web_files→S3 #{label}: #{length(upload_errors)} upload failures"
+                "[Importer] web_files→S3 #{label}: failed to start upload job - #{inspect(reason)}"
               )
 
-              errors ++ upload_errors
+              ["#{label}: failed to start upload job - #{inspect(reason)}" | errors]
           end
 
         {:error, reason} ->

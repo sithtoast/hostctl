@@ -1494,4 +1494,67 @@ defmodule Hostctl.Hosting do
   def change_s3_backend(%DomainS3Backend{} = backend, attrs \\ %{}) do
     DomainS3Backend.changeset(backend, attrs)
   end
+
+  # ---------------------------------------------------------------------------
+  # Upload Jobs
+  # ---------------------------------------------------------------------------
+
+  alias Hostctl.Hosting.UploadJob
+
+  @doc """
+  Creates a new upload job.
+  """
+  def create_upload_job(attrs \\ %{}) do
+    %UploadJob{}
+    |> UploadJob.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc """
+  Gets a single upload job.
+  """
+  def get_upload_job!(id), do: Repo.get!(UploadJob, id)
+
+  @doc """
+  Lists all upload jobs for a domain.
+  """
+  def list_upload_jobs_by_domain(domain_id) do
+    Repo.all(
+      from u in UploadJob, where: u.domain_id == ^domain_id, order_by: [desc: u.inserted_at]
+    )
+  end
+
+  @doc """
+  Lists all upload jobs for a user.
+  """
+  def list_upload_jobs_by_user(user_id) do
+    Repo.all(from u in UploadJob, where: u.user_id == ^user_id, order_by: [desc: u.inserted_at])
+  end
+
+  @doc """
+  Lists active (pending or running) upload jobs.
+  """
+  def list_active_upload_jobs do
+    Repo.all(
+      from u in UploadJob,
+        where: u.status in ["pending", "running"],
+        order_by: [asc: u.inserted_at]
+    )
+  end
+
+  @doc """
+  Updates an upload job.
+  """
+  def update_upload_job(%UploadJob{} = job, attrs) do
+    job
+    |> UploadJob.changeset(attrs)
+    |> Repo.update()
+  end
+
+  @doc """
+  Deletes an upload job.
+  """
+  def delete_upload_job(%UploadJob{} = job) do
+    Repo.delete(job)
+  end
 end

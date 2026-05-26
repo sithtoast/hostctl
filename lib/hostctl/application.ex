@@ -27,7 +27,9 @@ defmodule Hostctl.Application do
         Hostctl.Repo,
         {DNSCluster, query: Application.get_env(:hostctl, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: Hostctl.PubSub},
-        {Task.Supervisor, name: Hostctl.TaskSupervisor}
+        {Registry, keys: :unique, name: Hostctl.UploadRegistry},
+        {Task.Supervisor, name: Hostctl.TaskSupervisor},
+        {DynamicSupervisor, name: Hostctl.UploadSupervisor, strategy: :one_for_one}
       ] ++
         metrics_children ++
         backup_children ++

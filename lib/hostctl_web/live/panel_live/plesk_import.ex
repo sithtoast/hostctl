@@ -5,9 +5,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   alias Hostctl.Accounts
   alias Hostctl.Accounts.Scope
+  alias Hostctl.Hosting
   alias Hostctl.Plesk
   alias Hostctl.Plesk.Importer
   alias Hostctl.Plesk.SSHProbe
+  alias Hostctl.Repo
 
   @data_type_options [
     {"domains", "Domains and subscriptions"},
@@ -71,6 +73,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   @impl true
   def mount(_params, _session, socket) do
+    # Subscribe to upload job progress
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Hostctl.PubSub, "upload_jobs")
+    end
+
     {:ok,
      socket
      |> assign(:page_title, "Plesk Import")
@@ -99,7 +106,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:saved_migrations, [])
      |> assign(:show_saved, false)
      |> assign(:ssh_needs_password, false)
-     |> load_saved_migrations()}
+     |> assign(:upload_jobs, [])
+     |> load_saved_migrations()
+     |> load_upload_jobs()}
   end
 
   # ── Events ─────────────────────────────────────────────────────────────
@@ -689,6 +698,36 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     end
   end
 
+  @impl true
+  def handle_event("resume_upload_job", %{"id" => job_id}, socket) do
+    case Hostctl.UploadWorker.resume_upload(String.to_integer(job_id)) do
+      {:ok, _job} ->
+        {:noreply, load_upload_jobs(socket)}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Failed to resume: #{inspect(reason)}")}
+    end
+  end
+
+  @impl true
+  def handle_event("cancel_upload_job", %{"id" => job_id}, socket) do
+    Hostctl.UploadWorker.cancel(String.to_integer(job_id))
+    {:noreply, load_upload_jobs(socket)}
+  end
+
+  @impl true
+  def handle_event("delete_upload_job", %{"id" => job_id}, socket) do
+    job = Hosting.get_upload_job!(String.to_integer(job_id))
+    Hosting.delete_upload_job(job)
+    {:noreply, load_upload_jobs(socket)}
+  end
+
+  # Upload job progress from PubSub
+  @impl true
+  def handle_info({:upload_progress, _job}, socket) do
+    {:noreply, load_upload_jobs(socket)}
+  end
+
   # ── Async task result ──────────────────────────────────────────────────
 
   @impl true
@@ -840,6 +879,12 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     {:noreply, assign(socket, :restore_progress, progress)}
   end
 
+  # Upload job progress from PubSub
+  @impl true
+  def handle_info({:upload_progress, _job}, socket) do
+    {:noreply, load_upload_jobs(socket)}
+  end
+
   # Restore task crashed
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
@@ -926,7 +971,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
             web_files_path: web_files_path,
             s3_backend_opts: s3_backend_opts,
             progress_pid: lv_pid,
-            server_credentials: server_credentials
+            server_credentials: server_credentials,
+            user_id: scope.user.id
           )
 
         {:restore_result, domain, result}
@@ -1044,6 +1090,11 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
       <div class="max-w-6xl mx-auto space-y-6">
+        <%!-- Upload Jobs Panel --%>
+        <%= if @upload_jobs != [] do %>
+          {render_upload_jobs(assigns)}
+        <% end %>
+
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Plesk Import</h1>
@@ -1118,6 +1169,131 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         <p class="text-[11px] text-gray-400 dark:text-gray-500">
           This may take a few seconds depending on the server size.
         </p>
+      </div>
+    </div>
+    """
+  end
+
+  # ── Upload Jobs ────────────────────────────────────────────────────────
+
+  defp render_upload_jobs(assigns) do
+    ~H"""
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5">
+      <h2 class="text-sm font-semibold text-gray-900 dark:text-white mb-3">
+        <.icon name="hero-cloud-arrow-up" class="w-4 h-4 inline -mt-0.5" /> Background S3 Uploads
+      </h2>
+      <div class="space-y-3">
+        <%= for job <- @upload_jobs do %>
+          <% pct =
+            if(job.total_files > 0, do: round(job.uploaded_files / job.total_files * 100), else: 0) %>
+          <div class="rounded-lg border border-gray-100 dark:border-gray-800 p-3 text-xs">
+            <div class="flex items-center justify-between gap-2 mb-1.5">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <span class={[
+                  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium shrink-0",
+                  case job.status do
+                    "completed" ->
+                      "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300"
+
+                    "running" ->
+                      "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300"
+
+                    "failed" ->
+                      "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300"
+
+                    _ ->
+                      "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+                  end
+                ]}>
+                  <%= case job.status do %>
+                    <% "running" -> %>
+                      <span class="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse inline-block">
+                      </span>
+                    <% "completed" -> %>
+                      <.icon name="hero-check" class="w-2.5 h-2.5" />
+                    <% "failed" -> %>
+                      <.icon name="hero-x-mark" class="w-2.5 h-2.5" />
+                    <% _ -> %>
+                      <span class="w-1.5 h-1.5 rounded-full bg-gray-400 inline-block"></span>
+                  <% end %>
+                  {job.status}
+                </span>
+                <span class="font-mono text-gray-700 dark:text-gray-300 truncate">
+                  {job.s3_bucket}/{job.s3_prefix || ""}
+                </span>
+                <span class="text-gray-400 dark:text-gray-500 shrink-0">
+                  · {job.domain && job.domain.name}
+                </span>
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                <span class="text-gray-500 dark:text-gray-400">
+                  {job.uploaded_files}/{job.total_files} files ({pct}%)
+                </span>
+                <%= if job.status in ["paused", "failed", "pending"] do %>
+                  <button
+                    type="button"
+                    phx-click="resume_upload_job"
+                    phx-value-id={job.id}
+                    class="text-indigo-600 dark:text-indigo-400 hover:underline"
+                  >
+                    Resume
+                  </button>
+                <% end %>
+                <%= if job.status == "running" do %>
+                  <button
+                    type="button"
+                    phx-click="cancel_upload_job"
+                    phx-value-id={job.id}
+                    class="text-amber-600 dark:text-amber-400 hover:underline"
+                  >
+                    Pause
+                  </button>
+                <% end %>
+                <%= if job.status in ["completed", "failed", "paused"] do %>
+                  <button
+                    type="button"
+                    phx-click="delete_upload_job"
+                    phx-value-id={job.id}
+                    class="text-gray-400 hover:text-red-500 dark:hover:text-red-400"
+                  >
+                    <.icon name="hero-trash" class="w-3.5 h-3.5" />
+                  </button>
+                <% end %>
+              </div>
+            </div>
+
+            <%!-- Progress bar --%>
+            <div class="h-1 w-full rounded-full bg-gray-100 dark:bg-gray-800 overflow-hidden">
+              <div
+                class={[
+                  "h-full rounded-full transition-all duration-300",
+                  case job.status do
+                    "completed" -> "bg-emerald-500"
+                    "failed" -> "bg-red-500"
+                    _ -> "bg-indigo-500"
+                  end
+                ]}
+                style={"width: #{pct}%"}
+              >
+              </div>
+            </div>
+
+            <%!-- Current file / error message --%>
+            <%= if job.status == "running" && job.current_file do %>
+              <div class="mt-1 text-[10px] text-gray-400 dark:text-gray-500 font-mono truncate">
+                ↑ {job.current_file}
+              </div>
+            <% end %>
+            <%= if job.status == "failed" && job.error_message do %>
+              <div
+                class="mt-1 text-[10px] text-red-600 dark:text-red-400 truncate"
+                title={job.error_message}
+              >
+                {String.slice(job.error_message, 0, 120)}
+              </div>
+            <% end %>
+          </div>
+        <% end %>
       </div>
     </div>
     """
@@ -2961,4 +3137,15 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   end
 
   defp ensure_atom_keys(other), do: other
+
+  defp load_upload_jobs(socket) do
+    # Load active upload jobs (pending, running, or recent failures/completions)
+    jobs =
+      socket.assigns.current_scope.user.id
+      |> Hosting.list_upload_jobs_by_user()
+      |> Enum.take(20)
+      |> Repo.preload(:domain)
+
+    assign(socket, :upload_jobs, jobs)
+  end
 end

@@ -488,6 +488,129 @@ defmodule Hostctl.S3Client do
     end
   end
 
+  @doc """
+  Lists all object keys under a given prefix in an S3 bucket (for resume detection).
+  Returns `{:ok, [key_string, ...]}` or `{:error, reason}`.
+  """
+  def list_all_keys(
+        endpoint,
+        bucket,
+        prefix,
+        access_key_id,
+        secret_access_key,
+        region \\ "us-east-1"
+      ) do
+    list_all_keys_recursive(
+      endpoint,
+      bucket,
+      prefix,
+      access_key_id,
+      secret_access_key,
+      region,
+      nil,
+      []
+    )
+  end
+
+  defp list_all_keys_recursive(
+         endpoint,
+         bucket,
+         prefix,
+         access_key_id,
+         secret_access_key,
+         region,
+         continuation_token,
+         acc
+       ) do
+    query_params = [
+      {"list-type", "2"},
+      {"prefix", prefix || ""}
+    ]
+
+    query_params =
+      if continuation_token,
+        do: query_params ++ [{"continuation-token", continuation_token}],
+        else: query_params
+
+    query_string = URI.encode_query(query_params)
+    url = "#{endpoint}/#{bucket}?#{query_string}"
+    amzdate = DateTime.utc_now() |> Calendar.strftime("%Y%m%dT%H%M%SZ")
+    datestamp = amzdate |> String.slice(0..7)
+    body_hash = hex_sha256("")
+
+    canonical_headers =
+      "host:#{URI.parse(endpoint).host}\nx-amz-content-sha256:#{body_hash}\nx-amz-date:#{amzdate}\n"
+
+    signed_headers = "host;x-amz-content-sha256;x-amz-date"
+
+    canonical_request =
+      Enum.join(
+        ["GET", "/#{bucket}", query_string, canonical_headers, signed_headers, body_hash],
+        "\n"
+      )
+
+    auth_header =
+      build_auth_header(
+        canonical_request,
+        amzdate,
+        datestamp,
+        signed_headers,
+        access_key_id,
+        secret_access_key,
+        region,
+        "s3"
+      )
+
+    request_headers = [
+      {"x-amz-date", amzdate},
+      {"x-amz-content-sha256", body_hash},
+      {"authorization", auth_header}
+    ]
+
+    case Req.get(url: url, headers: request_headers, retry: false) do
+      {:ok, %Req.Response{status: 200, body: body}} ->
+        xml = if is_binary(body), do: body, else: IO.iodata_to_binary(body)
+
+        # Extract all Key values
+        keys =
+          Regex.scan(~r|<Key>(.*?)</Key>|s, xml, capture: :all_but_first)
+          |> Enum.map(fn [k] -> String.trim(k) end)
+
+        # Check for continuation token
+        next_token =
+          case Regex.run(~r|<NextContinuationToken>(.*?)</NextContinuationToken>|s, xml,
+                 capture: :all_but_first
+               ) do
+            [token] -> String.trim(token)
+            nil -> nil
+          end
+
+        acc = acc ++ keys
+
+        if next_token do
+          list_all_keys_recursive(
+            endpoint,
+            bucket,
+            prefix,
+            access_key_id,
+            secret_access_key,
+            region,
+            next_token,
+            acc
+          )
+        else
+          {:ok, acc}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private helpers
+  # ---------------------------------------------------------------------------
+
   defp s3_encode(value) do
     URI.encode(to_string(value), &URI.char_unreserved?/1)
   end
