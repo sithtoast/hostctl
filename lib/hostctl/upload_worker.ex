@@ -424,12 +424,22 @@ defmodule Hostctl.UploadWorker do
     with {:ok, sshpass_prefix, auth_args, env} <- ssh_auth_parts_from_job(job) do
       ssh = System.find_executable("ssh") || "ssh"
 
-      ssh_cmd_parts =
-        if(sshpass_prefix != "", do: [sshpass_prefix], else: []) ++
-          [ssh, "-p", port] ++ auth_args ++ ["#{job.ssh_username}@#{job.ssh_host}", find_cmd]
+      # Build args as a proper list so find_cmd is passed as a single argument
+      # to SSH. Joining into a string and using sh -c would let the local shell
+      # split find_cmd's semicolons before SSH ever sees them.
+      {executable, args} =
+        if sshpass_prefix != "" do
+          sshpass = sshpass_prefix |> String.split() |> hd()
+
+          {sshpass,
+           ["-e", ssh, "-p", port] ++
+             auth_args ++ ["#{job.ssh_username}@#{job.ssh_host}", find_cmd]}
+        else
+          {ssh, ["-p", port] ++ auth_args ++ ["#{job.ssh_username}@#{job.ssh_host}", find_cmd]}
+        end
 
       {output, code} =
-        System.cmd("sh", ["-c", Enum.join(ssh_cmd_parts, " ")],
+        System.cmd(executable, args,
           stderr_to_stdout: false,
           env: env
         )
