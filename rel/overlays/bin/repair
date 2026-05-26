@@ -545,7 +545,51 @@ if dpkg -l vsftpd &>/dev/null 2>&1; then
   if [[ -f "$VSFTPD_CONF" ]]; then
     vsftpd_changed=false
 
-    # Ensure listen=NO (vsftpd must use listen_ipv6=YES so it binds :: and
+    # If any of the critical virtual-user settings are absent the config is
+    # the default Debian vsftpd.conf (which doesn't know about virtual users).
+    # Attempting to add settings piecemeal to the Debian default is fragile
+    # because it has conflicting commented-out lines; rewrite the whole file.
+    VSFTPD_NEEDS_REWRITE=false
+    for _req in "guest_enable=YES" "chroot_local_user=YES" "allow_writeable_chroot=YES" "guest_username=www-data" "local_root=" "user_config_dir="; do
+      if ! grep -q "^${_req}" "$VSFTPD_CONF" 2>/dev/null; then
+        VSFTPD_NEEDS_REWRITE=true
+        break
+      fi
+    done
+
+    if $VSFTPD_NEEDS_REWRITE; then
+      # Single-quoted heredoc delimiter keeps $USER literal (vsftpd placeholder)
+      cat > "$VSFTPD_CONF" <<'VSFTPDEOF'
+listen=NO
+listen_ipv6=YES
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+dirmessage_enable=YES
+use_localtime=YES
+xferlog_enable=YES
+connect_from_port_20=YES
+chroot_local_user=YES
+allow_writeable_chroot=YES
+secure_chroot_dir=/var/run/vsftpd/empty
+pam_service_name=vsftpd.virtual
+guest_enable=YES
+guest_username=www-data
+user_sub_token=$USER
+local_root=/var/www
+user_config_dir=/etc/vsftpd/vsftpd_user_conf
+virtual_use_local_privs=YES
+hide_ids=YES
+pasv_min_port=30000
+pasv_max_port=31000
+pasv_addr_resolve=YES
+VSFTPDEOF
+      fix "rewrote /etc/vsftpd.conf (missing virtual-user settings; was default Debian config)"
+      FIXED=$((FIXED + 1))
+      vsftpd_changed=true
+    fi
+
     # accepts both IPv4 and IPv6; listen=YES restricts it to IPv4 only, which
     # causes "connection refused" when clients connect via a domain that has
     # an AAAA record and prefer IPv6)
