@@ -359,26 +359,26 @@ defmodule Hostctl.UploadWorker do
       rsync = System.find_executable("rsync") || "rsync"
       rsync_path = remote_rsync_path_from_job(job)
 
-      env_args = Enum.flat_map(env, fn {k, v} -> ["--setenv=#{k}=#{v}"] end)
+      # Run rsync directly as the hostctl user — no sudo/systemd-run wrapper.
+      # The staging dir lives in hostctl's private /tmp namespace (PrivateTmp=yes
+      # in the systemd unit). sudo systemd-run would create a new transient unit
+      # in a different /tmp namespace where the --files-from list file doesn't
+      # exist. Local rsync needs no root privileges; only the remote side needs
+      # sudo (handled by --rsync-path).
+      args = [
+        "-rltzD",
+        "--chmod=D755,F644",
+        "--timeout=120",
+        "--rsync-path=#{rsync_path}",
+        "--files-from=#{list_file}",
+        "--relative",
+        "-e",
+        ssh_cmd,
+        remote,
+        local_dir <> "/"
+      ]
 
-      args =
-        ["systemd-run", "--pipe", "--wait", "--collect", "--quiet"] ++
-          env_args ++
-          [
-            rsync,
-            "-rltzD",
-            "--chmod=D755,F644",
-            "--timeout=120",
-            "--rsync-path=#{rsync_path}",
-            "--files-from=#{list_file}",
-            "--relative",
-            "-e",
-            ssh_cmd,
-            remote,
-            local_dir <> "/"
-          ]
-
-      case System.cmd("sudo", args, stderr_to_stdout: true, env: env) do
+      case System.cmd(rsync, args, stderr_to_stdout: true, env: env) do
         {_, code} when code in [0, 24] ->
           File.rm(list_file)
           :ok
