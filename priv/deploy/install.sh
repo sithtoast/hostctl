@@ -437,7 +437,7 @@ fi
 info "Pre-downloading build tools and dependencies..."
 apt-get install -y --no-install-recommends \
   --download-only \
-  build-essential git libssl-dev unzip locales >/dev/null
+  build-essential git libssl-dev unzip locales sshpass >/dev/null
 
 info "Pre-downloading FTP packages..."
 apt-get install -y --no-install-recommends --download-only \
@@ -491,7 +491,7 @@ success "All prerequisites downloaded. No system changes made yet -- starting in
 step "Installing system packages"
 
 apt-get install -y --no-install-recommends \
-  build-essential git libssl-dev unzip locales vsftpd db-util
+  build-essential git libssl-dev unzip locales sshpass vsftpd db-util
 
 if ! locale -a 2>/dev/null | grep -q "en_US.utf8"; then
   locale-gen en_US.UTF-8

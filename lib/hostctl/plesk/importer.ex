@@ -2112,14 +2112,12 @@ defmodule Hostctl.Plesk.Importer do
             {:error, "sshpass not found — install with: apt install sshpass"}
 
           sshpass ->
-            env =
-              if is_binary(password) and password != "" do
-                [{"SSHPASS", password}]
-              else
-                []
-              end
-
-            {:ok, "#{sshpass} -e", ["-o", "StrictHostKeyChecking=accept-new"], env}
+            if is_binary(password) and password != "" do
+              {:ok, "#{sshpass} -e", ["-o", "StrictHostKeyChecking=accept-new"],
+               [{"SSHPASS", password}]}
+            else
+              {:error, "SSH password is empty — re-enter it in the connection settings and retry"}
+            end
         end
 
       _ ->

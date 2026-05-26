@@ -604,7 +604,18 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:domain_s3_backends, load_domain_s3_backends(subscriptions))
      |> assign(:restore_results, restore_results)
      |> assign(:server_credentials, server_credentials)
-     |> put_flash(:info, creds_flash)}
+     |> put_flash(:info, creds_flash)
+     |> then(fn socket ->
+       if form_params["source"] == "ssh" and form_params["ssh_auth_method"] == "password" do
+         put_flash(
+           socket,
+           :warning,
+           "SSH password was not saved — re-enter it in the connection settings before running."
+         )
+       else
+         socket
+       end
+     end)}
   end
 
   @impl true
@@ -1588,6 +1599,36 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         </div>
       </div>
     </div>
+
+    <%!-- SSH credentials (shown when password auth is used but password is missing) --%>
+    <%= if @form_params["source"] == "ssh" and @form_params["ssh_auth_method"] == "password" and @form_params["ssh_password"] in [nil, ""] do %>
+      <div class="bg-amber-50 dark:bg-amber-900/20 rounded-xl border border-amber-200 dark:border-amber-700 px-6 py-4">
+        <div class="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+          <div class="flex items-center gap-2 shrink-0">
+            <.icon name="hero-key" class="w-4 h-4 text-amber-600 dark:text-amber-400" />
+            <span class="text-sm font-medium text-amber-800 dark:text-amber-300">
+              SSH password required
+            </span>
+          </div>
+          <p class="text-xs text-amber-700 dark:text-amber-400 sm:flex-1">
+            The SSH password was not saved. Enter it to enable file and mail content transfers.
+          </p>
+          <.form
+            for={@form}
+            id="ssh-creds-form"
+            phx-change="validate"
+            class="flex items-center gap-2 w-full sm:w-auto"
+          >
+            <.input
+              field={@form[:ssh_password]}
+              type="password"
+              placeholder="SSH password"
+              class="block w-full sm:w-64 rounded-lg border border-amber-300 dark:border-amber-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+            />
+          </.form>
+        </div>
+      </div>
+    <% end %>
 
     <%!-- Save migration --%>
     <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 px-6 py-4">
