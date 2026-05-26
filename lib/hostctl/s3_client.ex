@@ -38,10 +38,8 @@ defmodule Hostctl.S3Client do
       ) do
     with {:ok, body} <- File.read(local_path) do
       content_type = mime_type(local_path)
-      url = "#{endpoint}/#{bucket}/#{key}"
 
       put_object_body(
-        url,
         key,
         bucket,
         body,
@@ -325,7 +323,6 @@ defmodule Hostctl.S3Client do
   # ---------------------------------------------------------------------------
 
   defp put_object_body(
-         url,
          key,
          bucket,
          body,
@@ -340,6 +337,7 @@ defmodule Hostctl.S3Client do
     datestamp = amz_date(now)
     host = uri_host(endpoint)
     body_hash = hex_sha256(body)
+    encoded_key = encode_s3_key(key)
 
     headers_to_sign = [
       {"content-type", content_type},
@@ -353,7 +351,7 @@ defmodule Hostctl.S3Client do
 
     canonical_request =
       Enum.join(
-        ["PUT", "/#{bucket}/#{key}", "", canonical_headers, signed_headers, body_hash],
+        ["PUT", "/#{bucket}/#{encoded_key}", "", canonical_headers, signed_headers, body_hash],
         "\n"
       )
 
@@ -377,7 +375,15 @@ defmodule Hostctl.S3Client do
         {"authorization", auth_header}
       ]
 
-    case Req.put(url: url, headers: request_headers, body: body, retry: false) do
+    encoded_url = "#{endpoint}/#{bucket}/#{encoded_key}"
+
+    case Req.put(
+           url: encoded_url,
+           headers: request_headers,
+           body: body,
+           retry: false,
+           receive_timeout: 300_000
+         ) do
       {:ok, %Req.Response{status: status}} when status in 200..299 ->
         :ok
 
@@ -613,6 +619,16 @@ defmodule Hostctl.S3Client do
 
   defp s3_encode(value) do
     URI.encode(to_string(value), &URI.char_unreserved?/1)
+  end
+
+  # Percent-encodes each path segment of an S3 key individually, preserving
+  # the "/" separators. Required so that keys with spaces, parentheses, or
+  # other special characters produce valid HTTP request targets.
+  defp encode_s3_key(key) do
+    key
+    |> String.split("/")
+    |> Enum.map(fn seg -> URI.encode(seg, &URI.char_unreserved?/1) end)
+    |> Enum.join("/")
   end
 
   defp list_files_recursive(dir) do
