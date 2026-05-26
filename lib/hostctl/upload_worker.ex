@@ -547,33 +547,29 @@ defmodule Hostctl.UploadWorker do
   end
 
   defp upload_files(job, files, current_count, worker_pid) do
-    # Process files in batches; check cancellation flag between batches
-    # (the flag is set in the worker process dict by handle_cast :cancel)
+    # Atomic counter shared across concurrent upload tasks.  Each task
+    # increments it after a successful upload so the progress bar advances
+    # monotonically without races.
+    {:ok, counter} = Agent.start_link(fn -> current_count end)
+
     results =
       files
-      |> Stream.with_index(current_count + 1)
       |> Stream.take_while(fn _ ->
         if worker_pid == self(),
           do: not Process.get(:cancel_upload, false),
           else: true
       end)
       |> Task.async_stream(
-        fn {file_path, index} ->
+        fn file_path ->
           relative = Path.relative_to(file_path, job.source_path)
+          key = s3_key(job, relative)
 
-          key =
-            if job.s3_prefix && job.s3_prefix != "",
-              do: "#{job.s3_prefix}/#{relative}",
-              else: relative
+          # Show which file is being processed (approximate – concurrent tasks
+          # may overwrite each other, which is fine for a progress indicator)
+          {:ok, progress_job} =
+            Hosting.update_upload_job(job, %{current_file: relative})
 
-          # Update current file and progress
-          {:ok, updated_job} =
-            Hosting.update_upload_job(job, %{
-              current_file: relative,
-              uploaded_files: index - 1
-            })
-
-          broadcast_progress(updated_job)
+          broadcast_progress(progress_job)
 
           result =
             case S3Client.put_object(
@@ -594,18 +590,35 @@ defmodule Hostctl.UploadWorker do
                 {:error, "#{relative}: #{inspect(reason)}"}
             end
 
-          # Update progress after successful upload
+          # Atomically increment and broadcast the correct uploaded count
           if result == :ok do
-            {:ok, updated_job} = Hosting.update_upload_job(job, %{uploaded_files: index})
-            broadcast_progress(updated_job)
+            done = Agent.get_and_update(counter, fn n -> {n + 1, n + 1} end)
+            {:ok, progress_job} = Hosting.update_upload_job(job, %{uploaded_files: done})
+            broadcast_progress(progress_job)
           end
 
           result
         end,
-        timeout: :infinity,
-        max_concurrency: 8
+        # 10-minute per-file timeout — prevents a single hung TCP upload from
+        # blocking the entire batch forever.
+        timeout: 600_000,
+        on_timeout: :kill_task,
+        max_concurrency: 4
       )
-      |> Enum.map(fn {:ok, result} -> result end)
+      |> Enum.map(fn
+        {:ok, result} ->
+          result
+
+        {:exit, :timeout} ->
+          Logger.warning("[UploadWorker] Job #{job.id}: a file upload timed out (10 min)")
+          {:error, "upload timed out"}
+
+        {:exit, reason} ->
+          Logger.warning("[UploadWorker] Job #{job.id}: upload task crashed: #{inspect(reason)}")
+          {:error, "task crashed: #{inspect(reason)}"}
+      end)
+
+    Agent.stop(counter)
 
     # If cancelled, report paused with however many succeeded
     if Process.get(:cancel_upload, false) do
