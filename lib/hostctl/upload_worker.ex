@@ -385,6 +385,13 @@ defmodule Hostctl.UploadWorker do
 
         {output, code} ->
           File.rm(list_file)
+
+          Logger.warning(
+            "[UploadWorker] Job #{job.id} rsync_batch failed (exit #{code}) " <>
+              "src=#{remote} dst=#{local_dir} files=#{length(relative_paths)}\n" <>
+              String.slice(output, 0, 800)
+          )
+
           {:error, "exit #{code}: #{String.slice(output, 0, 300)}"}
       end
     end
