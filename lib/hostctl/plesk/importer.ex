@@ -2841,6 +2841,20 @@ defmodule Hostctl.Plesk.Importer do
     home = Map.get(item, :home)
 
     cond do
+      # Sysusers are subscription root-level users — always get multi-mount
+      # access across all of the panel user's domains (or single domain root
+      # if they only own one domain)
+      Map.get(item, :source) == :sysuser and length(user_domains) > 1 ->
+        Logger.info(
+          "[Importer] Sysuser FTP account #{item.login} is a subscription sysuser, " <>
+            "creating multi-mount for #{length(user_domains)} domain(s)"
+        )
+
+        Map.merge(base, %{mounts: build_domain_mounts(user_domains), home_dir: nil})
+
+      Map.get(item, :source) == :sysuser ->
+        Map.merge(base, %{home_dir: "/var/www/#{domain.name}", mounts: []})
+
       # Root-level home + multiple domains → virtual multi-mount root
       multi_mount_home?(home, domain.name) and length(user_domains) > 1 ->
         Logger.info(
