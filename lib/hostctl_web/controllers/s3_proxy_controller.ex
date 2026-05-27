@@ -37,6 +37,9 @@ defmodule HostctlWeb.S3ProxyController do
     server
   )
 
+  # Match nginx-style directory index behavior for S3-backed listings.
+  @directory_index_files ["index.html", "index.htm"]
+
   plug :verify_proxy_token
 
   def show(conn, %{"backend_id" => raw_id, "path" => path_parts}) do
@@ -106,38 +109,10 @@ defmodule HostctlWeb.S3ProxyController do
 
   defp serve_object(conn, backend, path_parts) do
     full_key = build_full_key(backend, path_parts)
-    region = backend.region || "us-east-1"
 
-    result =
-      if has_credentials?(backend) do
-        S3Client.get_object(
-          backend.endpoint_url,
-          backend.bucket,
-          full_key,
-          backend.access_key_id,
-          backend.secret_access_key,
-          region
-        )
-      else
-        S3Client.get_object_public(backend.endpoint_url, backend.bucket, full_key)
-      end
-
-    case result do
+    case fetch_object(backend, full_key) do
       {:ok, status, s3_headers, body} ->
-        filtered_headers =
-          s3_headers
-          |> Enum.reject(fn {k, _} ->
-            String.downcase(to_string(k)) in @strip_response_headers
-          end)
-
-        conn =
-          Enum.reduce(filtered_headers, conn, fn {key, value}, c ->
-            put_resp_header(c, String.downcase(to_string(key)), to_string(value))
-          end)
-
-        conn
-        |> put_status(status)
-        |> send_resp(status, body)
+        send_s3_response(conn, status, s3_headers, body)
 
       {:error, _reason} ->
         conn
@@ -154,29 +129,91 @@ defmodule HostctlWeb.S3ProxyController do
         p -> if String.ends_with?(p, "/"), do: p, else: p <> "/"
       end
 
-    region = backend.region || "us-east-1"
+    case maybe_fetch_directory_index(backend, prefix) do
+      {:serve, status, s3_headers, body} ->
+        send_s3_response(conn, status, s3_headers, body)
 
-    case S3Client.list_objects_v2(
-           backend.endpoint_url,
-           backend.bucket,
-           prefix,
-           backend.access_key_id,
-           backend.secret_access_key,
-           region
-         ) do
-      {:ok, %{dirs: dirs, files: files}} ->
-        display_path = client_display_path(backend, path_parts)
-        html = render_directory_listing(display_path, prefix, dirs, files)
+      :not_found ->
+        region = backend.region || "us-east-1"
 
-        conn
-        |> put_resp_content_type("text/html")
-        |> send_resp(200, html)
+        case S3Client.list_objects_v2(
+               backend.endpoint_url,
+               backend.bucket,
+               prefix,
+               backend.access_key_id,
+               backend.secret_access_key,
+               region
+             ) do
+          {:ok, %{dirs: dirs, files: files}} ->
+            display_path = client_display_path(backend, path_parts)
+            html = render_directory_listing(display_path, prefix, dirs, files)
+
+            conn
+            |> put_resp_content_type("text/html")
+            |> send_resp(200, html)
+
+          {:error, _reason} ->
+            conn
+            |> put_status(502)
+            |> text("Bad gateway")
+        end
 
       {:error, _reason} ->
         conn
         |> put_status(502)
         |> text("Bad gateway")
     end
+  end
+
+  defp maybe_fetch_directory_index(backend, prefix) do
+    Enum.reduce_while(@directory_index_files, :not_found, fn filename, _acc ->
+      key = prefix <> filename
+
+      case fetch_object(backend, key) do
+        {:ok, 404, _headers, _body} ->
+          {:cont, :not_found}
+
+        {:ok, status, headers, body} ->
+          {:halt, {:serve, status, headers, body}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp fetch_object(backend, full_key) do
+    region = backend.region || "us-east-1"
+
+    if has_credentials?(backend) do
+      S3Client.get_object(
+        backend.endpoint_url,
+        backend.bucket,
+        full_key,
+        backend.access_key_id,
+        backend.secret_access_key,
+        region
+      )
+    else
+      S3Client.get_object_public(backend.endpoint_url, backend.bucket, full_key)
+    end
+  end
+
+  defp send_s3_response(conn, status, s3_headers, body) do
+    filtered_headers =
+      s3_headers
+      |> Enum.reject(fn {k, _} ->
+        String.downcase(to_string(k)) in @strip_response_headers
+      end)
+
+    conn =
+      Enum.reduce(filtered_headers, conn, fn {key, value}, c ->
+        put_resp_header(c, String.downcase(to_string(key)), to_string(value))
+      end)
+
+    conn
+    |> put_status(status)
+    |> send_resp(status, body)
   end
 
   defp render_directory_listing(display_path, prefix, dirs, files) do
