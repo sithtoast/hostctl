@@ -544,8 +544,17 @@ defmodule Hostctl.S3Client do
         do: query_params ++ [{"continuation-token", continuation_token}],
         else: query_params
 
-    query_string = URI.encode_query(query_params)
-    url = "#{endpoint}/#{bucket}?#{query_string}"
+    # AWS SigV4 requires the canonical query string to be sorted by parameter
+    # name and RFC 3986 percent-encoded.  We build one canonical form and use
+    # it for both the URL and the signature so they always match regardless of
+    # what order the server sorts the received params.
+    canonical_query_string =
+      query_params
+      |> Enum.map(fn {k, v} -> {s3_encode(k), s3_encode(to_string(v))} end)
+      |> Enum.sort_by(fn {k, _} -> k end)
+      |> Enum.map_join("&", fn {k, v} -> "#{k}=#{v}" end)
+
+    url = "#{endpoint}/#{bucket}?#{canonical_query_string}"
     amzdate = DateTime.utc_now() |> Calendar.strftime("%Y%m%dT%H%M%SZ")
     datestamp = amzdate |> String.slice(0..7)
     body_hash = hex_sha256("")
@@ -557,7 +566,14 @@ defmodule Hostctl.S3Client do
 
     canonical_request =
       Enum.join(
-        ["GET", "/#{bucket}", query_string, canonical_headers, signed_headers, body_hash],
+        [
+          "GET",
+          "/#{bucket}",
+          canonical_query_string,
+          canonical_headers,
+          signed_headers,
+          body_hash
+        ],
         "\n"
       )
 
@@ -613,6 +629,9 @@ defmodule Hostctl.S3Client do
         else
           {:ok, acc}
         end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, "HTTP #{status}: #{inspect(body)}"}
 
       {:error, reason} ->
         {:error, reason}
