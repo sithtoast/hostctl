@@ -338,7 +338,39 @@ defmodule Hostctl.UploadWorker do
         upload_files(%{job | source_path: batch_dir}, local_files, done_count, self())
 
       {:error, reason} ->
-        {:error, ["rsync batch failed: #{reason}"], done_count, length(relative_paths)}
+        if length(relative_paths) > 1 do
+          half = div(length(relative_paths), 2)
+          {left_paths, right_paths} = Enum.split(relative_paths, half)
+
+          Logger.warning(
+            "[UploadWorker] Job #{job.id} splitting failed batch of #{length(relative_paths)} " <>
+              "into #{length(left_paths)} + #{length(right_paths)} after rsync error: #{reason}"
+          )
+
+          left_result = process_one_batch(job, left_paths, batch_dir, done_count)
+
+          case left_result do
+            {:ok, new_count} ->
+              process_one_batch(job, right_paths, batch_dir, new_count)
+
+            {:paused, new_count} ->
+              {:paused, new_count}
+
+            {:error, left_errors, new_count, left_failed} ->
+              case process_one_batch(job, right_paths, batch_dir, new_count) do
+                {:ok, final_count} ->
+                  {:error, left_errors, final_count, left_failed}
+
+                {:paused, final_count} ->
+                  {:paused, final_count}
+
+                {:error, right_errors, final_count, right_failed} ->
+                  {:error, left_errors ++ right_errors, final_count, left_failed + right_failed}
+              end
+          end
+        else
+          {:error, ["rsync batch failed: #{reason}"], done_count, length(relative_paths)}
+        end
     end
   end
 
