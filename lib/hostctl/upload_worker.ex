@@ -177,6 +177,9 @@ defmodule Hostctl.UploadWorker do
   # fetching the next batch. This keeps local disk usage bounded to
   # ~(batch_size × avg_file_size) regardless of total site size.
   @batch_size 300
+  @rsync_timeout_seconds 900
+  @rsync_max_retries 3
+  @rsync_base_backoff_ms 2000
 
   defp streaming_mode?(job) do
     is_binary(job.remote_source_path) and job.remote_source_path != "" and
@@ -368,7 +371,8 @@ defmodule Hostctl.UploadWorker do
       args = [
         "-rltzD",
         "--chmod=D755,F644",
-        "--timeout=120",
+        "--timeout=#{@rsync_timeout_seconds}",
+        "--contimeout=60",
         "--rsync-path=#{rsync_path}",
         "--files-from=#{list_file}",
         "--relative",
@@ -378,24 +382,76 @@ defmodule Hostctl.UploadWorker do
         local_dir <> "/"
       ]
 
-      case System.cmd(rsync, args, stderr_to_stdout: true, env: env) do
-        {_, code} when code in [0, 24] ->
-          File.rm(list_file)
-          :ok
+      result =
+        run_rsync_with_retries(
+          job,
+          rsync,
+          args,
+          env,
+          remote,
+          local_dir,
+          length(relative_paths),
+          1
+        )
 
-        {output, code} ->
-          File.rm(list_file)
+      File.rm(list_file)
+      result
+    end
+  end
+
+  defp run_rsync_with_retries(job, rsync, args, env, remote, local_dir, file_count, attempt) do
+    case System.cmd(rsync, args, stderr_to_stdout: true, env: env) do
+      {_, code} when code in [0, 24] ->
+        :ok
+
+      {output, code} ->
+        retryable = retryable_rsync_error?(code, output)
+
+        if retryable and attempt < @rsync_max_retries do
+          backoff_ms = trunc(@rsync_base_backoff_ms * :math.pow(2, attempt - 1))
 
           Logger.warning(
+            "[UploadWorker] Job #{job.id} rsync_batch transient failure (exit #{code}) " <>
+              "attempt #{attempt}/#{@rsync_max_retries}, retrying in #{backoff_ms}ms " <>
+              "src=#{remote} dst=#{local_dir} files=#{file_count}\n" <>
+              String.slice(output, 0, 500)
+          )
+
+          Process.sleep(backoff_ms)
+
+          run_rsync_with_retries(
+            job,
+            rsync,
+            args,
+            env,
+            remote,
+            local_dir,
+            file_count,
+            attempt + 1
+          )
+        else
+          Logger.warning(
             "[UploadWorker] Job #{job.id} rsync_batch failed (exit #{code}) " <>
-              "src=#{remote} dst=#{local_dir} files=#{length(relative_paths)}\n" <>
+              "src=#{remote} dst=#{local_dir} files=#{file_count}\n" <>
               String.slice(output, 0, 800)
           )
 
           {:error, "exit #{code}: #{String.slice(output, 0, 300)}"}
-      end
+        end
     end
   end
+
+  defp retryable_rsync_error?(code, output) when code in [12, 30, 35, 255] do
+    msg = String.downcase(output || "")
+
+    String.contains?(msg, "broken pipe") or
+      String.contains?(msg, "connection unexpectedly closed") or
+      String.contains?(msg, "timed out") or
+      String.contains?(msg, "timeout") or
+      String.contains?(msg, "connection reset")
+  end
+
+  defp retryable_rsync_error?(_, _), do: false
 
   # Lists all regular files under `job.remote_source_path` via SSH, returning
   # relative paths (relative to the remote source directory).
