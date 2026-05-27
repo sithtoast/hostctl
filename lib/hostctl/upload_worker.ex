@@ -177,8 +177,8 @@ defmodule Hostctl.UploadWorker do
   # fetching the next batch. This keeps local disk usage bounded to
   # ~(batch_size × avg_file_size) regardless of total site size.
   @batch_size 300
-  @rsync_timeout_seconds 900
-  @rsync_max_retries 3
+  @rsync_timeout_seconds 300
+  @rsync_max_retries 1
   @rsync_base_backoff_ms 2000
 
   defp streaming_mode?(job) do
