@@ -112,28 +112,58 @@ defmodule Hostctl.WebServer do
   Also removes custom SSL cert files from disk if they exist.
   """
   def remove_domain(%Domain{} = domain) do
+    remove_domain(domain, [])
+  end
+
+  def remove_domain(%Domain{} = domain, opts) when is_list(opts) do
     if enabled?() do
       s3_backends = Repo.all(from b in DomainS3Backend, where: b.domain_id == ^domain.id)
       RcloneMount.remove_all(s3_backends)
 
+      purge_result =
+        if Keyword.get(opts, :purge_files, false) do
+          purge_domain_content(domain)
+        else
+          :ok
+        end
+
       available_path = sites_available_path(domain)
       enabled_path = sites_enabled_path(domain)
 
-      for path <- [enabled_path, available_path] do
-        case File.rm(path) do
-          :ok ->
-            :ok
+      file_errors =
+        Enum.reduce([enabled_path, available_path], [], fn path, acc ->
+          case File.rm(path) do
+            :ok ->
+              acc
 
-          {:error, :enoent} ->
-            :ok
+            {:error, :enoent} ->
+              acc
 
-          {:error, reason} ->
-            Logger.warning("[WebServer] Could not remove #{path}: #{inspect(reason)}")
-        end
+            {:error, reason} ->
+              Logger.warning("[WebServer] Could not remove #{path}: #{inspect(reason)}")
+              [{path, reason} | acc]
+          end
+        end)
+
+      ssl_result = remove_ssl_cert(domain.name)
+      reload_result = reload()
+
+      cond do
+        match?({:error, _}, purge_result) ->
+          {:error, {:purge_failed, elem(purge_result, 1)}}
+
+        file_errors != [] ->
+          {:error, {:vhost_remove_failed, Enum.reverse(file_errors)}}
+
+        ssl_result != :ok ->
+          {:error, {:ssl_cleanup_failed, ssl_result}}
+
+        match?({:error, _}, reload_result) ->
+          {:error, reload_result}
+
+        true ->
+          :ok
       end
-
-      remove_ssl_cert(domain.name)
-      reload()
     else
       :ok
     end
@@ -347,6 +377,93 @@ defmodule Hostctl.WebServer do
 
       {:error, reason, _} ->
         Logger.warning("[WebServer] Could not remove SSL dir #{dir}: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp purge_domain_content(%Domain{} = domain) do
+    subdomain_roots =
+      Repo.all(
+        from s in Subdomain,
+          where: s.domain_id == ^domain.id,
+          select: s.document_root
+      )
+
+    domain_base = domain_base_dir(domain)
+
+    web_paths =
+      [domain_base | subdomain_roots]
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&Path.expand/1)
+      |> Enum.uniq()
+
+    with :ok <- validate_purge_paths(web_paths, &safe_web_purge_path?/1),
+         :ok <- Enum.reduce_while(web_paths, :ok, &purge_path(&1, &2)),
+         :ok <- purge_mail_path(domain.name) do
+      :ok
+    end
+  end
+
+  defp domain_base_dir(%Domain{} = domain) do
+    case domain.document_root do
+      path when is_binary(path) and path != "" -> Path.dirname(path)
+      _ -> "/var/www/#{domain.name}"
+    end
+  end
+
+  defp purge_mail_path(domain_name) do
+    path = Path.expand(Path.join("/var/mail/vhosts", domain_name))
+
+    if safe_mail_purge_path?(path) do
+      case rm_rf_as_root(path) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:mail_purge_failed, path, reason}}
+      end
+    else
+      {:error, {:unsafe_mail_purge_path, path}}
+    end
+  end
+
+  defp purge_path(path, :ok) do
+    case rm_rf_as_root(path) do
+      :ok -> {:cont, :ok}
+      {:error, reason} -> {:halt, {:error, {:web_purge_failed, path, reason}}}
+    end
+  end
+
+  defp validate_purge_paths(paths, checker) do
+    case Enum.find(paths, fn path -> not checker.(path) end) do
+      nil -> :ok
+      bad -> {:error, {:unsafe_web_purge_path, bad}}
+    end
+  end
+
+  defp safe_web_purge_path?(path) do
+    inside_prefix?(path, "/var/www") and path != "/var/www"
+  end
+
+  defp safe_mail_purge_path?(path) do
+    inside_prefix?(path, "/var/mail/vhosts") and path != "/var/mail/vhosts"
+  end
+
+  defp inside_prefix?(path, prefix) do
+    expanded = Path.expand(path)
+    expanded == prefix or String.starts_with?(expanded, prefix <> "/")
+  end
+
+  defp rm_rf_as_root(path) do
+    case System.cmd(
+           "sudo",
+           ["systemd-run", "--pipe", "--wait", "--collect", "--quiet", "rm", "-rf", "--", path],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        :ok
+
+      {output, code} ->
+        reason = String.trim(output)
+        Logger.error("[WebServer] Could not purge #{path} (exit #{code}): #{reason}")
+        {:error, {code, reason}}
     end
   end
 

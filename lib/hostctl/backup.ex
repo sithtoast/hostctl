@@ -6,6 +6,7 @@ defmodule Hostctl.Backup do
   import Ecto.Query
   alias Hostctl.Repo
   alias Hostctl.Backup.S3
+  alias Hostctl.Backup.Runner
   alias Hostctl.Backup.{Setting, Log, DomainSetting, SubdomainSetting}
   alias Hostctl.Hosting.{Domain, Subdomain}
   alias Hostctl.Hosting.Database
@@ -32,6 +33,35 @@ defmodule Hostctl.Backup do
     setting
     |> Setting.changeset(attrs)
     |> Repo.update()
+  end
+
+  @doc """
+  Runs a one-off domain backup intended to execute before a delete action.
+
+  Options:
+  - `:mode` - `:full` (default) or `:partial`
+  - `:destination` - `:local` (default), `:s3`, or `:both`
+  """
+  def run_domain_backup_for_delete(%Domain{} = domain, opts \\ []) do
+    mode = Keyword.get(opts, :mode, :full)
+    destination = Keyword.get(opts, :destination, :local)
+
+    base = get_or_create_settings()
+
+    settings =
+      base
+      |> apply_delete_destination(destination)
+      |> apply_delete_mode(mode)
+
+    with :ok <- validate_delete_backup_destination(settings, destination),
+         {:ok, log} <-
+           create_log(%{
+             trigger: "manual_domain_delete",
+             status: "running",
+             started_at: DateTime.utc_now()
+           }) do
+      Runner.execute_domain_backup(log, settings, domain)
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -102,6 +132,67 @@ defmodule Hostctl.Backup do
   def backup_running? do
     Repo.exists?(from l in Log, where: l.status == "running")
   end
+
+  defp apply_delete_destination(%Setting{} = settings, :local) do
+    %{settings | local_enabled: true, s3_enabled: false}
+  end
+
+  defp apply_delete_destination(%Setting{} = settings, :s3) do
+    %{settings | local_enabled: false, s3_enabled: true}
+  end
+
+  defp apply_delete_destination(%Setting{} = settings, :both) do
+    %{settings | local_enabled: true, s3_enabled: true}
+  end
+
+  defp apply_delete_destination(%Setting{} = settings, _),
+    do: apply_delete_destination(settings, :local)
+
+  defp apply_delete_mode(%Setting{} = settings, :full) do
+    %{settings | backup_database: true, backup_mysql: true, backup_files: true, backup_mail: true}
+  end
+
+  defp apply_delete_mode(%Setting{} = settings, :partial) do
+    %{
+      settings
+      | backup_database: false,
+        backup_mysql: false,
+        backup_files: true,
+        backup_mail: false
+    }
+  end
+
+  defp apply_delete_mode(%Setting{} = settings, _), do: apply_delete_mode(settings, :full)
+
+  defp validate_delete_backup_destination(%Setting{} = settings, destination) do
+    local_ok? =
+      settings.local_enabled and
+        is_binary(settings.local_path) and
+        String.trim(settings.local_path) != ""
+
+    s3_ok? =
+      settings.s3_enabled and
+        present?(settings.s3_bucket) and
+        present?(settings.s3_access_key_id) and
+        present?(settings.s3_secret_access_key)
+
+    cond do
+      destination == :local and not local_ok? ->
+        {:error, "Local backup path is not configured."}
+
+      destination == :s3 and not s3_ok? ->
+        {:error, "S3 backup destination is not configured in panel settings."}
+
+      destination == :both and not (local_ok? and s3_ok?) ->
+        {:error, "Local and S3 backup settings must both be configured for dual destination."}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present?(_), do: false
 
   defp maybe_filter_trigger(query, "all"), do: query
   defp maybe_filter_trigger(query, nil), do: query

@@ -114,15 +114,20 @@ defmodule Hostctl.Hosting do
   end
 
   def delete_domain(%Scope{} = scope, %Domain{} = domain) do
+    delete_domain(scope, domain, [])
+  end
+
+  def delete_domain(%Scope{} = scope, %Domain{} = domain, opts) when is_list(opts) do
     true = domain.user_id == scope.user.id
 
-    case Repo.delete(domain) do
-      {:ok, _} = result ->
-        WebServer.remove_domain(domain)
-        result
+    purge_files? = Keyword.get(opts, :purge_files, false)
 
-      error ->
-        error
+    case WebServer.remove_domain(domain, purge_files: purge_files?) do
+      :ok ->
+        Repo.delete(domain)
+
+      {:error, reason} ->
+        {:error, {:system_cleanup_failed, reason}}
     end
   end
 

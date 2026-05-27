@@ -1,6 +1,7 @@
 defmodule HostctlWeb.DomainLive.Index do
   use HostctlWeb, :live_view
 
+  alias Hostctl.Backup
   alias Hostctl.Hosting
   alias Hostctl.Hosting.Domain
   alias Hostctl.Accounts.Scope
@@ -21,6 +22,8 @@ defmodule HostctlWeb.DomainLive.Index do
      |> assign(:page_title, "Domains")
      |> assign(:active_tab, :domains)
      |> assign(:is_admin?, is_admin)
+     |> assign(:delete_modal, nil)
+     |> assign(:deleting_domain_ids, MapSet.new())
      |> assign(:domains_empty?, domains == [])
      |> stream(:domains, domains)}
   end
@@ -43,37 +46,89 @@ defmodule HostctlWeb.DomainLive.Index do
     |> assign(:form, to_form(Hosting.change_domain(domain)))
   end
 
-  def handle_event("delete", %{"id" => id}, socket) do
-    scope = socket.assigns.current_scope
+  def handle_event("open_delete", %{"id" => id}, socket) do
+    {domain, _domain_scope} = delete_target(socket, id)
+    backup_settings = Backup.get_or_create_settings()
 
-    domain =
-      if socket.assigns.is_admin? do
-        Hosting.get_domain_for_admin!(id)
-      else
-        Hosting.get_domain!(scope, id)
-      end
-
-    domain_scope =
-      if socket.assigns.is_admin? && domain.user_id != scope.user.id do
-        Scope.for_user(domain.user)
-      else
-        scope
-      end
-
-    {:ok, _} = Hosting.delete_domain(domain_scope, domain)
-
-    domains =
-      if socket.assigns.is_admin? do
-        Hosting.list_all_domains_with_users()
-      else
-        Hosting.list_domains(scope)
+    default_destination =
+      cond do
+        backup_settings.local_enabled && backup_settings.s3_enabled -> "both"
+        backup_settings.s3_enabled -> "s3"
+        true -> "local"
       end
 
     {:noreply,
-     socket
-     |> assign(:domains_empty?, domains == [])
-     |> stream_delete(:domains, domain)
-     |> put_flash(:info, "Domain deleted.")}
+     assign(socket, :delete_modal, %{domain: domain, backup_destination: default_destination})}
+  end
+
+  def handle_event("cancel_delete", _params, socket) do
+    {:noreply, assign(socket, :delete_modal, nil)}
+  end
+
+  def handle_event("confirm_delete", params, socket) do
+    case socket.assigns.delete_modal do
+      %{domain: modal_domain} ->
+        domain_id = to_string(modal_domain.id)
+        {domain, domain_scope} = delete_target(socket, domain_id)
+        backup_mode = Map.get(params, "backup_mode", "none")
+        backup_destination = Map.get(params, "backup_destination", "local")
+        domain_confirmation = Map.get(params, "domain_confirmation", "")
+        purge_files? = Map.get(params, "purge_files", "false") == "true"
+        parent = self()
+
+        if String.trim(domain_confirmation) != domain.name do
+          {:noreply,
+           put_flash(
+             socket,
+             :error,
+             "Type the exact domain name (#{domain.name}) to confirm deletion."
+           )}
+        else
+          Task.start(fn ->
+            backup_result =
+              case backup_mode do
+                "none" ->
+                  :ok
+
+                mode when mode in ["full", "partial"] ->
+                  case Backup.run_domain_backup_for_delete(
+                         domain,
+                         mode: String.to_existing_atom(mode),
+                         destination: backup_destination_to_atom(backup_destination)
+                       ) do
+                    {:ok, _log} -> :ok
+                    {:error, reason} -> {:error, {:backup_failed, reason}}
+                  end
+
+                _ ->
+                  {:error, :invalid_backup_mode}
+              end
+
+            result =
+              with :ok <- backup_result,
+                   {:ok, _deleted} <-
+                     Hosting.delete_domain(domain_scope, domain, purge_files: purge_files?) do
+                {:ok, backup_mode, purge_files?}
+              else
+                {:error, reason} -> {:error, reason}
+                other -> {:error, other}
+              end
+
+            send(parent, {:domain_delete_finished, domain.id, domain.name, result})
+          end)
+
+          {:noreply,
+           socket
+           |> assign(:delete_modal, nil)
+           |> assign(
+             :deleting_domain_ids,
+             MapSet.put(socket.assigns.deleting_domain_ids, domain.id)
+           )}
+        end
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "No domain selected for deletion.")}
+    end
   end
 
   def handle_event("validate", %{"domain" => params}, socket) do
@@ -107,6 +162,49 @@ defmodule HostctlWeb.DomainLive.Index do
       {:error, changeset} ->
         {:noreply, assign(socket, :form, to_form(changeset))}
     end
+  end
+
+  def handle_info(
+        {:domain_delete_finished, domain_id, domain_name, {:ok, backup_mode, purge_files?}},
+        socket
+      ) do
+    scope = socket.assigns.current_scope
+
+    domains =
+      if socket.assigns.is_admin? do
+        Hosting.list_all_domains_with_users()
+      else
+        Hosting.list_domains(scope)
+      end
+
+    message =
+      cond do
+        backup_mode == "none" and purge_files? ->
+          "Domain #{domain_name} deleted and filesystem/mail content purged."
+
+        backup_mode == "none" ->
+          "Domain #{domain_name} deleted."
+
+        purge_files? ->
+          "Domain #{domain_name} deleted after #{backup_mode} backup and content purge."
+
+        true ->
+          "Domain #{domain_name} deleted after #{backup_mode} backup."
+      end
+
+    {:noreply,
+     socket
+     |> assign(:domains_empty?, domains == [])
+     |> assign(:deleting_domain_ids, MapSet.delete(socket.assigns.deleting_domain_ids, domain_id))
+     |> stream(:domains, domains, reset: true)
+     |> put_flash(:info, message)}
+  end
+
+  def handle_info({:domain_delete_finished, domain_id, _domain_name, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:deleting_domain_ids, MapSet.delete(socket.assigns.deleting_domain_ids, domain_id))
+     |> put_flash(:error, "Domain deletion failed: #{delete_error_message(reason)}")}
   end
 
   def render(assigns) do
@@ -345,12 +443,16 @@ defmodule HostctlWeb.DomainLive.Index do
                       Manage
                     </.link>
                     <button
-                      phx-click="delete"
+                      phx-click="open_delete"
                       phx-value-id={domain.id}
-                      data-confirm={"Are you sure you want to delete #{domain.name}? This cannot be undone."}
+                      disabled={MapSet.member?(@deleting_domain_ids, domain.id)}
                       class="text-xs font-medium text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300"
                     >
-                      Delete
+                      <%= if MapSet.member?(@deleting_domain_ids, domain.id) do %>
+                        Deleting...
+                      <% else %>
+                        Delete
+                      <% end %>
                     </button>
                   </div>
                 </td>
@@ -358,10 +460,128 @@ defmodule HostctlWeb.DomainLive.Index do
             </tbody>
           </table>
         </div>
+
+        <%= if @delete_modal do %>
+          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <div class="w-full max-w-lg rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6 shadow-xl">
+              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Delete Domain</h2>
+              <p class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+                You are deleting <span class="font-semibold">{@delete_modal.domain.name}</span>. Choose whether to create a backup first.
+              </p>
+
+              <form id="delete-domain-form" phx-submit="confirm_delete" class="mt-5 space-y-5">
+                <div>
+                  <p class="text-sm font-medium text-gray-900 dark:text-white">
+                    Backup before delete
+                  </p>
+                  <div class="mt-2 space-y-2 text-sm text-gray-700 dark:text-gray-300">
+                    <label class="flex items-center gap-2">
+                      <input type="radio" name="backup_mode" value="none" checked />
+                      <span>No backup</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <input type="radio" name="backup_mode" value="partial" />
+                      <span>Partial backup (files + hostctl metadata)</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <input type="radio" name="backup_mode" value="full" />
+                      <span>Full backup (databases + files + mail + hostctl metadata)</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="block text-sm font-medium text-gray-900 dark:text-white mb-2">
+                    Backup destination
+                  </label>
+                  <select
+                    name="backup_destination"
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm"
+                  >
+                    <option value="local" selected={@delete_modal.backup_destination == "local"}>
+                      Local panel storage
+                    </option>
+                    <option value="s3" selected={@delete_modal.backup_destination == "s3"}>
+                      S3 endpoint (configured in panel)
+                    </option>
+                    <option value="both" selected={@delete_modal.backup_destination == "both"}>
+                      Both local and S3
+                    </option>
+                  </select>
+                </div>
+
+                <div>
+                  <label class="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                    <input type="checkbox" name="purge_files" value="true" class="mt-0.5" />
+                    <span>
+                      Also purge domain files and mail content from disk after successful backup.
+                    </span>
+                  </label>
+                </div>
+
+                <div>
+                  <.input
+                    name="domain_confirmation"
+                    type="text"
+                    label={"Type #{@delete_modal.domain.name} to confirm"}
+                    value=""
+                    placeholder={@delete_modal.domain.name}
+                    required
+                  />
+                </div>
+
+                <div class="flex items-center justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    phx-click="cancel_delete"
+                    class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-sm font-medium text-white"
+                  >
+                    Confirm delete
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        <% end %>
       </div>
     </Layouts.app>
     """
   end
+
+  defp delete_target(socket, id) do
+    scope = socket.assigns.current_scope
+
+    domain =
+      if socket.assigns.is_admin? do
+        Hosting.get_domain_for_admin!(id)
+      else
+        Hosting.get_domain!(scope, id)
+      end
+
+    domain_scope =
+      if socket.assigns.is_admin? && domain.user_id != scope.user.id do
+        Scope.for_user(domain.user)
+      else
+        scope
+      end
+
+    {domain, domain_scope}
+  end
+
+  defp backup_destination_to_atom("local"), do: :local
+  defp backup_destination_to_atom("s3"), do: :s3
+  defp backup_destination_to_atom("both"), do: :both
+  defp backup_destination_to_atom(_), do: :local
+
+  defp delete_error_message({:backup_failed, reason}), do: to_string(reason)
+  defp delete_error_message({:system_cleanup_failed, reason}), do: inspect(reason)
+  defp delete_error_message(reason), do: inspect(reason)
 
   defp format_mb(mb) when is_integer(mb) do
     cond do
