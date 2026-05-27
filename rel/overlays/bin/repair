@@ -202,6 +202,28 @@ if [[ -f "$SERVICE_FILE" ]]; then
     ok "PrivateTmp=true"
   fi
 
+  # Ensure service has access to nginx logs (typically root:adm 640)
+  if grep -q '^SupplementaryGroups=' "$SERVICE_FILE"; then
+    current_sg="$(grep '^SupplementaryGroups=' "$SERVICE_FILE" | head -1 | cut -d= -f2-)"
+
+    if echo " $current_sg " | grep -qw 'adm'; then
+      ok "SupplementaryGroups includes adm"
+    else
+      new_sg="$(echo "$current_sg adm" | xargs)"
+      sed -i 's|^SupplementaryGroups=.*|SupplementaryGroups='"$new_sg"'|' "$SERVICE_FILE"
+      fix "SupplementaryGroups → added adm"
+      FIXED=$((FIXED + 1))
+    fi
+  else
+    if grep -q '^Group=' "$SERVICE_FILE"; then
+      sed -i '/^Group=/a SupplementaryGroups=adm' "$SERVICE_FILE"
+      fix "SupplementaryGroups → set to adm"
+      FIXED=$((FIXED + 1))
+    else
+      err "Could not locate Group= line in $SERVICE_FILE to add SupplementaryGroups"
+    fi
+  fi
+
   # Ensure ExecStartPre creates /run/sudo/ts (needed for sudo under ProtectSystem=strict)
   if grep -q 'ExecStartPre=.*mkdir.*run/sudo' "$SERVICE_FILE"; then
     ok "ExecStartPre creates /run/sudo/ts"

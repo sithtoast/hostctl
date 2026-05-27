@@ -129,6 +129,14 @@ defmodule Hostctl.Metrics.Collector do
       {:error, :enoent} ->
         0
 
+      {:error, :eacces} ->
+        Logger.warning(
+          "Bandwidth collection skipped for #{log_path}: permission denied " <>
+            "(ensure the hostctl service has SupplementaryGroups=adm and restart it)"
+        )
+
+        0
+
       {:error, reason} ->
         Logger.warning(
           "Bandwidth collection skipped for #{log_path}: #{:file.format_error(reason)}"
