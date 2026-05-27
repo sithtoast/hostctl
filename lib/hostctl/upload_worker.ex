@@ -501,8 +501,15 @@ defmodule Hostctl.UploadWorker do
             {:error, "sshpass not found"}
 
           sshpass ->
-            {:ok, "#{sshpass} -e", ["-o", "StrictHostKeyChecking=accept-new"],
-             [{"SSHPASS", password}]}
+            {:ok, "#{sshpass} -e",
+             [
+               "-o",
+               "StrictHostKeyChecking=accept-new",
+               "-o",
+               "ServerAliveInterval=60",
+               "-o",
+               "ServerAliveCountMax=10"
+             ], [{"SSHPASS", password}]}
         end
 
       _ ->
@@ -516,6 +523,10 @@ defmodule Hostctl.UploadWorker do
            "BatchMode=yes",
            "-o",
            "StrictHostKeyChecking=accept-new",
+           "-o",
+           "ServerAliveInterval=60",
+           "-o",
+           "ServerAliveCountMax=10",
            "-i",
            key_path
          ], []}
@@ -563,13 +574,6 @@ defmodule Hostctl.UploadWorker do
         fn file_path ->
           relative = Path.relative_to(file_path, job.source_path)
           key = s3_key(job, relative)
-
-          # Show which file is being processed (approximate – concurrent tasks
-          # may overwrite each other, which is fine for a progress indicator)
-          {:ok, progress_job} =
-            Hosting.update_upload_job(job, %{current_file: relative})
-
-          broadcast_progress(progress_job)
 
           result =
             case S3Client.put_object(
