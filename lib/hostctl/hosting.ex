@@ -874,6 +874,33 @@ defmodule Hostctl.Hosting do
     DbUser.changeset(db_user, attrs)
   end
 
+  def change_db_user_access(%DbUser{} = db_user, attrs \\ %{}) do
+    DbUser.access_changeset(db_user, attrs)
+  end
+
+  def update_db_user(%DbUser{} = db_user, %Database{} = database, attrs) do
+    raw_password = attrs["password"] || attrs[:password]
+    changeset = DbUser.access_changeset(db_user, attrs)
+    new_access_host = Ecto.Changeset.get_field(changeset, :access_host)
+
+    if changeset.valid? do
+      case DatabaseServer.update_user_access(db_user, database, raw_password, new_access_host) do
+        :ok ->
+          Repo.update(changeset)
+
+        {:error, reason} ->
+          {:error,
+           Ecto.Changeset.add_error(
+             changeset,
+             :base,
+             db_server_error_message(reason, database.db_type)
+           )}
+      end
+    else
+      {:error, changeset}
+    end
+  end
+
   defp db_server_error_message({:connection_failed, reason}, "mysql") do
     "Could not connect to MySQL server: #{Exception.message(reason)}. " <>
       "Ensure MySQL/MariaDB is running and MYSQL_ROOT_URL is configured correctly."

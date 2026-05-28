@@ -916,7 +916,11 @@ defmodule Hostctl.Backup.Runner do
             status: d.status,
             db_users:
               Enum.map(d.db_users, fn u ->
-                %{username: u.username, hashed_password: u.hashed_password}
+                %{
+                  username: u.username,
+                  hashed_password: u.hashed_password,
+                  access_host: u.access_host
+                }
               end)
           }
         end),

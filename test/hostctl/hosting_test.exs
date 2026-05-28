@@ -2,8 +2,25 @@ defmodule Hostctl.HostingTest do
   use Hostctl.DataCase
 
   alias Hostctl.Hosting
+  alias Hostctl.Hosting.DbUser
 
   import Hostctl.AccountsFixtures
+
+  defp create_database_fixture(scope, attrs) do
+    {:ok, domain} =
+      Hosting.create_domain(scope, %{
+        name: attrs[:domain_name] || "db-example.com",
+        apply_dns_template: false
+      })
+
+    {:ok, database} =
+      Hosting.create_database(domain, %{
+        name: attrs[:database_name] || "app_db",
+        db_type: attrs[:db_type] || "mysql"
+      })
+
+    database
+  end
 
   describe "import_cloudflare_zone_records/2" do
     test "imports supported Cloudflare records into the local zone" do
@@ -153,6 +170,106 @@ defmodule Hostctl.HostingTest do
                })
 
       assert %{path: ["has already been taken"]} = errors_on(changeset)
+    end
+  end
+
+  describe "database users" do
+    test "defaults mysql users to localhost-only access" do
+      scope = user_scope_fixture()
+
+      database =
+        create_database_fixture(scope, domain_name: "db-local.test", database_name: "local_db")
+
+      assert {:ok, db_user} =
+               Hosting.create_db_user(database, %{
+                 username: "local_user",
+                 password: "supersecret1"
+               })
+
+      assert db_user.access_host == "localhost"
+    end
+
+    test "stores a specific remote mysql host when requested" do
+      scope = user_scope_fixture()
+
+      database =
+        create_database_fixture(scope, domain_name: "db-remote.test", database_name: "remote_db")
+
+      assert {:ok, db_user} =
+               Hosting.create_db_user(database, %{
+                 username: "remote_user",
+                 password: "supersecret1",
+                 access_mode: "remote",
+                 access_host: "198.51.100.25"
+               })
+
+      assert db_user.access_host == "198.51.100.25"
+    end
+
+    test "rejects wildcard remote mysql access hosts" do
+      changeset =
+        DbUser.changeset(%DbUser{}, %{
+          username: "remote_user",
+          password: "supersecret1",
+          access_mode: "remote",
+          access_host: "%"
+        })
+
+      refute changeset.valid?
+      assert "must be a valid IP address or hostname" in errors_on(changeset).access_host
+    end
+
+    test "updates mysql user to a specific remote host" do
+      scope = user_scope_fixture()
+
+      database =
+        create_database_fixture(scope,
+          domain_name: "db-edit-host.test",
+          database_name: "edit_host_db"
+        )
+
+      assert {:ok, db_user} =
+               Hosting.create_db_user(database, %{
+                 username: "edit_user",
+                 password: "supersecret1"
+               })
+
+      assert {:ok, updated_user} =
+               Hosting.update_db_user(db_user, database, %{
+                 access_mode: "remote",
+                 access_host: "db-client.example.com",
+                 password: "supersecret2"
+               })
+
+      assert updated_user.access_host == "db-client.example.com"
+      assert updated_user.hashed_password != db_user.hashed_password
+    end
+
+    test "updates mysql user back to localhost-only access" do
+      scope = user_scope_fixture()
+
+      database =
+        create_database_fixture(
+          scope,
+          domain_name: "db-edit-local.test",
+          database_name: "edit_local_db"
+        )
+
+      assert {:ok, db_user} =
+               Hosting.create_db_user(database, %{
+                 username: "edit_local_user",
+                 password: "supersecret1",
+                 access_mode: "remote",
+                 access_host: "198.51.100.20"
+               })
+
+      assert {:ok, updated_user} =
+               Hosting.update_db_user(db_user, database, %{
+                 access_mode: "localhost",
+                 password: "supersecret2"
+               })
+
+      assert updated_user.access_host == "localhost"
     end
   end
 end

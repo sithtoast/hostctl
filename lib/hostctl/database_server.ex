@@ -133,7 +133,7 @@ defmodule Hostctl.DatabaseServer do
   """
   def create_user(%DbUser{} = db_user, %Database{db_type: "mysql"} = database, raw_password) do
     if enabled?() do
-      case do_create_user(db_user.username, raw_password, database.name) do
+      case do_create_user(db_user.username, raw_password, database.name, db_user.access_host) do
         :ok ->
           Logger.info(
             "[DatabaseServer] Created MySQL user #{db_user.username} for database #{database.name}"
@@ -182,7 +182,7 @@ defmodule Hostctl.DatabaseServer do
   """
   def drop_user(%DbUser{} = db_user, %Database{db_type: "mysql"}) do
     if enabled?() do
-      case do_drop_user(db_user.username) do
+      case do_drop_user(db_user.username, db_user.access_host) do
         :ok ->
           Logger.info("[DatabaseServer] Dropped MySQL user #{db_user.username}")
           :ok
@@ -225,7 +225,7 @@ defmodule Hostctl.DatabaseServer do
   """
   def update_user_password(%DbUser{} = db_user, %Database{db_type: "mysql"}, raw_password) do
     if enabled?() do
-      case do_update_password(db_user.username, raw_password) do
+      case do_update_password(db_user.username, raw_password, db_user.access_host) do
         :ok ->
           Logger.info("[DatabaseServer] Updated password for MySQL user #{db_user.username}")
           :ok
@@ -263,6 +263,71 @@ defmodule Hostctl.DatabaseServer do
 
   def update_user_password(%DbUser{}, %Database{}, _raw_password), do: :ok
 
+  @doc """
+  Updates a DB user's access host configuration and password.
+
+  For MySQL, this always keeps localhost access and optionally provisions
+  a specific remote host account.
+  """
+  def update_user_access(
+        %DbUser{} = db_user,
+        %Database{db_type: "mysql"} = database,
+        raw_password,
+        new_access_host
+      ) do
+    if enabled?() do
+      case do_update_user_access(
+             db_user.username,
+             raw_password,
+             database.name,
+             db_user.access_host,
+             new_access_host
+           ) do
+        :ok ->
+          Logger.info(
+            "[DatabaseServer] Updated MySQL user #{db_user.username} access for database #{database.name}"
+          )
+
+          :ok
+
+        {:error, reason} ->
+          Logger.error(
+            "[DatabaseServer] Failed to update MySQL user #{db_user.username} access: #{inspect(reason)}"
+          )
+
+          {:error, reason}
+      end
+    else
+      :ok
+    end
+  end
+
+  def update_user_access(
+        %DbUser{} = db_user,
+        %Database{db_type: "postgresql"},
+        raw_password,
+        _new_access_host
+      ) do
+    if pg_enabled?() do
+      case pg_update_password(db_user.username, raw_password) do
+        :ok ->
+          Logger.info("[DatabaseServer] Updated password for PostgreSQL user #{db_user.username}")
+          :ok
+
+        {:error, reason} ->
+          Logger.error(
+            "[DatabaseServer] Failed to update password for PostgreSQL user #{db_user.username}: #{inspect(reason)}"
+          )
+
+          {:error, reason}
+      end
+    else
+      :ok
+    end
+  end
+
+  def update_user_access(%DbUser{}, %Database{}, _raw_password, _new_access_host), do: :ok
+
   # ---------------------------------------------------------------------------
   # Private — MySQL operations
   # ---------------------------------------------------------------------------
@@ -283,11 +348,12 @@ defmodule Hostctl.DatabaseServer do
     end)
   end
 
-  defp do_create_user(username, password, db_name) do
+  defp do_create_user(username, password, db_name, access_host) do
     # Username is validated to be alphanumeric + underscores only (see DbUser.changeset),
     # so interpolation is safe. MariaDB does not accept ? placeholders in DDL statements
     # (CREATE USER / IDENTIFIED BY), so we interpolate the escaped password directly.
     esc_pw = escape_string(password)
+    remote_host = remote_mysql_host(access_host)
 
     with_connection(fn conn ->
       with :ok <-
@@ -298,24 +364,21 @@ defmodule Hostctl.DatabaseServer do
            :ok <-
              query(
                conn,
-               "CREATE USER IF NOT EXISTS '#{username}'@'%' IDENTIFIED BY '#{esc_pw}'"
-             ),
-           :ok <-
-             query(
-               conn,
                "GRANT ALL PRIVILEGES ON `#{db_name}`.* TO '#{username}'@'localhost'"
              ),
-           :ok <-
-             query(conn, "GRANT ALL PRIVILEGES ON `#{db_name}`.* TO '#{username}'@'%'"),
+           :ok <- maybe_create_remote_user(conn, username, esc_pw, db_name, remote_host),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
       end
     end)
   end
 
-  defp do_drop_user(username) do
+  defp do_drop_user(username, access_host) do
+    remote_host = remote_mysql_host(access_host)
+
     with_connection(fn conn ->
       with :ok <- query(conn, "DROP USER IF EXISTS '#{username}'@'localhost'"),
+           :ok <- maybe_drop_remote_user(conn, username, remote_host),
            :ok <- query(conn, "DROP USER IF EXISTS '#{username}'@'%'"),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
@@ -323,8 +386,9 @@ defmodule Hostctl.DatabaseServer do
     end)
   end
 
-  defp do_update_password(username, password) do
+  defp do_update_password(username, password, access_host) do
     esc_pw = escape_string(password)
+    remote_host = remote_mysql_host(access_host)
 
     with_connection(fn conn ->
       with :ok <-
@@ -332,12 +396,106 @@ defmodule Hostctl.DatabaseServer do
                conn,
                "ALTER USER '#{username}'@'localhost' IDENTIFIED BY '#{esc_pw}'"
              ),
-           :ok <- query(conn, "ALTER USER '#{username}'@'%' IDENTIFIED BY '#{esc_pw}'"),
+           :ok <- maybe_update_remote_user_password(conn, username, esc_pw, remote_host),
            :ok <- query(conn, "FLUSH PRIVILEGES") do
         :ok
       end
     end)
   end
+
+  defp do_update_user_access(username, password, db_name, old_access_host, new_access_host) do
+    esc_pw = escape_string(password)
+    old_remote_host = remote_mysql_host(old_access_host)
+    new_remote_host = remote_mysql_host(new_access_host)
+
+    with_connection(fn conn ->
+      with :ok <-
+             query(
+               conn,
+               "ALTER USER '#{username}'@'localhost' IDENTIFIED BY '#{esc_pw}'"
+             ),
+           :ok <-
+             sync_remote_mysql_user(
+               conn,
+               username,
+               esc_pw,
+               db_name,
+               old_remote_host,
+               new_remote_host
+             ),
+           :ok <- query(conn, "DROP USER IF EXISTS '#{username}'@'%'"),
+           :ok <- query(conn, "FLUSH PRIVILEGES") do
+        :ok
+      end
+    end)
+  end
+
+  defp sync_remote_mysql_user(_conn, _username, _esc_pw, _db_name, nil, nil), do: :ok
+
+  defp sync_remote_mysql_user(conn, username, _esc_pw, _db_name, old_remote_host, nil) do
+    maybe_drop_remote_user(conn, username, old_remote_host)
+  end
+
+  defp sync_remote_mysql_user(conn, username, esc_pw, db_name, nil, new_remote_host) do
+    maybe_create_remote_user(conn, username, esc_pw, db_name, new_remote_host)
+  end
+
+  defp sync_remote_mysql_user(
+         conn,
+         username,
+         esc_pw,
+         _db_name,
+         old_remote_host,
+         new_remote_host
+       )
+       when old_remote_host == new_remote_host do
+    maybe_update_remote_user_password(conn, username, esc_pw, old_remote_host)
+  end
+
+  defp sync_remote_mysql_user(conn, username, esc_pw, db_name, old_remote_host, new_remote_host) do
+    with :ok <- maybe_drop_remote_user(conn, username, old_remote_host),
+         :ok <- maybe_create_remote_user(conn, username, esc_pw, db_name, new_remote_host) do
+      :ok
+    end
+  end
+
+  defp maybe_create_remote_user(_conn, _username, _esc_pw, _db_name, nil), do: :ok
+
+  defp maybe_create_remote_user(conn, username, esc_pw, db_name, remote_host) do
+    esc_host = escape_string(remote_host)
+
+    with :ok <-
+           query(
+             conn,
+             "CREATE USER IF NOT EXISTS '#{username}'@'#{esc_host}' IDENTIFIED BY '#{esc_pw}'"
+           ),
+         :ok <-
+           query(
+             conn,
+             "GRANT ALL PRIVILEGES ON `#{db_name}`.* TO '#{username}'@'#{esc_host}'"
+           ) do
+      :ok
+    end
+  end
+
+  defp maybe_drop_remote_user(_conn, _username, nil), do: :ok
+
+  defp maybe_drop_remote_user(conn, username, remote_host) do
+    esc_host = escape_string(remote_host)
+    query(conn, "DROP USER IF EXISTS '#{username}'@'#{esc_host}'")
+  end
+
+  defp maybe_update_remote_user_password(_conn, _username, _esc_pw, nil), do: :ok
+
+  defp maybe_update_remote_user_password(conn, username, esc_pw, remote_host) do
+    esc_host = escape_string(remote_host)
+    query(conn, "ALTER USER '#{username}'@'#{esc_host}' IDENTIFIED BY '#{esc_pw}'")
+  end
+
+  defp remote_mysql_host(nil), do: nil
+  defp remote_mysql_host(""), do: nil
+  defp remote_mysql_host("localhost"), do: nil
+  defp remote_mysql_host(host), do: host
 
   defp with_connection(fun) do
     opts = [

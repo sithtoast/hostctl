@@ -19,6 +19,8 @@ defmodule HostctlWeb.DatabaseLive.Index do
      |> assign(:expanded_db, nil)
      |> assign(:db_users, [])
      |> assign(:db_user_form, nil)
+     |> assign(:editing_db_user_id, nil)
+     |> assign(:edit_db_user_form, nil)
      |> assign(:dbs_empty?, all_databases == [])
      |> assign(:db_admin_links, db_admin_links(socket.assigns.current_scope))
      |> assign_db_form()
@@ -98,6 +100,8 @@ defmodule HostctlWeb.DatabaseLive.Index do
        |> assign(:expanded_db, nil)
        |> assign(:db_users, [])
        |> assign(:db_user_form, nil)
+       |> assign(:editing_db_user_id, nil)
+       |> assign(:edit_db_user_form, nil)
        |> stream_insert(:databases, prev_db)}
     else
       databases = Enum.flat_map(socket.assigns.domains, &Hosting.list_databases/1)
@@ -114,6 +118,8 @@ defmodule HostctlWeb.DatabaseLive.Index do
             |> assign(:expanded_db, db)
             |> assign(:db_users, db_users)
             |> assign_db_user_form()
+            |> assign(:editing_db_user_id, nil)
+            |> assign(:edit_db_user_form, nil)
             |> stream_insert(:databases, db)
 
           socket =
@@ -162,7 +168,69 @@ defmodule HostctlWeb.DatabaseLive.Index do
     {:noreply,
      socket
      |> assign(:db_users, db_users)
+     |> assign(:editing_db_user_id, nil)
+     |> assign(:edit_db_user_form, nil)
      |> put_flash(:info, "User deleted.")}
+  end
+
+  def handle_event("start_edit_db_user", %{"id" => id}, socket) do
+    db_user = find_db_user(socket.assigns.db_users, id)
+
+    if db_user do
+      {:noreply,
+       socket
+       |> assign(:editing_db_user_id, db_user.id)
+       |> assign(:edit_db_user_form, to_form(Hosting.change_db_user_access(db_user)))}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("cancel_edit_db_user", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:editing_db_user_id, nil)
+     |> assign(:edit_db_user_form, nil)}
+  end
+
+  def handle_event("validate_edit_db_user", %{"db_user" => params}, socket) do
+    case find_db_user(socket.assigns.db_users, socket.assigns.editing_db_user_id) do
+      nil ->
+        {:noreply, socket}
+
+      db_user ->
+        form =
+          db_user
+          |> Hosting.change_db_user_access(params)
+          |> to_form(action: :validate)
+
+        {:noreply, assign(socket, :edit_db_user_form, form)}
+    end
+  end
+
+  def handle_event("save_edit_db_user", %{"db_user" => params}, socket) do
+    database = socket.assigns.expanded_db
+
+    case find_db_user(socket.assigns.db_users, socket.assigns.editing_db_user_id) do
+      nil ->
+        {:noreply, socket}
+
+      db_user ->
+        case Hosting.update_db_user(db_user, database, params) do
+          {:ok, _updated_user} ->
+            db_users = Hosting.list_db_users(database)
+
+            {:noreply,
+             socket
+             |> assign(:db_users, db_users)
+             |> assign(:editing_db_user_id, nil)
+             |> assign(:edit_db_user_form, nil)
+             |> put_flash(:info, "User access updated.")}
+
+          {:error, changeset} ->
+            {:noreply, assign(socket, :edit_db_user_form, to_form(changeset))}
+        end
+    end
   end
 
   defp assign_db_form(socket) do
@@ -172,6 +240,54 @@ defmodule HostctlWeb.DatabaseLive.Index do
   defp assign_db_user_form(socket) do
     assign(socket, :db_user_form, to_form(Hosting.change_db_user(%DbUser{})))
   end
+
+  defp db_user_access_mode(form) do
+    form[:access_mode].value || "localhost"
+  end
+
+  defp pending_db_user_access_label(form) do
+    case db_user_access_mode(form) do
+      "remote" ->
+        access_host =
+          form[:access_host].value
+          |> to_string()
+          |> String.trim()
+
+        if access_host == "" do
+          "localhost + remote host (not set yet)"
+        else
+          "localhost + #{String.downcase(access_host)}"
+        end
+
+      _ ->
+        "localhost only"
+    end
+  end
+
+  defp current_db_user_access_label(db_users, editing_db_user_id, database) do
+    case find_db_user(db_users, editing_db_user_id) do
+      nil -> "localhost only"
+      db_user -> db_user_access_label(db_user, database)
+    end
+  end
+
+  defp find_db_user(db_users, id) when is_binary(id) do
+    Enum.find(db_users, &(to_string(&1.id) == id))
+  end
+
+  defp find_db_user(db_users, id) when is_integer(id) do
+    Enum.find(db_users, &(&1.id == id))
+  end
+
+  defp find_db_user(_db_users, _id), do: nil
+
+  defp db_user_access_label(%DbUser{access_host: access_host}, %Database{db_type: "mysql"})
+       when access_host not in [nil, "", "localhost"] do
+    "localhost + #{access_host}"
+  end
+
+  defp db_user_access_label(%DbUser{}, %Database{db_type: "mysql"}), do: "localhost only"
+  defp db_user_access_label(%DbUser{}, %Database{}), do: nil
 
   defp get_first_domain_id(socket) do
     case socket.assigns.domains do
@@ -465,7 +581,8 @@ defmodule HostctlWeb.DatabaseLive.Index do
                     </h2>
                     <p class="text-xs text-gray-500 dark:text-gray-400">
                       {if @expanded_db.db_type == "mysql",
-                        do: "MySQL users are provisioned on the server automatically.",
+                        do:
+                          "MySQL users always get localhost access. Remote access is opt-in per host.",
                         else: "PostgreSQL users are provisioned on the server automatically."}
                     </p>
                   </div>
@@ -503,28 +620,126 @@ defmodule HostctlWeb.DatabaseLive.Index do
                         <td class="py-3">
                           <div class="flex items-center gap-2">
                             <.icon name="hero-user" class="w-4 h-4 text-gray-400 shrink-0" />
-                            <span class="font-mono text-sm text-gray-900 dark:text-white">
-                              {user.username}
-                            </span>
+                            <div>
+                              <div class="font-mono text-sm text-gray-900 dark:text-white">
+                                {user.username}
+                              </div>
+                              <p
+                                :if={db_user_access_label(user, @expanded_db)}
+                                class="text-xs text-gray-500 dark:text-gray-400"
+                              >
+                                Access: {db_user_access_label(user, @expanded_db)}
+                              </p>
+                            </div>
                           </div>
                         </td>
                         <td class="py-3 text-sm text-gray-500 dark:text-gray-400">
                           {Calendar.strftime(user.inserted_at, "%b %d, %Y")}
                         </td>
                         <td class="py-3 text-right">
-                          <button
-                            phx-click="delete_db_user"
-                            phx-value-id={user.id}
-                            data-confirm={"Delete user #{user.username}? This cannot be undone."}
-                            class="text-xs font-medium text-red-500 hover:text-red-600 transition-colors"
-                          >
-                            Delete
-                          </button>
+                          <div class="inline-flex items-center gap-3">
+                            <button
+                              :if={@expanded_db.db_type == "mysql"}
+                              phx-click="start_edit_db_user"
+                              phx-value-id={user.id}
+                              class="text-xs font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 dark:hover:text-indigo-300 transition-colors"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              phx-click="delete_db_user"
+                              phx-value-id={user.id}
+                              data-confirm={"Delete user #{user.username}? This cannot be undone."}
+                              class="text-xs font-medium text-red-500 hover:text-red-600 transition-colors"
+                            >
+                              Delete
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     </tbody>
                   </table>
                 <% end %>
+              </div>
+
+              <div
+                :if={(@expanded_db.db_type == "mysql" and @editing_db_user_id) && @edit_db_user_form}
+                class="px-6 pb-4"
+              >
+                <div class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 bg-white dark:bg-gray-900">
+                  <h3 class="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider mb-3">
+                    Edit User Access
+                  </h3>
+                  <.form
+                    for={@edit_db_user_form}
+                    id="db-user-edit-form"
+                    phx-change="validate_edit_db_user"
+                    phx-submit="save_edit_db_user"
+                    class="space-y-3"
+                  >
+                    <%= if error = @edit_db_user_form.errors[:base] do %>
+                      <div class="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-3 text-sm text-red-700 dark:text-red-400">
+                        {elem(error, 0)}
+                      </div>
+                    <% end %>
+                    <div class="rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/80 dark:bg-indigo-900/20 p-3 text-xs text-indigo-900 dark:text-indigo-200">
+                      <p class="font-medium">Pending Access Update</p>
+                      <p class="mt-1">
+                        Current: {current_db_user_access_label(
+                          @db_users,
+                          @editing_db_user_id,
+                          @expanded_db
+                        )}
+                      </p>
+                      <p>
+                        After save: {pending_db_user_access_label(@edit_db_user_form)}
+                      </p>
+                    </div>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                      <.input
+                        field={@edit_db_user_form[:access_mode]}
+                        type="select"
+                        label="Access"
+                        options={[
+                          {"Localhost only", "localhost"},
+                          {"Allow specific remote host", "remote"}
+                        ]}
+                      />
+                      <div :if={db_user_access_mode(@edit_db_user_form) == "remote"}>
+                        <.input
+                          field={@edit_db_user_form[:access_host]}
+                          type="text"
+                          label="Allowed IP or Hostname"
+                          placeholder="198.51.100.25 or app.example.com"
+                        />
+                      </div>
+                      <.input
+                        field={@edit_db_user_form[:password]}
+                        type="password"
+                        label="New Password"
+                        placeholder="Required to apply changes"
+                      />
+                    </div>
+                    <div class="flex items-center justify-end gap-3">
+                      <button
+                        type="button"
+                        phx-click="cancel_edit_db_user"
+                        class="px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+                      >
+                        Save Changes
+                      </button>
+                    </div>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      Updating access also updates this MySQL user's password.
+                    </p>
+                  </.form>
+                </div>
               </div>
 
               <%!-- Add user form --%>
@@ -558,6 +773,31 @@ defmodule HostctlWeb.DatabaseLive.Index do
                       label="Password"
                       placeholder="Min. 8 characters"
                     />
+                    <%= if @expanded_db.db_type == "mysql" do %>
+                      <.input
+                        field={@db_user_form[:access_mode]}
+                        type="select"
+                        label="Access"
+                        options={[
+                          {"Localhost only", "localhost"},
+                          {"Allow specific remote host", "remote"}
+                        ]}
+                      />
+                    <% end %>
+                    <div
+                      :if={
+                        @expanded_db.db_type == "mysql" and
+                          db_user_access_mode(@db_user_form) == "remote"
+                      }
+                      class="sm:col-span-2"
+                    >
+                      <.input
+                        field={@db_user_form[:access_host]}
+                        type="text"
+                        label="Allowed IP or Hostname"
+                        placeholder="198.51.100.25 or app.example.com"
+                      />
+                    </div>
                     <div class="flex items-end">
                       <button
                         type="submit"
@@ -567,6 +807,12 @@ defmodule HostctlWeb.DatabaseLive.Index do
                       </button>
                     </div>
                   </div>
+                  <p
+                    :if={@expanded_db.db_type == "mysql"}
+                    class="text-xs text-gray-500 dark:text-gray-400"
+                  >
+                    Localhost access is always enabled. Remote access requires an explicit IP or hostname.
+                  </p>
                 </.form>
               </div>
             </div>
