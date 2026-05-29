@@ -1,6 +1,8 @@
 defmodule HostctlWeb.DomainLive.Show do
   use HostctlWeb, :live_view
 
+  require Logger
+
   alias Hostctl.Hosting
   alias Hostctl.Hosting.{SslCertificate, Subdomain, DomainS3Backend}
   alias Hostctl.Accounts.Scope
@@ -8,7 +10,7 @@ defmodule HostctlWeb.DomainLive.Show do
   alias Hostctl.WebServer
   alias Hostctl.MailServer
 
-  def mount(%{"id" => id}, _session, socket) do
+  def mount(%{"id" => id} = params, _session, socket) do
     scope = socket.assigns.current_scope
     is_admin = scope.user.role == "admin"
 
@@ -56,6 +58,8 @@ defmodule HostctlWeb.DomainLive.Show do
         []
       end
 
+    section = section_from_param(params["section"])
+
     {:ok,
      socket
      |> stream(:ssl_log_lines, existing_log_lines)
@@ -64,7 +68,7 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign(:domain_scope, domain_scope)
      |> assign(:domain, domain)
      |> assign(:ssl_cert, ssl_cert)
-     |> assign(:active_section, :overview)
+     |> assign(:active_section, section)
      |> stream(:subdomains, subdomains)
      |> assign(:subdomain_names, Enum.map(subdomains, & &1.name))
      |> stream(:cron_jobs, cron_jobs)
@@ -84,8 +88,10 @@ defmodule HostctlWeb.DomainLive.Show do
      )}
   end
 
-  def handle_params(_params, _url, socket) do
-    {:noreply, socket}
+  def handle_params(params, _url, socket) do
+    section = section_from_param(params["section"])
+
+    {:noreply, refresh_section_streams(socket, section)}
   end
 
   def handle_info({:ssl_cert_updated, cert}, socket) do
@@ -120,29 +126,19 @@ defmodule HostctlWeb.DomainLive.Show do
      |> stream_insert(:ssl_log_lines, entry)}
   end
 
+  def handle_info(message, socket) do
+    Logger.debug("[DomainLive.Show] Ignoring unexpected message: #{inspect(message)}")
+    {:noreply, socket}
+  end
+
   def handle_event("set_section", %{"section" => section}, socket) do
-    section = String.to_existing_atom(section)
     domain = socket.assigns.domain
+    section = section_from_param(section)
 
-    # Re-stream collections when their tab becomes visible, because
-    # phx-update="stream" containers that weren't in the DOM at mount
-    # time will have lost their initial data.
-    socket =
-      case section do
-        :subdomains ->
-          stream(socket, :subdomains, Hosting.list_subdomains(domain), reset: true)
-
-        :cron ->
-          stream(socket, :cron_jobs, Hosting.list_cron_jobs(domain), reset: true)
-
-        :smarthost ->
-          socket
-
-        _ ->
-          socket
-      end
-
-    {:noreply, assign(socket, :active_section, section)}
+    {:noreply,
+     push_patch(socket,
+       to: ~p"/domains/#{domain.id}?section=#{Atom.to_string(section)}"
+     )}
   end
 
   def handle_event("sync_nginx", _params, socket) do
@@ -616,6 +612,33 @@ defmodule HostctlWeb.DomainLive.Show do
 
   defp normalize_ssl_log_line(line) when is_binary(line), do: String.replace_invalid(line, "?")
   defp normalize_ssl_log_line(line), do: inspect(line)
+
+  defp section_from_param("overview"), do: :overview
+  defp section_from_param("subdomains"), do: :subdomains
+  defp section_from_param("dns"), do: :dns
+  defp section_from_param("ssl"), do: :ssl
+  defp section_from_param("cron"), do: :cron
+  defp section_from_param("smarthost"), do: :smarthost
+  defp section_from_param("s3"), do: :s3
+  defp section_from_param(_), do: :overview
+
+  defp refresh_section_streams(socket, section) do
+    domain = socket.assigns.domain
+
+    socket =
+      case section do
+        :subdomains ->
+          stream(socket, :subdomains, Hosting.list_subdomains(domain), reset: true)
+
+        :cron ->
+          stream(socket, :cron_jobs, Hosting.list_cron_jobs(domain), reset: true)
+
+        _ ->
+          socket
+      end
+
+    assign(socket, :active_section, section)
+  end
 
   def render(assigns) do
     ~H"""
