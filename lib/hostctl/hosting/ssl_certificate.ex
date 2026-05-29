@@ -12,6 +12,7 @@ defmodule Hostctl.Hosting.SslCertificate do
     field :status, :string, default: "pending"
     field :log, :string
     field :email, :string
+    field :covers_wildcard_subdomains, :boolean, default: false
 
     belongs_to :domain, Domain
 
@@ -20,7 +21,16 @@ defmodule Hostctl.Hosting.SslCertificate do
 
   def changeset(ssl_certificate, attrs) do
     ssl_certificate
-    |> cast(attrs, [:cert_type, :certificate, :private_key, :expires_at, :status, :log, :email])
+    |> cast(attrs, [
+      :cert_type,
+      :certificate,
+      :private_key,
+      :expires_at,
+      :status,
+      :log,
+      :email,
+      :covers_wildcard_subdomains
+    ])
     |> validate_required([:cert_type])
     |> validate_inclusion(:cert_type, ~w(lets_encrypt custom))
     |> validate_inclusion(:status, ~w(active pending expired))

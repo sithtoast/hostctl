@@ -60,6 +60,7 @@ defmodule Hostctl.WebServer.Nginx do
     doc_root = domain.document_root || "/var/www/#{domain.name}/httpdocs"
     php_socket = php_fpm_socket(domain.php_version)
     use_ssl = ssl_active?(domain, ssl_cert)
+    use_subdomain_ssl = use_ssl and wildcard_subdomains_enabled?(ssl_cert)
     allow_http_with_ssl = domain.allow_http_with_ssl == true
 
     # Partition enabled backends by scope.
@@ -80,6 +81,7 @@ defmodule Hostctl.WebServer.Nginx do
           whole_domain_backend,
           use_ssl,
           ssl_cert,
+          domain.name,
           allow_http_with_ssl
         )
       else
@@ -90,6 +92,7 @@ defmodule Hostctl.WebServer.Nginx do
           php_socket,
           use_ssl,
           ssl_cert,
+          domain.name,
           allow_http_with_ssl,
           proxies,
           domain_path_backends,
@@ -116,8 +119,9 @@ defmodule Hostctl.WebServer.Nginx do
             "#{sub.name}.#{domain.name}",
             "#{sub.name}.#{domain.name}",
             whole_sub_backend,
-            use_ssl,
+            use_subdomain_ssl,
             ssl_cert,
+            domain.name,
             allow_http_with_ssl
           )
         else
@@ -126,9 +130,10 @@ defmodule Hostctl.WebServer.Nginx do
             "#{sub.name}.#{domain.name}",
             sub_root,
             php_socket,
-            false,
-            nil,
-            false,
+            use_subdomain_ssl,
+            ssl_cert,
+            domain.name,
+            allow_http_with_ssl,
             [],
             path_backends_for_sub,
             sub.autoindex
@@ -148,8 +153,9 @@ defmodule Hostctl.WebServer.Nginx do
             "#{sub_name}.#{domain.name}",
             "#{sub_name}.#{domain.name}",
             whole_sub_backend,
-            use_ssl,
+            use_subdomain_ssl,
             ssl_cert,
+            domain.name,
             allow_http_with_ssl
           )
         else
@@ -162,9 +168,10 @@ defmodule Hostctl.WebServer.Nginx do
             "#{sub_name}.#{domain.name}",
             sub_root,
             php_socket,
-            false,
-            nil,
-            false,
+            use_subdomain_ssl,
+            ssl_cert,
+            domain.name,
+            allow_http_with_ssl,
             [],
             path_backends_for_sub,
             false
@@ -182,6 +189,7 @@ defmodule Hostctl.WebServer.Nginx do
          php_socket,
          false = _ssl,
          _cert,
+         _cert_name,
          _allow_http_with_ssl,
          proxies,
          s3_path_backends,
@@ -235,14 +243,14 @@ defmodule Hostctl.WebServer.Nginx do
          php_socket,
          true = _ssl,
          ssl_cert,
+         cert_name,
          allow_http_with_ssl,
          proxies,
          s3_path_backends,
          autoindex
        ) do
-    primary = server_names |> String.split(" ") |> hd()
-    ssl_cert_path = cert_path(ssl_cert, primary)
-    ssl_key_path = key_path(ssl_cert, primary)
+    ssl_cert_path = cert_path(ssl_cert, cert_name)
+    ssl_key_path = key_path(ssl_cert, cert_name)
     proxy_locations = proxy_location_blocks(proxies)
     s3_locations = s3_location_blocks(s3_path_backends)
     s3_error_handler = s3_path_error_handler(s3_path_backends)
@@ -434,6 +442,7 @@ defmodule Hostctl.WebServer.Nginx do
          %DomainS3Backend{} = backend,
          false = _ssl,
          _cert,
+         _cert_name,
          _allow_http_with_ssl
        ) do
     if use_phoenix_proxy?(backend) do
@@ -449,12 +458,27 @@ defmodule Hostctl.WebServer.Nginx do
          %DomainS3Backend{} = backend,
          true = _ssl,
          ssl_cert,
+         cert_name,
          allow_http_with_ssl
        ) do
     if use_phoenix_proxy?(backend) do
-      phoenix_proxy_block_ssl(log_name, server_names, backend, ssl_cert, allow_http_with_ssl)
+      phoenix_proxy_block_ssl(
+        log_name,
+        server_names,
+        backend,
+        ssl_cert,
+        cert_name,
+        allow_http_with_ssl
+      )
     else
-      s3_direct_block_ssl(log_name, server_names, backend, ssl_cert, allow_http_with_ssl)
+      s3_direct_block_ssl(
+        log_name,
+        server_names,
+        backend,
+        ssl_cert,
+        cert_name,
+        allow_http_with_ssl
+      )
     end
   end
 
@@ -503,10 +527,16 @@ defmodule Hostctl.WebServer.Nginx do
     """
   end
 
-  defp phoenix_proxy_block_ssl(log_name, server_names, backend, ssl_cert, allow_http_with_ssl) do
-    primary = server_names |> String.split(" ") |> hd()
-    ssl_cert_path = cert_path(ssl_cert, primary)
-    ssl_key_path = key_path(ssl_cert, primary)
+  defp phoenix_proxy_block_ssl(
+         log_name,
+         server_names,
+         backend,
+         ssl_cert,
+         cert_name,
+         allow_http_with_ssl
+       ) do
+    ssl_cert_path = cert_path(ssl_cert, cert_name)
+    ssl_key_path = key_path(ssl_cert, cert_name)
     upstream = phoenix_proxy_url(backend)
     token = s3_proxy_token()
 
@@ -624,10 +654,16 @@ defmodule Hostctl.WebServer.Nginx do
     """
   end
 
-  defp s3_direct_block_ssl(log_name, server_names, backend, ssl_cert, allow_http_with_ssl) do
-    primary = server_names |> String.split(" ") |> hd()
-    ssl_cert_path = cert_path(ssl_cert, primary)
-    ssl_key_path = key_path(ssl_cert, primary)
+  defp s3_direct_block_ssl(
+         log_name,
+         server_names,
+         backend,
+         ssl_cert,
+         cert_name,
+         allow_http_with_ssl
+       ) do
+    ssl_cert_path = cert_path(ssl_cert, cert_name)
+    ssl_key_path = key_path(ssl_cert, cert_name)
     upstream = s3_upstream_url(backend)
     upstream_host = s3_upstream_host(backend)
 
@@ -852,6 +888,9 @@ defmodule Hostctl.WebServer.Nginx do
 
   defp ssl_active?(%Domain{ssl_enabled: true}, %SslCertificate{status: "active"}), do: true
   defp ssl_active?(_, _), do: false
+
+  defp wildcard_subdomains_enabled?(%SslCertificate{covers_wildcard_subdomains: true}), do: true
+  defp wildcard_subdomains_enabled?(_), do: false
 
   defp cert_path(%SslCertificate{cert_type: "lets_encrypt"}, domain_name),
     do: Path.join(letsencrypt_dir(), "live/#{domain_name}/fullchain.pem")

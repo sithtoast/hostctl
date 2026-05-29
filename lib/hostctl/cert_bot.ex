@@ -84,6 +84,18 @@ defmodule Hostctl.CertBot do
     end
   end
 
+  defp do_provision(
+         %Domain{} = domain,
+         %SslCertificate{covers_wildcard_subdomains: true},
+         _setting
+       ) do
+    message =
+      "Wildcard certificates require DNS-01 validation through the configured DNS provider"
+
+    broadcast_log(domain.id, message)
+    {:error, :wildcard_requires_dns_challenge, message}
+  end
+
   defp do_provision(%Domain{} = domain, cert, _setting) do
     webroot = domain.document_root || "/var/www/#{domain.name}/public"
     broadcast_log(domain.id, "Using HTTP-01 webroot challenge")
@@ -108,7 +120,7 @@ defmodule Hostctl.CertBot do
       Path.join(le_dir, "logs")
     ]
 
-    domain_args = build_domain_args(domain_name, domain_id)
+    domain_args = build_domain_args(domain_name, domain_id, cert)
 
     args =
       ["certonly", "--non-interactive", "--agree-tos"] ++
@@ -258,7 +270,13 @@ defmodule Hostctl.CertBot do
   # Config helpers
   # ---------------------------------------------------------------------------
 
-  defp build_domain_args(domain_name, domain_id) do
+  defp build_domain_args(domain_name, _domain_id, %SslCertificate{
+         covers_wildcard_subdomains: true
+       }) do
+    ["-d", domain_name, "-d", "*.#{domain_name}"]
+  end
+
+  defp build_domain_args(domain_name, domain_id, _cert) do
     # Fetch subdomains to check if www is explicitly configured
     subdomains =
       try do

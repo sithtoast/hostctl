@@ -3,6 +3,7 @@ defmodule Hostctl.WebServer.NginxTest do
 
   alias Hostctl.Hosting.Domain
   alias Hostctl.Hosting.DomainS3Backend
+  alias Hostctl.Hosting.Subdomain
   alias Hostctl.Hosting.SslCertificate
   alias Hostctl.WebServer.Nginx
 
@@ -37,7 +38,11 @@ defmodule Hostctl.WebServer.NginxTest do
       Nginx.generate_config(
         %Domain{name: "example.com", ssl_enabled: true, allow_http_with_ssl: true},
         [],
-        %SslCertificate{status: "active", cert_type: "custom"},
+        %SslCertificate{
+          status: "active",
+          cert_type: "custom",
+          covers_wildcard_subdomains: true
+        },
         [],
         [
           %DomainS3Backend{
@@ -54,5 +59,35 @@ defmodule Hostctl.WebServer.NginxTest do
     assert config =~ "server_name static.example.com;"
     assert config =~ "listen 443 ssl http2;"
     assert config =~ "proxy_pass http://127.0.0.1:4000/_s3_proxy/4/;"
+    assert config =~ "ssl_certificate /etc/ssl/hostctl/example.com/fullchain.pem;"
+  end
+
+  test "emits ssl for filesystem subdomains when wildcard coverage is enabled" do
+    config =
+      Nginx.generate_config(
+        %Domain{name: "example.com", ssl_enabled: true, allow_http_with_ssl: false},
+        [%Subdomain{name: "blog", status: "active"}],
+        %SslCertificate{
+          status: "active",
+          cert_type: "custom",
+          covers_wildcard_subdomains: true
+        }
+      )
+
+    assert config =~ "server_name blog.example.com;"
+    assert length(Regex.scan(~r/listen 443 ssl http2;/, config)) == 2
+    assert config =~ "ssl_certificate /etc/ssl/hostctl/example.com/fullchain.pem;"
+  end
+
+  test "does not emit ssl for filesystem subdomains without wildcard coverage" do
+    config =
+      Nginx.generate_config(
+        %Domain{name: "example.com", ssl_enabled: true, allow_http_with_ssl: false},
+        [%Subdomain{name: "blog", status: "active"}],
+        %SslCertificate{status: "active", cert_type: "custom", covers_wildcard_subdomains: false}
+      )
+
+    assert config =~ "server_name blog.example.com;"
+    assert length(Regex.scan(~r/listen 443 ssl http2;/, config)) == 1
   end
 end

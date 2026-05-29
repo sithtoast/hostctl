@@ -942,7 +942,8 @@ defmodule Hostctl.Backup.Runner do
             private_key: ssl_cert.private_key,
             expires_at: if(ssl_cert.expires_at, do: DateTime.to_iso8601(ssl_cert.expires_at)),
             status: ssl_cert.status,
-            email: ssl_cert.email
+            email: ssl_cert.email,
+            covers_wildcard_subdomains: ssl_cert.covers_wildcard_subdomains
           }
         ),
       cron_jobs:

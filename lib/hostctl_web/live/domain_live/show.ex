@@ -192,6 +192,7 @@ defmodule HostctlWeb.DomainLive.Show do
     domain = socket.assigns.domain
     email = params["email"]
     allow_http_with_ssl = truthy_param?(request_params["allow_http_with_ssl"])
+    covers_wildcard_subdomains = truthy_param?(params["covers_wildcard_subdomains"])
 
     with {:ok, updated_domain} <-
            Hosting.update_domain(socket.assigns.domain_scope, domain, %{
@@ -201,7 +202,8 @@ defmodule HostctlWeb.DomainLive.Show do
            Hosting.create_ssl_certificate(updated_domain, %{
              cert_type: "lets_encrypt",
              status: "pending",
-             email: email
+             email: email,
+             covers_wildcard_subdomains: covers_wildcard_subdomains
            }) do
       {:noreply,
        socket
@@ -988,6 +990,11 @@ defmodule HostctlWeb.DomainLive.Show do
                         – issuing certificate, this may take a minute…
                       <% end %>
                     </p>
+                    <%= if @ssl_cert.covers_wildcard_subdomains do %>
+                      <p class="text-xs text-indigo-600 dark:text-indigo-400 mt-1">
+                        Wildcard coverage enabled for subdomains of {@domain.name}
+                      </p>
+                    <% end %>
                   </div>
                   <%= if @ssl_cert.status == "pending" do %>
                     <button
@@ -1109,6 +1116,18 @@ defmodule HostctlWeb.DomainLive.Show do
                         </span>
                       </span>
                     </label>
+                  </div>
+                  <div class="w-72 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 p-3 text-left">
+                    <.input
+                      field={@ssl_form[:covers_wildcard_subdomains]}
+                      type="checkbox"
+                      label="Use one wildcard certificate for all subdomains"
+                    />
+                    <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                      Requests <strong>{@domain.name}</strong>
+                      and <strong>*.{@domain.name}</strong>
+                      on the same certificate. This requires DNS-based validation.
+                    </p>
                   </div>
                   <button
                     type="submit"
