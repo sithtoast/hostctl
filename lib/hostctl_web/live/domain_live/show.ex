@@ -193,10 +193,15 @@ defmodule HostctlWeb.DomainLive.Show do
   def handle_event("toggle_allow_http_with_ssl", _params, socket) do
     domain = socket.assigns.domain
 
-    case Hosting.update_domain(socket.assigns.domain_scope, domain, %{
+    case Hosting.update_domain_no_sync(socket.assigns.domain_scope, domain, %{
            allow_http_with_ssl: !domain.allow_http_with_ssl
          }) do
       {:ok, updated} ->
+        _ =
+          Task.Supervisor.start_child(Hostctl.TaskSupervisor, fn ->
+            WebServer.sync_domain(updated)
+          end)
+
         message =
           if updated.allow_http_with_ssl do
             "HTTP will remain available alongside HTTPS."
