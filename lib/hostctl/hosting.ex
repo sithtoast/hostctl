@@ -986,7 +986,7 @@ defmodule Hostctl.Hosting do
             ]
             |> Enum.join("\n")
 
-          _ = update_ssl_certificate(cert, %{status: "pending", log: queued_log})
+          _ = update_ssl_certificate_no_sync(cert, %{status: "pending", log: queued_log})
 
           case Task.Supervisor.start_child(Hostctl.TaskSupervisor, fn ->
                  Logger.info(
@@ -1011,7 +1011,7 @@ defmodule Hostctl.Hosting do
                 ]
                 |> Enum.join("\n")
 
-              _ = update_ssl_certificate(cert, %{status: "pending", log: task_error_log})
+              _ = update_ssl_certificate_no_sync(cert, %{status: "pending", log: task_error_log})
 
               Logger.error(
                 "[SSLTRACE2] provisioning task start failed domain_id=#{domain.id} cert_id=#{cert.id} reason=#{inspect(reason)}"
@@ -1056,6 +1056,25 @@ defmodule Hostctl.Hosting do
         domain = Repo.get!(Domain, cert.domain_id)
         WebServer.sync_domain(domain)
 
+        Phoenix.PubSub.broadcast(
+          Hostctl.PubSub,
+          "domain:#{cert.domain_id}:ssl",
+          {:ssl_cert_updated, updated_cert}
+        )
+
+        result
+
+      error ->
+        error
+    end
+  end
+
+  defp update_ssl_certificate_no_sync(%SslCertificate{} = cert, attrs) do
+    cert
+    |> SslCertificate.changeset(attrs)
+    |> Repo.update()
+    |> case do
+      {:ok, updated_cert} = result ->
         Phoenix.PubSub.broadcast(
           Hostctl.PubSub,
           "domain:#{cert.domain_id}:ssl",
@@ -1115,13 +1134,13 @@ defmodule Hostctl.Hosting do
             "[SSLTRACE2] certbot provision failed domain_id=#{domain.id} cert_id=#{cert.id} reason=#{inspect(reason)}"
           )
 
-          update_ssl_certificate(cert, %{status: "pending", log: log})
+          update_ssl_certificate_no_sync(cert, %{status: "pending", log: log})
           Logger.error("[Hosting] SSL provisioning failed for #{domain.name}")
       end
     rescue
       e ->
         log = Exception.format(:error, e, __STACKTRACE__)
-        _ = update_ssl_certificate(cert, %{status: "pending", log: log})
+        _ = update_ssl_certificate_no_sync(cert, %{status: "pending", log: log})
 
         Logger.error(
           "[Hosting] SSL provisioning crashed for #{domain.name}: #{Exception.message(e)}"
@@ -1129,7 +1148,7 @@ defmodule Hostctl.Hosting do
     catch
       kind, reason ->
         log = "#{kind}: #{inspect(reason)}"
-        _ = update_ssl_certificate(cert, %{status: "pending", log: log})
+        _ = update_ssl_certificate_no_sync(cert, %{status: "pending", log: log})
         Logger.error("[Hosting] SSL provisioning crashed for #{domain.name}: #{log}")
     end
   end
