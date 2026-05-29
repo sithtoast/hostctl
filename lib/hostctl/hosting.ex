@@ -931,11 +931,25 @@ defmodule Hostctl.Hosting do
     SslCertificate.changeset(cert, attrs)
   end
 
-  def create_ssl_certificate(%Domain{} = domain, attrs) do
-    %SslCertificate{domain_id: domain.id}
-    |> SslCertificate.changeset(attrs)
-    |> Repo.insert()
-    |> case do
+  def create_ssl_certificate(%Domain{} = domain, attrs, opts \\ []) do
+    replace_existing = Keyword.get(opts, :replace_existing, false)
+
+    cert_result =
+      if replace_existing do
+        case Repo.get_by(SslCertificate, domain_id: domain.id) do
+          nil ->
+            insert_ssl_certificate(domain, attrs)
+
+          existing_cert ->
+            with {:ok, _} <- Repo.delete(existing_cert) do
+              insert_ssl_certificate(domain, attrs)
+            end
+        end
+      else
+        insert_ssl_certificate(domain, attrs)
+      end
+
+    case cert_result do
       {:ok, cert} = result ->
         domain = Repo.get!(Domain, domain.id)
         WebServer.sync_domain(domain)
@@ -1024,6 +1038,12 @@ defmodule Hostctl.Hosting do
         update_ssl_certificate(cert, %{status: "pending", log: log})
         Logger.error("[Hosting] SSL provisioning failed for #{domain.name}")
     end
+  end
+
+  defp insert_ssl_certificate(%Domain{} = domain, attrs) do
+    %SslCertificate{domain_id: domain.id}
+    |> SslCertificate.changeset(attrs)
+    |> Repo.insert()
   end
 
   # ---------------------------------------------------------------------------

@@ -173,6 +173,45 @@ defmodule Hostctl.HostingTest do
     end
   end
 
+  describe "ssl certificates" do
+    test "can replace an existing certificate for the same domain" do
+      scope = user_scope_fixture()
+
+      assert {:ok, domain} =
+               Hosting.create_domain(scope, %{
+                 name: "ssl-reissue-example.com",
+                 apply_dns_template: false
+               })
+
+      assert {:ok, first_cert} =
+               Hosting.create_ssl_certificate(domain, %{
+                 cert_type: "custom",
+                 status: "active",
+                 certificate: "first-cert",
+                 private_key: "first-key",
+                 email: "first@example.com"
+               })
+
+      assert {:ok, replacement_cert} =
+               Hosting.create_ssl_certificate(
+                 domain,
+                 %{
+                   cert_type: "lets_encrypt",
+                   status: "pending",
+                   email: "second@example.com",
+                   covers_wildcard_subdomains: true
+                 },
+                 replace_existing: true
+               )
+
+      assert replacement_cert.id != first_cert.id
+      assert replacement_cert.email == "second@example.com"
+      assert replacement_cert.covers_wildcard_subdomains == true
+      assert replacement_cert.cert_type == "lets_encrypt"
+      assert Hosting.get_ssl_certificate(domain).id == replacement_cert.id
+    end
+  end
+
   describe "database users" do
     test "defaults mysql users to localhost-only access" do
       scope = user_scope_fixture()

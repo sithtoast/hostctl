@@ -193,25 +193,35 @@ defmodule HostctlWeb.DomainLive.Show do
     email = params["email"]
     allow_http_with_ssl = truthy_param?(request_params["allow_http_with_ssl"])
     covers_wildcard_subdomains = truthy_param?(params["covers_wildcard_subdomains"])
+    replacing_existing_cert? = socket.assigns.ssl_cert != nil
 
     with {:ok, updated_domain} <-
            Hosting.update_domain(socket.assigns.domain_scope, domain, %{
              allow_http_with_ssl: allow_http_with_ssl
            }),
          {:ok, cert} <-
-           Hosting.create_ssl_certificate(updated_domain, %{
-             cert_type: "lets_encrypt",
-             status: "pending",
-             email: email,
-             covers_wildcard_subdomains: covers_wildcard_subdomains
-           }) do
+           Hosting.create_ssl_certificate(
+             updated_domain,
+             %{
+               cert_type: "lets_encrypt",
+               status: "pending",
+               email: email,
+               covers_wildcard_subdomains: covers_wildcard_subdomains
+             }, replace_existing: replacing_existing_cert?) do
+      message =
+        if replacing_existing_cert? do
+          "SSL certificate reissue initiated for #{updated_domain.name}."
+        else
+          "SSL certificate request initiated for #{updated_domain.name}."
+        end
+
       {:noreply,
        socket
        |> assign(:domain, updated_domain)
        |> assign(:ssl_cert, cert)
        |> assign(:ssl_log_counter, 0)
        |> stream(:ssl_log_lines, [], reset: true)
-       |> put_flash(:info, "SSL certificate request initiated for #{updated_domain.name}.")}
+       |> put_flash(:info, message)}
     else
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Could not initiate SSL request.")}
@@ -549,7 +559,14 @@ defmodule HostctlWeb.DomainLive.Show do
 
   defp assign_ssl_form(socket) do
     user_email = socket.assigns.domain_scope.user.email
-    changeset = Hosting.change_ssl_certificate(%SslCertificate{}, %{email: user_email})
+    existing_cert = socket.assigns[:ssl_cert]
+
+    changeset =
+      Hosting.change_ssl_certificate(%SslCertificate{}, %{
+        email: (existing_cert && existing_cert.email) || user_email,
+        covers_wildcard_subdomains: existing_cert && existing_cert.covers_wildcard_subdomains
+      })
+
     assign(socket, :ssl_form, to_form(changeset, as: :ssl_certificate))
   end
 
@@ -1007,6 +1024,68 @@ defmodule HostctlWeb.DomainLive.Show do
                     </button>
                   <% end %>
                 </div>
+
+                <%= if @ssl_cert.status != "pending" do %>
+                  <div class="rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/40 p-4">
+                    <p class="text-sm font-medium text-gray-900 dark:text-white">
+                      Reissue or replace certificate
+                    </p>
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                      Request a fresh Let's Encrypt certificate, including wildcard coverage for all subdomains if needed.
+                    </p>
+                    <.form
+                      for={@ssl_form}
+                      id="ssl-reissue-form"
+                      phx-submit="request_ssl"
+                      class="mt-4 flex flex-col items-start gap-3"
+                    >
+                      <.input
+                        field={@ssl_form[:email]}
+                        type="email"
+                        placeholder="you@example.com"
+                        label="Let's Encrypt email"
+                        class="w-72 px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <div class="w-72 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900/60 p-3 text-left">
+                        <input type="hidden" name="allow_http_with_ssl" value="false" />
+                        <label class="flex items-start gap-3 text-sm text-gray-700 dark:text-gray-300">
+                          <input
+                            type="checkbox"
+                            name="allow_http_with_ssl"
+                            value="true"
+                            checked={@domain.allow_http_with_ssl}
+                            class="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span>
+                            Keep HTTP available after SSL is enabled
+                            <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                              Leave this off to redirect all HTTP traffic to HTTPS once the certificate is active.
+                            </span>
+                          </span>
+                        </label>
+                      </div>
+                      <div class="w-72 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900/60 p-3 text-left">
+                        <.input
+                          field={@ssl_form[:covers_wildcard_subdomains]}
+                          type="checkbox"
+                          label="Use one wildcard certificate for all subdomains"
+                        />
+                        <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                          Requests <strong>{@domain.name}</strong>
+                          and <strong>*.{@domain.name}</strong>
+                          on the same certificate. This requires DNS-based validation.
+                        </p>
+                      </div>
+                      <button
+                        type="submit"
+                        data-confirm="Replace the current certificate with a newly issued Let's Encrypt certificate request?"
+                        class="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+                      >
+                        <.icon name="hero-arrow-path" class="w-4 h-4" /> Reissue Certificate
+                      </button>
+                    </.form>
+                  </div>
+                <% end %>
                 <%= if @ssl_cert.expires_at do %>
                   <p class="text-sm text-gray-600 dark:text-gray-400">
                     Expires: {Calendar.strftime(@ssl_cert.expires_at, "%B %d, %Y")}
