@@ -868,7 +868,8 @@ defmodule Hostctl.Backup.Runner do
         document_root: domain.document_root,
         php_version: domain.php_version,
         status: domain.status,
-        ssl_enabled: domain.ssl_enabled
+        ssl_enabled: domain.ssl_enabled,
+        allow_http_with_ssl: domain.allow_http_with_ssl
       },
       subdomains:
         Enum.map(subdomains, fn s ->

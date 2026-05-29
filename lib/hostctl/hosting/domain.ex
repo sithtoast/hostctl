@@ -23,6 +23,7 @@ defmodule Hostctl.Hosting.Domain do
     field :php_version, :string, default: "8.3"
     field :status, :string, default: "active"
     field :ssl_enabled, :boolean, default: false
+    field :allow_http_with_ssl, :boolean, default: false
     field :disk_usage_mb, :integer, default: 0
     field :bandwidth_used_mb, :integer, default: 0
     field :apply_dns_template, :boolean, default: true
@@ -56,6 +57,7 @@ defmodule Hostctl.Hosting.Domain do
       :php_version,
       :status,
       :ssl_enabled,
+      :allow_http_with_ssl,
       :apply_dns_template,
       :autoindex,
       :cr_date

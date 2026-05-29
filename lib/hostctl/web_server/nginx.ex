@@ -14,7 +14,8 @@ defmodule Hostctl.WebServer.Nginx do
       by `Hostctl.WebServer.write_ssl_cert/2` when a certificate is saved
 
   When `domain.ssl_enabled` is true and an active `SslCertificate` exists, the
-  config emits an HTTP→HTTPS redirect block and a full TLS server block.
+  config emits a full TLS server block plus either an HTTP→HTTPS redirect block
+  or a plain HTTP server block when `domain.allow_http_with_ssl` is enabled.
   Otherwise only an HTTP server block is written.
   """
 
@@ -59,6 +60,7 @@ defmodule Hostctl.WebServer.Nginx do
     doc_root = domain.document_root || "/var/www/#{domain.name}/httpdocs"
     php_socket = php_fpm_socket(domain.php_version)
     use_ssl = ssl_active?(domain, ssl_cert)
+    allow_http_with_ssl = domain.allow_http_with_ssl == true
 
     # Partition enabled backends by scope.
     enabled = Enum.filter(s3_backends, & &1.enabled)
@@ -77,7 +79,8 @@ defmodule Hostctl.WebServer.Nginx do
           "#{domain.name} www.#{domain.name}",
           whole_domain_backend,
           use_ssl,
-          ssl_cert
+          ssl_cert,
+          allow_http_with_ssl
         )
       else
         vhost_block(
@@ -87,6 +90,7 @@ defmodule Hostctl.WebServer.Nginx do
           php_socket,
           use_ssl,
           ssl_cert,
+          allow_http_with_ssl,
           proxies,
           domain_path_backends,
           domain.autoindex
@@ -113,7 +117,8 @@ defmodule Hostctl.WebServer.Nginx do
             "#{sub.name}.#{domain.name}",
             whole_sub_backend,
             false,
-            nil
+            nil,
+            false
           )
         else
           vhost_block(
@@ -123,6 +128,7 @@ defmodule Hostctl.WebServer.Nginx do
             php_socket,
             false,
             nil,
+            false,
             [],
             path_backends_for_sub,
             sub.autoindex
@@ -143,7 +149,8 @@ defmodule Hostctl.WebServer.Nginx do
             "#{sub_name}.#{domain.name}",
             whole_sub_backend,
             false,
-            nil
+            nil,
+            false
           )
         else
           # No filesystem document root for this subdomain – generate a basic
@@ -157,6 +164,7 @@ defmodule Hostctl.WebServer.Nginx do
             php_socket,
             false,
             nil,
+            false,
             [],
             path_backends_for_sub,
             false
@@ -174,6 +182,7 @@ defmodule Hostctl.WebServer.Nginx do
          php_socket,
          false = _ssl,
          _cert,
+         _allow_http_with_ssl,
          proxies,
          s3_path_backends,
          autoindex
@@ -226,6 +235,7 @@ defmodule Hostctl.WebServer.Nginx do
          php_socket,
          true = _ssl,
          ssl_cert,
+         allow_http_with_ssl,
          proxies,
          s3_path_backends,
          autoindex
@@ -238,14 +248,22 @@ defmodule Hostctl.WebServer.Nginx do
     s3_error_handler = s3_path_error_handler(s3_path_backends)
     root_location = root_location_block(autoindex)
 
+    http_block =
+      http_php_server_block(
+        log_name,
+        server_names,
+        doc_root,
+        php_socket,
+        proxy_locations,
+        s3_locations,
+        s3_error_handler,
+        root_location,
+        allow_http_with_ssl
+      )
+
     """
     # #{log_name} — managed by hostctl
-    server {
-        listen 80;
-        listen [::]:80;
-        server_name #{server_names};
-        return 301 https://$host$request_uri;
-    }
+    #{http_block}
 
     server {
         listen 443 ssl http2;
@@ -334,7 +352,7 @@ defmodule Hostctl.WebServer.Nginx do
               proxy_set_header Host $host;
               proxy_set_header X-Real-IP $remote_addr;
               proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto https;#{token_line}
+                proxy_set_header X-Forwarded-Proto $scheme;#{token_line}
               proxy_intercept_errors on;
               error_page 404 = @s3_path_not_found;
           }
@@ -410,7 +428,14 @@ defmodule Hostctl.WebServer.Nginx do
   # S3-backed vhost blocks
   # ---------------------------------------------------------------------------
 
-  defp s3_vhost_block(log_name, server_names, %DomainS3Backend{} = backend, false = _ssl, _cert) do
+  defp s3_vhost_block(
+         log_name,
+         server_names,
+         %DomainS3Backend{} = backend,
+         false = _ssl,
+         _cert,
+         _allow_http_with_ssl
+       ) do
     if use_phoenix_proxy?(backend) do
       phoenix_proxy_block_http(log_name, server_names, backend)
     else
@@ -418,11 +443,18 @@ defmodule Hostctl.WebServer.Nginx do
     end
   end
 
-  defp s3_vhost_block(log_name, server_names, %DomainS3Backend{} = backend, true = _ssl, ssl_cert) do
+  defp s3_vhost_block(
+         log_name,
+         server_names,
+         %DomainS3Backend{} = backend,
+         true = _ssl,
+         ssl_cert,
+         allow_http_with_ssl
+       ) do
     if use_phoenix_proxy?(backend) do
-      phoenix_proxy_block_ssl(log_name, server_names, backend, ssl_cert)
+      phoenix_proxy_block_ssl(log_name, server_names, backend, ssl_cert, allow_http_with_ssl)
     else
-      s3_direct_block_ssl(log_name, server_names, backend, ssl_cert)
+      s3_direct_block_ssl(log_name, server_names, backend, ssl_cert, allow_http_with_ssl)
     end
   end
 
@@ -459,7 +491,7 @@ defmodule Hostctl.WebServer.Nginx do
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto https;#{token_line}
+            proxy_set_header X-Forwarded-Proto $scheme;#{token_line}
             proxy_intercept_errors on;
             error_page 404 = @not_found;
         }
@@ -471,7 +503,7 @@ defmodule Hostctl.WebServer.Nginx do
     """
   end
 
-  defp phoenix_proxy_block_ssl(log_name, server_names, backend, ssl_cert) do
+  defp phoenix_proxy_block_ssl(log_name, server_names, backend, ssl_cert, allow_http_with_ssl) do
     primary = server_names |> String.split(" ") |> hd()
     ssl_cert_path = cert_path(ssl_cert, primary)
     ssl_key_path = key_path(ssl_cert, primary)
@@ -481,14 +513,46 @@ defmodule Hostctl.WebServer.Nginx do
     token_line =
       if token != "", do: "\n            proxy_set_header X-S3-Proxy-Token #{token};", else: ""
 
+    http_block =
+      if allow_http_with_ssl do
+        """
+        server {
+            listen 80;
+            listen [::]:80;
+            server_name #{server_names};
+
+            access_log /var/log/nginx/#{log_name}.access.log;
+            error_log /var/log/nginx/#{log_name}.error.log;
+
+            location / {
+                proxy_pass #{upstream};
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;#{token_line}
+                proxy_intercept_errors on;
+                error_page 404 = @not_found;
+            }
+
+            location @not_found {
+                return 404;
+            }
+        }
+        """
+      else
+        """
+        server {
+            listen 80;
+            listen [::]:80;
+            server_name #{server_names};
+            return 301 https://$host$request_uri;
+        }
+        """
+      end
+
     """
     # #{log_name} — managed by hostctl (S3 backend, private)
-    server {
-        listen 80;
-        listen [::]:80;
-        server_name #{server_names};
-        return 301 https://$host$request_uri;
-    }
+    #{http_block}
 
     server {
         listen 443 ssl http2;
@@ -511,7 +575,7 @@ defmodule Hostctl.WebServer.Nginx do
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto https;#{token_line}
+            proxy_set_header X-Forwarded-Proto $scheme;#{token_line}
             proxy_intercept_errors on;
             error_page 404 = @not_found;
         }
@@ -560,21 +624,58 @@ defmodule Hostctl.WebServer.Nginx do
     """
   end
 
-  defp s3_direct_block_ssl(log_name, server_names, backend, ssl_cert) do
+  defp s3_direct_block_ssl(log_name, server_names, backend, ssl_cert, allow_http_with_ssl) do
     primary = server_names |> String.split(" ") |> hd()
     ssl_cert_path = cert_path(ssl_cert, primary)
     ssl_key_path = key_path(ssl_cert, primary)
     upstream = s3_upstream_url(backend)
     upstream_host = s3_upstream_host(backend)
 
+    http_block =
+      if allow_http_with_ssl do
+        """
+        server {
+            listen 80;
+            listen [::]:80;
+            server_name #{server_names};
+
+            access_log /var/log/nginx/#{log_name}.access.log;
+            error_log /var/log/nginx/#{log_name}.error.log;
+
+            location / {
+                proxy_pass #{upstream};
+                proxy_set_header Host #{upstream_host};
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_hide_header x-amz-id-2;
+                proxy_hide_header x-amz-request-id;
+                proxy_hide_header x-amz-meta-server-side-encryption;
+                proxy_hide_header x-amz-server-side-encryption;
+                proxy_hide_header Set-Cookie;
+                proxy_ignore_headers Set-Cookie;
+                proxy_intercept_errors on;
+                error_page 404 = @s3_not_found;
+            }
+
+            location @s3_not_found {
+                return 404;
+            }
+        }
+        """
+      else
+        """
+        server {
+            listen 80;
+            listen [::]:80;
+            server_name #{server_names};
+            return 301 https://$host$request_uri;
+        }
+        """
+      end
+
     """
     # #{log_name} — managed by hostctl (S3 backend)
-    server {
-        listen 80;
-        listen [::]:80;
-        server_name #{server_names};
-        return 301 https://$host$request_uri;
-    }
+    #{http_block}
 
     server {
         listen 443 ssl http2;
@@ -678,6 +779,73 @@ defmodule Hostctl.WebServer.Nginx do
         location / {
             return 503 "This website has been suspended.";
         }
+    }
+    """
+  end
+
+  defp http_php_server_block(
+         log_name,
+         server_names,
+         doc_root,
+         php_socket,
+         proxy_locations,
+         s3_locations,
+         s3_error_handler,
+         root_location,
+         true
+       ) do
+    """
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name #{server_names};
+
+        root #{doc_root};
+        index index.php index.html index.htm;
+
+        access_log /var/log/nginx/#{log_name}.access.log;
+        error_log /var/log/nginx/#{log_name}.error.log;
+
+      #{proxy_locations}
+
+      #{s3_locations}
+
+        location / {
+            #{root_location}
+        }
+
+        location ~ \\.php$ {
+            fastcgi_pass unix:#{php_socket};
+            fastcgi_index index.php;
+            fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+            include fastcgi_params;
+            fastcgi_read_timeout 300;
+        }
+
+        location ~ /\\.ht {
+            deny all;
+        }
+    #{s3_error_handler}}
+    """
+  end
+
+  defp http_php_server_block(
+         _log_name,
+         server_names,
+         _doc_root,
+         _php_socket,
+         _proxy_locations,
+         _s3_locations,
+         _s3_error_handler,
+         _root_location,
+         false
+       ) do
+    """
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name #{server_names};
+        return 301 https://$host$request_uri;
     }
     """
   end

@@ -153,6 +153,27 @@ defmodule HostctlWeb.DomainLive.Show do
     end
   end
 
+  def handle_event("toggle_allow_http_with_ssl", _params, socket) do
+    domain = socket.assigns.domain
+
+    case Hosting.update_domain(socket.assigns.domain_scope, domain, %{
+           allow_http_with_ssl: !domain.allow_http_with_ssl
+         }) do
+      {:ok, updated} ->
+        message =
+          if updated.allow_http_with_ssl do
+            "HTTP will remain available alongside HTTPS."
+          else
+            "HTTP will now redirect to HTTPS when SSL is active."
+          end
+
+        {:noreply, socket |> assign(:domain, updated) |> put_flash(:info, message)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update HTTP/HTTPS behavior.")}
+    end
+  end
+
   def handle_event("cancel_ssl", _params, socket) do
     case Hosting.delete_ssl_certificate(socket.assigns.ssl_cert) do
       {:ok, _} ->
@@ -167,23 +188,29 @@ defmodule HostctlWeb.DomainLive.Show do
     end
   end
 
-  def handle_event("request_ssl", %{"ssl_certificate" => params}, socket) do
+  def handle_event("request_ssl", %{"ssl_certificate" => params} = request_params, socket) do
     domain = socket.assigns.domain
     email = params["email"]
+    allow_http_with_ssl = truthy_param?(request_params["allow_http_with_ssl"])
 
-    case Hosting.create_ssl_certificate(domain, %{
-           cert_type: "lets_encrypt",
-           status: "pending",
-           email: email
-         }) do
-      {:ok, cert} ->
-        {:noreply,
-         socket
-         |> assign(:ssl_cert, cert)
-         |> assign(:ssl_log_counter, 0)
-         |> stream(:ssl_log_lines, [], reset: true)
-         |> put_flash(:info, "SSL certificate request initiated for #{domain.name}.")}
-
+    with {:ok, updated_domain} <-
+           Hosting.update_domain(socket.assigns.domain_scope, domain, %{
+             allow_http_with_ssl: allow_http_with_ssl
+           }),
+         {:ok, cert} <-
+           Hosting.create_ssl_certificate(updated_domain, %{
+             cert_type: "lets_encrypt",
+             status: "pending",
+             email: email
+           }) do
+      {:noreply,
+       socket
+       |> assign(:domain, updated_domain)
+       |> assign(:ssl_cert, cert)
+       |> assign(:ssl_log_counter, 0)
+       |> stream(:ssl_log_lines, [], reset: true)
+       |> put_flash(:info, "SSL certificate request initiated for #{updated_domain.name}.")}
+    else
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Could not initiate SSL request.")}
     end
@@ -549,6 +576,8 @@ defmodule HostctlWeb.DomainLive.Show do
     backends = Hosting.list_s3_backends(socket.assigns.domain)
     assign(socket, :s3_backends, backends)
   end
+
+  defp truthy_param?(value), do: value in [true, "true", "on", "1"]
 
   def render(assigns) do
     ~H"""
@@ -977,6 +1006,42 @@ defmodule HostctlWeb.DomainLive.Show do
                   </p>
                 <% end %>
 
+                <%= if @ssl_cert.status == "active" and @domain.ssl_enabled do %>
+                  <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-4 flex items-start justify-between gap-4">
+                    <div>
+                      <p class="text-sm font-medium text-gray-900 dark:text-white">
+                        HTTP alongside HTTPS
+                      </p>
+                      <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                        <%= if @domain.allow_http_with_ssl do %>
+                          Port 80 stays available and serves the site without redirecting.
+                        <% else %>
+                          Port 80 redirects all traffic to HTTPS.
+                        <% end %>
+                      </p>
+                    </div>
+                    <button
+                      id="toggle-ssl-http-btn"
+                      phx-click="toggle_allow_http_with_ssl"
+                      class={[
+                        "shrink-0 inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                        if(@domain.allow_http_with_ssl,
+                          do:
+                            "bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:hover:bg-amber-900/40",
+                          else:
+                            "bg-emerald-100 text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
+                        )
+                      ]}
+                    >
+                      <%= if @domain.allow_http_with_ssl do %>
+                        <.icon name="hero-arrow-uturn-left" class="w-4 h-4" /> Redirect HTTP
+                      <% else %>
+                        <.icon name="hero-globe-alt" class="w-4 h-4" /> Allow HTTP
+                      <% end %>
+                    </button>
+                  </div>
+                <% end %>
+
                 <%!-- Live / persisted log output --%>
                 <div>
                   <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5 uppercase tracking-wide">
@@ -1027,6 +1092,24 @@ defmodule HostctlWeb.DomainLive.Show do
                     label="Let's Encrypt email"
                     class="w-72 px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
+                  <div class="w-72 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 p-3 text-left">
+                    <input type="hidden" name="allow_http_with_ssl" value="false" />
+                    <label class="flex items-start gap-3 text-sm text-gray-700 dark:text-gray-300">
+                      <input
+                        type="checkbox"
+                        name="allow_http_with_ssl"
+                        value="true"
+                        checked={@domain.allow_http_with_ssl}
+                        class="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span>
+                        Keep HTTP available after SSL is enabled
+                        <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                          Leave this off to redirect all HTTP traffic to HTTPS once the certificate is active.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
                   <button
                     type="submit"
                     class="inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
