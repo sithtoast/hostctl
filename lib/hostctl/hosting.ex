@@ -1097,17 +1097,21 @@ defmodule Hostctl.Hosting do
       case CertBot.provision(domain, cert) do
         {:ok, expires_at, log} ->
           # Auto-enable SSL on the domain so nginx writes the 443 block.
-          unless domain.ssl_enabled do
+          # Keep HTTP available as well so activation does not immediately
+          # force a redirect unless the user explicitly turns that on later.
+          unless domain.ssl_enabled or domain.allow_http_with_ssl do
             domain
-            |> Domain.changeset(%{ssl_enabled: true})
+            |> Domain.changeset(%{ssl_enabled: true, allow_http_with_ssl: true})
             |> Repo.update()
             |> case do
               {:ok, _} ->
-                Logger.info("[Hosting] ssl_enabled set to true for #{domain.name}")
+                Logger.info(
+                  "[Hosting] ssl_enabled and allow_http_with_ssl set to true for #{domain.name}"
+                )
 
               {:error, r} ->
                 Logger.error(
-                  "[Hosting] Could not set ssl_enabled for #{domain.name}: #{inspect(r)}"
+                  "[Hosting] Could not update SSL flags for #{domain.name}: #{inspect(r)}"
                 )
             end
           end
