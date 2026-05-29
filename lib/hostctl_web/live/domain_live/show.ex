@@ -1341,7 +1341,9 @@ defmodule HostctlWeb.DomainLive.Show do
                     phx-hook=".SslLogScroll"
                     class="bg-gray-950 rounded-lg p-4 font-mono text-xs text-green-400 overflow-y-auto max-h-72 space-y-0.5"
                   >
-                    <div class="hidden only:block text-gray-600">Waiting for output…</div>
+                    <div id="ssl-log-empty" class="hidden only:block text-gray-600">
+                      Waiting for output…
+                    </div>
                     <div
                       :for={{id, entry} <- @streams.ssl_log_lines}
                       id={id}
