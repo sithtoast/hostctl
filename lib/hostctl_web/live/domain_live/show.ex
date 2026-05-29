@@ -232,36 +232,45 @@ defmodule HostctlWeb.DomainLive.Show do
     covers_wildcard_subdomains = truthy_param?(params["covers_wildcard_subdomains"])
     replacing_existing_cert? = socket.assigns.ssl_cert != nil
 
-    with {:ok, updated_domain} <-
-           Hosting.update_domain(socket.assigns.domain_scope, domain, %{
-             allow_http_with_ssl: allow_http_with_ssl
-           }),
-         {:ok, cert} <-
-           Hosting.create_ssl_certificate(
-             updated_domain,
-             %{
-               cert_type: "lets_encrypt",
-               status: "pending",
-               email: email,
-               covers_wildcard_subdomains: covers_wildcard_subdomains
-             }, replace_existing: replacing_existing_cert?) do
-      message =
-        if replacing_existing_cert? do
-          "SSL certificate reissue initiated for #{updated_domain.name}."
-        else
-          "SSL certificate request initiated for #{updated_domain.name}."
-        end
-
+    if covers_wildcard_subdomains and !Settings.cloudflare_enabled?() do
       {:noreply,
-       socket
-       |> assign(:domain, updated_domain)
-       |> assign(:ssl_cert, cert)
-       |> assign(:ssl_log_counter, 0)
-       |> stream(:ssl_log_lines, [], reset: true)
-       |> put_flash(:info, message)}
+       put_flash(
+         socket,
+         :error,
+         "Wildcard SSL requires Cloudflare DNS challenge setup first. Configure DNS Provider in panel settings, then retry."
+       )}
     else
-      {:error, _} ->
-        {:noreply, put_flash(socket, :error, "Could not initiate SSL request.")}
+      with {:ok, updated_domain} <-
+             Hosting.update_domain(socket.assigns.domain_scope, domain, %{
+               allow_http_with_ssl: allow_http_with_ssl
+             }),
+           {:ok, cert} <-
+             Hosting.create_ssl_certificate(
+               updated_domain,
+               %{
+                 cert_type: "lets_encrypt",
+                 status: "pending",
+                 email: email,
+                 covers_wildcard_subdomains: covers_wildcard_subdomains
+               }, replace_existing: replacing_existing_cert?) do
+        message =
+          if replacing_existing_cert? do
+            "SSL certificate reissue initiated for #{updated_domain.name}."
+          else
+            "SSL certificate request initiated for #{updated_domain.name}."
+          end
+
+        {:noreply,
+         socket
+         |> assign(:domain, updated_domain)
+         |> assign(:ssl_cert, cert)
+         |> assign(:ssl_log_counter, 0)
+         |> stream(:ssl_log_lines, [], reset: true)
+         |> put_flash(:info, message)}
+      else
+        {:error, _} ->
+          {:noreply, put_flash(socket, :error, "Could not initiate SSL request.")}
+      end
     end
   end
 
