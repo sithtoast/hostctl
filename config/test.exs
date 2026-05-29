@@ -29,8 +29,8 @@ config :hostctl, Hostctl.Mailer, adapter: Swoosh.Adapters.Test
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false
 
-# Disable web server (Caddy) integration during tests
-config :hostctl, :web_server, enabled: false
+# Disable web server (Caddy) integration during tests, and skip cert file verification
+config :hostctl, :web_server, enabled: false, verify_cert_files: false
 
 # Disable certbot integration during tests
 config :hostctl, :certbot, enabled: false

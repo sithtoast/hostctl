@@ -59,7 +59,7 @@ defmodule Hostctl.WebServer.Nginx do
   defp active_config(%Domain{} = domain, subdomains, ssl_cert, proxies, s3_backends) do
     doc_root = domain.document_root || "/var/www/#{domain.name}/httpdocs"
     php_socket = php_fpm_socket(domain.php_version)
-    use_ssl = ssl_active?(domain, ssl_cert)
+    use_ssl = ssl_active?(domain, ssl_cert, domain.name)
     use_subdomain_ssl = use_ssl and wildcard_subdomains_enabled?(ssl_cert)
     allow_http_with_ssl = domain.allow_http_with_ssl == true
 
@@ -886,8 +886,24 @@ defmodule Hostctl.WebServer.Nginx do
     """
   end
 
-  defp ssl_active?(%Domain{ssl_enabled: true}, %SslCertificate{status: "active"}), do: true
-  defp ssl_active?(_, _), do: false
+  defp ssl_active?(
+         %Domain{ssl_enabled: true},
+         %SslCertificate{status: "active"} = cert,
+         cert_name
+       ) do
+    if cert_files_verified?() do
+      File.exists?(cert_path(cert, cert_name))
+    else
+      true
+    end
+  end
+
+  defp ssl_active?(_, _, _), do: false
+
+  defp cert_files_verified? do
+    Application.get_env(:hostctl, :web_server, [])
+    |> Keyword.get(:verify_cert_files, true)
+  end
 
   defp wildcard_subdomains_enabled?(%SslCertificate{covers_wildcard_subdomains: true}), do: true
   defp wildcard_subdomains_enabled?(_), do: false
