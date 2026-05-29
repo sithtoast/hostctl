@@ -993,7 +993,6 @@ defmodule Hostctl.Hosting do
                    "[SSLTRACE2] provisioning task running domain_id=#{domain.id} cert_id=#{cert.id}"
                  )
 
-                 WebServer.sync_domain(domain)
                  provision_lets_encrypt_cert(domain, cert)
                end) do
             {:ok, pid} ->
