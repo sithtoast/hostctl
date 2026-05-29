@@ -132,29 +132,44 @@ defmodule Hostctl.CertBot do
     broadcast_log(domain_id, "Running: #{cmd} #{Enum.join(args, " ")}")
     Logger.info("[CertBot] Running: #{cmd} #{Enum.join(args, " ")}")
 
-    port =
-      Port.open({:spawn_executable, System.find_executable(cmd)}, [
-        :binary,
-        :stderr_to_stdout,
-        :exit_status,
-        {:line, 4096},
-        {:args, args}
-      ])
+    case System.find_executable(cmd) do
+      nil ->
+        msg = "Certbot executable '#{cmd}' was not found on this host"
+        broadcast_log(domain_id, "ERROR: #{msg}")
+        {:error, :certbot_not_found, msg}
 
-    {exit_code, log_lines} = collect_port_output(port, domain_id, [])
-    full_log = Enum.join(log_lines, "\n")
+      executable ->
+        try do
+          port =
+            Port.open({:spawn_executable, executable}, [
+              :binary,
+              :stderr_to_stdout,
+              :exit_status,
+              {:line, 4096},
+              {:args, args}
+            ])
 
-    if exit_code == 0 do
-      Logger.info("[CertBot] Certificate obtained for #{domain_name}")
-      broadcast_log(domain_id, "Certificate successfully obtained!")
-      {:ok, read_cert_expiry(domain_name), full_log}
-    else
-      Logger.error(
-        "[CertBot] Provisioning failed for #{domain_name} (exit #{exit_code}):\n#{full_log}"
-      )
+          {exit_code, log_lines} = collect_port_output(port, domain_id, [])
+          full_log = Enum.join(log_lines, "\n")
 
-      broadcast_log(domain_id, "ERROR: Certbot exited with code #{exit_code}")
-      {:error, {:certbot_failed, exit_code, full_log}, full_log}
+          if exit_code == 0 do
+            Logger.info("[CertBot] Certificate obtained for #{domain_name}")
+            broadcast_log(domain_id, "Certificate successfully obtained!")
+            {:ok, read_cert_expiry(domain_name), full_log}
+          else
+            Logger.error(
+              "[CertBot] Provisioning failed for #{domain_name} (exit #{exit_code}):\n#{full_log}"
+            )
+
+            broadcast_log(domain_id, "ERROR: Certbot exited with code #{exit_code}")
+            {:error, {:certbot_failed, exit_code, full_log}, full_log}
+          end
+        rescue
+          e ->
+            msg = Exception.message(e)
+            broadcast_log(domain_id, "ERROR: Certbot failed to start: #{msg}")
+            {:error, {:certbot_start_failed, msg}, msg}
+        end
     end
   end
 

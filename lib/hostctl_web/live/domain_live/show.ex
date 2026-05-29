@@ -91,7 +91,23 @@ defmodule HostctlWeb.DomainLive.Show do
   def handle_info({:ssl_cert_updated, cert}, socket) do
     # Reload domain too so ssl_enabled toggle reflects any auto-update
     domain = Hosting.get_domain!(socket.assigns.domain_scope, cert.domain_id)
-    {:noreply, socket |> assign(:ssl_cert, cert) |> assign(:domain, domain)}
+
+    log_lines =
+      if cert.log do
+        cert.log
+        |> String.split("\n")
+        |> Enum.with_index()
+        |> Enum.map(fn {line, idx} -> %{id: idx, text: line} end)
+      else
+        []
+      end
+
+    {:noreply,
+     socket
+     |> assign(:ssl_cert, cert)
+     |> assign(:domain, domain)
+     |> assign(:ssl_log_counter, length(log_lines))
+     |> stream(:ssl_log_lines, log_lines, reset: true)}
   end
 
   def handle_info({:ssl_log, line}, socket) do

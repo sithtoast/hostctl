@@ -1003,40 +1003,52 @@ defmodule Hostctl.Hosting do
   end
 
   defp provision_lets_encrypt_cert(%Domain{} = domain, %SslCertificate{} = cert) do
-    case CertBot.provision(domain, cert) do
-      {:ok, expires_at, log} ->
-        # Auto-enable SSL on the domain so nginx writes the 443 block.
-        unless domain.ssl_enabled do
-          domain
-          |> Domain.changeset(%{ssl_enabled: true})
-          |> Repo.update()
-          |> case do
-            {:ok, _} ->
-              Logger.info("[Hosting] ssl_enabled set to true for #{domain.name}")
+    try do
+      case CertBot.provision(domain, cert) do
+        {:ok, expires_at, log} ->
+          # Auto-enable SSL on the domain so nginx writes the 443 block.
+          unless domain.ssl_enabled do
+            domain
+            |> Domain.changeset(%{ssl_enabled: true})
+            |> Repo.update()
+            |> case do
+              {:ok, _} ->
+                Logger.info("[Hosting] ssl_enabled set to true for #{domain.name}")
 
-            {:error, r} ->
+              {:error, r} ->
+                Logger.error(
+                  "[Hosting] Could not set ssl_enabled for #{domain.name}: #{inspect(r)}"
+                )
+            end
+          end
+
+          case update_ssl_certificate(cert, %{status: "active", expires_at: expires_at, log: log}) do
+            {:ok, _} ->
+              Logger.info("[Hosting] SSL certificate activated for #{domain.name}")
+
+            {:error, reason} ->
               Logger.error(
-                "[Hosting] Could not set ssl_enabled for #{domain.name}: #{inspect(r)}"
+                "[Hosting] Failed to mark SSL cert active for #{domain.name}: #{inspect(reason)}"
               )
           end
-        end
 
-        case update_ssl_certificate(cert, %{status: "active", expires_at: expires_at, log: log}) do
-          {:ok, _} ->
-            Logger.info("[Hosting] SSL certificate activated for #{domain.name}")
+        {:error, :disabled, _log} ->
+          :ok
 
-          {:error, reason} ->
-            Logger.error(
-              "[Hosting] Failed to mark SSL cert active for #{domain.name}: #{inspect(reason)}"
-            )
-        end
-
-      {:error, :disabled, _log} ->
-        :ok
-
-      {:error, _reason, log} ->
-        update_ssl_certificate(cert, %{status: "pending", log: log})
-        Logger.error("[Hosting] SSL provisioning failed for #{domain.name}")
+        {:error, _reason, log} ->
+          update_ssl_certificate(cert, %{status: "pending", log: log})
+          Logger.error("[Hosting] SSL provisioning failed for #{domain.name}")
+      end
+    rescue
+      e ->
+        log = Exception.format(:error, e, __STACKTRACE__)
+        _ = update_ssl_certificate(cert, %{status: "pending", log: log})
+        Logger.error("[Hosting] SSL provisioning crashed for #{domain.name}: #{Exception.message(e)}")
+    catch
+      kind, reason ->
+        log = "#{kind}: #{inspect(reason)}"
+        _ = update_ssl_certificate(cert, %{status: "pending", log: log})
+        Logger.error("[Hosting] SSL provisioning crashed for #{domain.name}: #{log}")
     end
   end
 
