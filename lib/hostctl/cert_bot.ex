@@ -176,11 +176,14 @@ defmodule Hostctl.CertBot do
   defp collect_port_output(port, domain_id, acc) do
     receive do
       {^port, {:data, {:eol, line}}} ->
-        broadcast_log(domain_id, line)
-        collect_port_output(port, domain_id, acc ++ [line])
+        normalized = normalize_log_line(line)
+        broadcast_log(domain_id, normalized)
+        collect_port_output(port, domain_id, acc ++ [normalized])
 
       {^port, {:data, {:noeol, line}}} ->
-        collect_port_output(port, domain_id, acc ++ [line])
+        normalized = normalize_log_line(line)
+        broadcast_log(domain_id, normalized)
+        collect_port_output(port, domain_id, acc ++ [normalized])
 
       {^port, {:exit_status, code}} ->
         {code, acc}
@@ -194,6 +197,9 @@ defmodule Hostctl.CertBot do
       {:ssl_log, line}
     )
   end
+
+  defp normalize_log_line(line) when is_binary(line), do: String.replace_invalid(line, "?")
+  defp normalize_log_line(line), do: inspect(line)
 
   # ---------------------------------------------------------------------------
   # Helpers

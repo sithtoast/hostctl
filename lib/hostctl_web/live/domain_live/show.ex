@@ -112,7 +112,7 @@ defmodule HostctlWeb.DomainLive.Show do
 
   def handle_info({:ssl_log, line}, socket) do
     idx = socket.assigns[:ssl_log_counter] || 0
-    entry = %{id: idx, text: line}
+    entry = %{id: idx, text: normalize_ssl_log_line(line)}
 
     {:noreply,
      socket
@@ -613,6 +613,9 @@ defmodule HostctlWeb.DomainLive.Show do
   end
 
   defp truthy_param?(value), do: value in [true, "true", "on", "1"]
+
+  defp normalize_ssl_log_line(line) when is_binary(line), do: String.replace_invalid(line, "?")
+  defp normalize_ssl_log_line(line), do: inspect(line)
 
   def render(assigns) do
     ~H"""
