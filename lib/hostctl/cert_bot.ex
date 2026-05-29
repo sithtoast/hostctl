@@ -123,7 +123,15 @@ defmodule Hostctl.CertBot do
     domain_args = build_domain_args(domain_name, domain_id, cert)
 
     args =
-      ["certonly", "--non-interactive", "--agree-tos"] ++
+      [
+        "certonly",
+        "--non-interactive",
+        "--agree-tos",
+        "--force-renewal",
+        "--expand",
+        "--cert-name",
+        domain_name
+      ] ++
         email_args ++
         dir_args ++
         extra_args ++
