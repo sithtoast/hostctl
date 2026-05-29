@@ -1025,8 +1025,39 @@ defmodule HostctlWeb.DomainLive.Show do
                   <% end %>
                 </div>
 
+                <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-4">
+                  <h4 class="text-sm font-medium text-gray-900 dark:text-white">
+                    Current certificate details
+                  </h4>
+                  <dl class="mt-3 space-y-2 text-sm">
+                    <div class="flex flex-wrap items-start gap-2">
+                      <dt class="text-gray-500 dark:text-gray-400 w-24">Protects</dt>
+                      <dd class="text-gray-900 dark:text-white font-mono text-xs break-all">
+                        <%= if @ssl_cert.covers_wildcard_subdomains do %>
+                          {@domain.name}, *.{@domain.name}
+                        <% else %>
+                          {@domain.name}
+                        <% end %>
+                      </dd>
+                    </div>
+                    <div class="flex flex-wrap items-start gap-2">
+                      <dt class="text-gray-500 dark:text-gray-400 w-24">Expires</dt>
+                      <dd class="text-gray-900 dark:text-white">
+                        <%= cond do %>
+                          <% @ssl_cert.expires_at -> %>
+                            {Calendar.strftime(@ssl_cert.expires_at, "%B %d, %Y")}
+                          <% @ssl_cert.status == "pending" -> %>
+                            Pending issuance
+                          <% true -> %>
+                            Not available
+                        <% end %>
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+
                 <%= if @ssl_cert.status != "pending" do %>
-                  <div class="rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/40 p-4">
+                  <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-4">
                     <p class="text-sm font-medium text-gray-900 dark:text-white">
                       Reissue or replace certificate
                     </p>
@@ -1037,44 +1068,69 @@ defmodule HostctlWeb.DomainLive.Show do
                       for={@ssl_form}
                       id="ssl-reissue-form"
                       phx-submit="request_ssl"
-                      class="mt-4 flex flex-col items-start gap-3"
+                      class="mt-4 flex w-full max-w-xl flex-col gap-3"
                     >
                       <.input
                         field={@ssl_form[:email]}
                         type="email"
                         placeholder="you@example.com"
                         label="Let's Encrypt email"
-                        class="w-72 px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                       />
-                      <div class="w-72 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900/60 p-3 text-left">
+                      <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-4">
                         <input type="hidden" name="allow_http_with_ssl" value="false" />
-                        <label class="flex items-start gap-3 text-sm text-gray-700 dark:text-gray-300">
-                          <input
-                            type="checkbox"
-                            name="allow_http_with_ssl"
-                            value="true"
-                            checked={@domain.allow_http_with_ssl}
-                            class="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                          />
-                          <span>
-                            Keep HTTP available after SSL is enabled
-                            <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                        <div class="flex items-start justify-between gap-4">
+                          <div>
+                            <p class="text-sm font-medium text-gray-900 dark:text-white">
+                              Keep HTTP available after SSL is enabled
+                            </p>
+                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                               Leave this off to redirect all HTTP traffic to HTTPS once the certificate is active.
-                            </span>
-                          </span>
-                        </label>
+                            </p>
+                          </div>
+                          <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                            <input
+                              type="checkbox"
+                              name="allow_http_with_ssl"
+                              value="true"
+                              checked={@domain.allow_http_with_ssl}
+                              class="sr-only peer"
+                            />
+                            <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-indigo-400 rounded-full peer peer-checked:bg-indigo-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5">
+                            </div>
+                          </label>
+                        </div>
                       </div>
-                      <div class="w-72 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900/60 p-3 text-left">
-                        <.input
-                          field={@ssl_form[:covers_wildcard_subdomains]}
-                          type="checkbox"
-                          label="Use one wildcard certificate for all subdomains"
+                      <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-4">
+                        <input
+                          type="hidden"
+                          name={@ssl_form[:covers_wildcard_subdomains].name}
+                          value="false"
                         />
-                        <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                          Requests <strong>{@domain.name}</strong>
-                          and <strong>*.{@domain.name}</strong>
-                          on the same certificate. This requires DNS-based validation.
-                        </p>
+                        <div class="flex items-start justify-between gap-4">
+                          <div>
+                            <p class="text-sm font-medium text-gray-900 dark:text-white">
+                              Use one wildcard certificate for all subdomains
+                            </p>
+                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                              Requests <strong>{@domain.name}</strong>
+                              and <strong>*.{@domain.name}</strong>
+                              on the same certificate. This requires DNS-based validation.
+                            </p>
+                          </div>
+                          <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                            <input
+                              type="checkbox"
+                              id={@ssl_form[:covers_wildcard_subdomains].id}
+                              name={@ssl_form[:covers_wildcard_subdomains].name}
+                              value="true"
+                              checked={Phoenix.HTML.Form.normalize_value("checkbox", @ssl_form[:covers_wildcard_subdomains].value)}
+                              class="sr-only peer"
+                            />
+                            <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-indigo-400 rounded-full peer peer-checked:bg-indigo-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5">
+                            </div>
+                          </label>
+                        </div>
                       </div>
                       <button
                         type="submit"
@@ -1085,11 +1141,6 @@ defmodule HostctlWeb.DomainLive.Show do
                       </button>
                     </.form>
                   </div>
-                <% end %>
-                <%= if @ssl_cert.expires_at do %>
-                  <p class="text-sm text-gray-600 dark:text-gray-400">
-                    Expires: {Calendar.strftime(@ssl_cert.expires_at, "%B %d, %Y")}
-                  </p>
                 <% end %>
 
                 <%= if @ssl_cert.status == "active" and @domain.ssl_enabled do %>
@@ -1128,7 +1179,6 @@ defmodule HostctlWeb.DomainLive.Show do
                   </div>
                 <% end %>
 
-                <%!-- Live / persisted log output --%>
                 <div>
                   <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5 uppercase tracking-wide">
                     Certbot output
@@ -1169,48 +1219,73 @@ defmodule HostctlWeb.DomainLive.Show do
                   for={@ssl_form}
                   id="ssl-request-form"
                   phx-submit="request_ssl"
-                  class="flex flex-col items-center gap-3"
+                  class="mx-auto flex w-full max-w-xl flex-col gap-3"
                 >
                   <.input
                     field={@ssl_form[:email]}
                     type="email"
                     placeholder="you@example.com"
                     label="Let's Encrypt email"
-                    class="w-72 px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
-                  <div class="w-72 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 p-3 text-left">
+                  <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-4 text-left">
                     <input type="hidden" name="allow_http_with_ssl" value="false" />
-                    <label class="flex items-start gap-3 text-sm text-gray-700 dark:text-gray-300">
-                      <input
-                        type="checkbox"
-                        name="allow_http_with_ssl"
-                        value="true"
-                        checked={@domain.allow_http_with_ssl}
-                        class="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                      />
-                      <span>
-                        Keep HTTP available after SSL is enabled
-                        <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                    <div class="flex items-start justify-between gap-4">
+                      <div>
+                        <p class="text-sm font-medium text-gray-900 dark:text-white">
+                          Keep HTTP available after SSL is enabled
+                        </p>
+                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                           Leave this off to redirect all HTTP traffic to HTTPS once the certificate is active.
-                        </span>
-                      </span>
-                    </label>
+                        </p>
+                      </div>
+                      <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                        <input
+                          type="checkbox"
+                          name="allow_http_with_ssl"
+                          value="true"
+                          checked={@domain.allow_http_with_ssl}
+                          class="sr-only peer"
+                        />
+                        <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-indigo-400 rounded-full peer peer-checked:bg-indigo-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5">
+                        </div>
+                      </label>
+                    </div>
                   </div>
-                  <div class="w-72 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 p-3 text-left">
-                    <.input
-                      field={@ssl_form[:covers_wildcard_subdomains]}
-                      type="checkbox"
-                      label="Use one wildcard certificate for all subdomains"
+                  <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-4 text-left">
+                    <input
+                      type="hidden"
+                      name={@ssl_form[:covers_wildcard_subdomains].name}
+                      value="false"
                     />
-                    <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                      Requests <strong>{@domain.name}</strong>
-                      and <strong>*.{@domain.name}</strong>
-                      on the same certificate. This requires DNS-based validation.
-                    </p>
+                    <div class="flex items-start justify-between gap-4">
+                      <div>
+                        <p class="text-sm font-medium text-gray-900 dark:text-white">
+                          Use one wildcard certificate for all subdomains
+                        </p>
+                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                          Requests <strong>{@domain.name}</strong>
+                          and <strong>*.{@domain.name}</strong>
+                          on the same certificate. This requires DNS-based validation.
+                        </p>
+                      </div>
+                      <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                        <input
+                          type="checkbox"
+                          id={@ssl_form[:covers_wildcard_subdomains].id}
+                          name={@ssl_form[:covers_wildcard_subdomains].name}
+                          value="true"
+                          checked={Phoenix.HTML.Form.normalize_value("checkbox", @ssl_form[:covers_wildcard_subdomains].value)}
+                          class="sr-only peer"
+                        />
+                        <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-indigo-400 rounded-full peer peer-checked:bg-indigo-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5">
+                        </div>
+                      </label>
+                    </div>
                   </div>
                   <button
                     type="submit"
-                    class="inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                    class="inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors self-center"
                   >
                     <.icon name="hero-lock-closed" class="w-4 h-4" /> Request Free SSL
                   </button>
@@ -1336,20 +1411,25 @@ defmodule HostctlWeb.DomainLive.Show do
                     id="mg-domain-connect-btn"
                     class="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors whitespace-nowrap"
                   >
-                    Connect & Auto-fill
+                    Connect
                   </button>
                 </form>
                 <%= if @mg_status do %>
-                  <%= cond do %>
-                    <% @mg_status == :ok -> %>
+                  <%= case @mg_status do %>
+                    <% :loading -> %>
+                      <p class="mt-2 text-xs text-purple-700 dark:text-purple-400 flex items-center gap-1">
+                        <.icon name="hero-arrow-path" class="w-3.5 h-3.5 animate-spin" />
+                        Connecting to Mailgun and creating SMTP credentials...
+                      </p>
+                    <% {:ok, _} -> %>
                       <p class="mt-2 text-xs text-green-700 dark:text-green-400 flex items-center gap-1">
                         <.icon name="hero-check-circle" class="w-3.5 h-3.5 shrink-0" />
                         Credentials created and form pre-filled — review and save below.
                       </p>
-                    <% match?({:error, _}, @mg_status) -> %>
+                    <% {:error, reason} -> %>
                       <p class="mt-2 text-xs text-red-600 dark:text-red-400 flex items-center gap-1">
                         <.icon name="hero-x-circle" class="w-3.5 h-3.5 shrink-0" />
-                        {elem(@mg_status, 1)}
+                        {reason}
                       </p>
                   <% end %>
                 <% end %>
