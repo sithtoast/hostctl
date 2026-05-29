@@ -278,43 +278,71 @@ defmodule HostctlWeb.DomainLive.Show do
            "Wildcard SSL requires Cloudflare DNS challenge setup first. Configure DNS Provider in panel settings, then retry."
          )}
       else
-        with {:ok, updated_domain} <-
-               Hosting.update_domain(socket.assigns.domain_scope, domain, %{
-                 allow_http_with_ssl: allow_http_with_ssl
-               }),
-             {:ok, cert} <-
-               Hosting.create_ssl_certificate(
-                 updated_domain,
-                 %{
-                   cert_type: "lets_encrypt",
-                   status: "pending",
-                   email: email,
-                   covers_wildcard_subdomains: covers_wildcard_subdomains
-                 },
-                 replace_existing: replacing_existing_cert?
-               ) do
-          Logger.info(
-            "[SSLTRACE2] request_ssl accepted domain_id=#{updated_domain.id} cert_id=#{cert.id} status=#{cert.status}"
-          )
+        Logger.info(
+          "[SSLTRACE2] request_ssl step=update_domain_no_sync start domain_id=#{domain.id}"
+        )
 
-          message =
-            if replacing_existing_cert? do
-              "SSL certificate reissue initiated for #{updated_domain.name}."
-            else
-              "SSL certificate request initiated for #{updated_domain.name}."
+        case Hosting.update_domain_no_sync(socket.assigns.domain_scope, domain, %{
+               allow_http_with_ssl: allow_http_with_ssl
+             }) do
+          {:ok, updated_domain} ->
+            Logger.info(
+              "[SSLTRACE2] request_ssl step=update_domain_no_sync ok domain_id=#{updated_domain.id}"
+            )
+
+            Logger.info(
+              "[SSLTRACE2] request_ssl step=create_ssl_certificate start domain_id=#{updated_domain.id}"
+            )
+
+            case Hosting.create_ssl_certificate(
+                   updated_domain,
+                   %{
+                     cert_type: "lets_encrypt",
+                     status: "pending",
+                     email: email,
+                     covers_wildcard_subdomains: covers_wildcard_subdomains
+                   },
+                   replace_existing: replacing_existing_cert?
+                 ) do
+              {:ok, cert} ->
+                Logger.info(
+                  "[SSLTRACE2] request_ssl accepted domain_id=#{updated_domain.id} cert_id=#{cert.id} status=#{cert.status}"
+                )
+
+                message =
+                  if replacing_existing_cert? do
+                    "SSL certificate reissue initiated for #{updated_domain.name}."
+                  else
+                    "SSL certificate request initiated for #{updated_domain.name}."
+                  end
+
+                {:noreply,
+                 socket
+                 |> assign(:domain, updated_domain)
+                 |> assign(:ssl_cert, cert)
+                 |> assign(:ssl_log_counter, length(initial_log_lines))
+                 |> stream(:ssl_log_lines, initial_log_lines, reset: true)
+                 |> put_flash(:info, message)}
+
+              {:error, reason} ->
+                Logger.error(
+                  "[SSLTRACE2] request_ssl step=create_ssl_certificate failed domain_id=#{updated_domain.id} reason=#{inspect(reason)}"
+                )
+
+                {:noreply,
+                 socket
+                 |> assign(:ssl_log_counter, 1)
+                 |> stream(
+                   :ssl_log_lines,
+                   [%{id: 0, text: "ERROR: Could not initiate SSL request."}],
+                   reset: true
+                 )
+                 |> put_flash(:error, "Could not initiate SSL request.")}
             end
 
-          {:noreply,
-           socket
-           |> assign(:domain, updated_domain)
-           |> assign(:ssl_cert, cert)
-           |> assign(:ssl_log_counter, length(initial_log_lines))
-           |> stream(:ssl_log_lines, initial_log_lines, reset: true)
-           |> put_flash(:info, message)}
-        else
           {:error, reason} ->
             Logger.error(
-              "[SSLTRACE2] request_ssl failed domain_id=#{domain.id} reason=#{inspect(reason)}"
+              "[SSLTRACE2] request_ssl step=update_domain_no_sync failed domain_id=#{domain.id} reason=#{inspect(reason)}"
             )
 
             {:noreply,
@@ -332,6 +360,21 @@ defmodule HostctlWeb.DomainLive.Show do
       e ->
         Logger.error(
           "[SSLTRACE2] request_ssl crashed domain_id=#{socket.assigns.domain.id} error=#{Exception.message(e)}"
+        )
+
+        {:noreply,
+         socket
+         |> assign(:ssl_log_counter, 1)
+         |> stream(
+           :ssl_log_lines,
+           [%{id: 0, text: "ERROR: SSL request crashed before provisioning started."}],
+           reset: true
+         )
+         |> put_flash(:error, "Could not initiate SSL request.")}
+    catch
+      kind, reason ->
+        Logger.error(
+          "[SSLTRACE2] request_ssl caught kind=#{inspect(kind)} domain_id=#{socket.assigns.domain.id} reason=#{inspect(reason)}"
         )
 
         {:noreply,

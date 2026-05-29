@@ -113,6 +113,15 @@ defmodule Hostctl.Hosting do
     end
   end
 
+  @doc "Updates a domain record without triggering immediate web server sync."
+  def update_domain_no_sync(%Scope{} = scope, %Domain{} = domain, attrs) do
+    true = domain.user_id == scope.user.id
+
+    domain
+    |> Domain.changeset(attrs)
+    |> Repo.update()
+  end
+
   def delete_domain(%Scope{} = scope, %Domain{} = domain) do
     delete_domain(scope, domain, [])
   end
