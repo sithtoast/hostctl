@@ -955,9 +955,35 @@ defmodule Hostctl.Hosting do
         WebServer.sync_domain(domain)
 
         if cert.cert_type == "lets_encrypt" do
-          Task.Supervisor.start_child(Hostctl.TaskSupervisor, fn ->
-            provision_lets_encrypt_cert(domain, cert)
-          end)
+          queued_log =
+            [
+              "SSL request queued at #{DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()}",
+              "Waiting for Certbot provisioning task..."
+            ]
+            |> Enum.join("\n")
+
+          _ = update_ssl_certificate(cert, %{status: "pending", log: queued_log})
+
+          case Task.Supervisor.start_child(Hostctl.TaskSupervisor, fn ->
+                 provision_lets_encrypt_cert(domain, cert)
+               end) do
+            {:ok, _pid} ->
+              :ok
+
+            {:error, reason} ->
+              task_error_log =
+                [
+                  queued_log,
+                  "ERROR: Failed to start provisioning task: #{inspect(reason)}"
+                ]
+                |> Enum.join("\n")
+
+              _ = update_ssl_certificate(cert, %{status: "pending", log: task_error_log})
+
+              Logger.error(
+                "[Hosting] Failed to start SSL provisioning task for #{domain.name}: #{inspect(reason)}"
+              )
+          end
         end
 
         result
@@ -1043,7 +1069,10 @@ defmodule Hostctl.Hosting do
       e ->
         log = Exception.format(:error, e, __STACKTRACE__)
         _ = update_ssl_certificate(cert, %{status: "pending", log: log})
-        Logger.error("[Hosting] SSL provisioning crashed for #{domain.name}: #{Exception.message(e)}")
+
+        Logger.error(
+          "[Hosting] SSL provisioning crashed for #{domain.name}: #{Exception.message(e)}"
+        )
     catch
       kind, reason ->
         log = "#{kind}: #{inspect(reason)}"

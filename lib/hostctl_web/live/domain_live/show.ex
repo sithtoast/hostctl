@@ -116,8 +116,8 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign(:ssl_cert, cert)
      |> assign(:domain, domain)
      |> assign(:ssl_log_counter, length(log_lines))
-      |> stream(:ssl_log_lines, log_lines, reset: true)
-      |> maybe_schedule_ssl_log_poll(cert)}
+     |> stream(:ssl_log_lines, log_lines, reset: true)
+     |> maybe_schedule_ssl_log_poll(cert)}
   end
 
   def handle_info({:ssl_log, line}, socket) do
@@ -226,52 +226,116 @@ defmodule HostctlWeb.DomainLive.Show do
   end
 
   def handle_event("request_ssl", %{"ssl_certificate" => params} = request_params, socket) do
-    domain = socket.assigns.domain
-    email = params["email"]
-    allow_http_with_ssl = truthy_param?(request_params["allow_http_with_ssl"])
-    covers_wildcard_subdomains = truthy_param?(params["covers_wildcard_subdomains"])
-    replacing_existing_cert? = socket.assigns.ssl_cert != nil
+    try do
+      domain = socket.assigns.domain
+      email = params["email"]
+      allow_http_with_ssl = truthy_param?(request_params["allow_http_with_ssl"])
+      covers_wildcard_subdomains = truthy_param?(params["covers_wildcard_subdomains"])
+      replacing_existing_cert? = socket.assigns.ssl_cert != nil
 
-    if covers_wildcard_subdomains and !Settings.cloudflare_enabled?() do
-      {:noreply,
-       put_flash(
-         socket,
-         :error,
-         "Wildcard SSL requires Cloudflare DNS challenge setup first. Configure DNS Provider in panel settings, then retry."
-       )}
-    else
-      with {:ok, updated_domain} <-
-             Hosting.update_domain(socket.assigns.domain_scope, domain, %{
-               allow_http_with_ssl: allow_http_with_ssl
-             }),
-           {:ok, cert} <-
-             Hosting.create_ssl_certificate(
-               updated_domain,
-               %{
-                 cert_type: "lets_encrypt",
-                 status: "pending",
-                 email: email,
-                 covers_wildcard_subdomains: covers_wildcard_subdomains
-               }, replace_existing: replacing_existing_cert?) do
-        message =
-          if replacing_existing_cert? do
-            "SSL certificate reissue initiated for #{updated_domain.name}."
-          else
-            "SSL certificate request initiated for #{updated_domain.name}."
-          end
+      submitted_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+      request_scope_line =
+        if covers_wildcard_subdomains do
+          "Requested scope: #{domain.name}, *.#{domain.name}"
+        else
+          "Requested scope: #{domain.name}"
+        end
+
+      initial_log_lines = [
+        %{id: 0, text: "Request accepted at #{submitted_at}"},
+        %{id: 1, text: request_scope_line},
+        %{id: 2, text: "Preparing SSL provisioning task..."}
+      ]
+
+      if covers_wildcard_subdomains and !Settings.cloudflare_enabled?() do
+        {:noreply,
+         socket
+         |> assign(:ssl_log_counter, 1)
+         |> stream(
+           :ssl_log_lines,
+           [
+             %{
+               id: 0,
+               text:
+                 "ERROR: Wildcard SSL requires Cloudflare DNS challenge setup first. Configure DNS Provider in panel settings, then retry."
+             }
+           ],
+           reset: true
+         )
+         |> put_flash(
+           :error,
+           "Wildcard SSL requires Cloudflare DNS challenge setup first. Configure DNS Provider in panel settings, then retry."
+         )}
+      else
+        with {:ok, updated_domain} <-
+               Hosting.update_domain(socket.assigns.domain_scope, domain, %{
+                 allow_http_with_ssl: allow_http_with_ssl
+               }),
+             {:ok, cert} <-
+               Hosting.create_ssl_certificate(
+                 updated_domain,
+                 %{
+                   cert_type: "lets_encrypt",
+                   status: "pending",
+                   email: email,
+                   covers_wildcard_subdomains: covers_wildcard_subdomains
+                 },
+                 replace_existing: replacing_existing_cert?
+               ) do
+          message =
+            if replacing_existing_cert? do
+              "SSL certificate reissue initiated for #{updated_domain.name}."
+            else
+              "SSL certificate request initiated for #{updated_domain.name}."
+            end
+
+          {:noreply,
+           socket
+           |> assign(:domain, updated_domain)
+           |> assign(:ssl_cert, cert)
+           |> assign(:ssl_log_counter, length(initial_log_lines))
+           |> stream(:ssl_log_lines, initial_log_lines, reset: true)
+           |> put_flash(:info, message)}
+        else
+          {:error, _} ->
+            {:noreply,
+             socket
+             |> assign(:ssl_log_counter, 1)
+             |> stream(
+               :ssl_log_lines,
+               [%{id: 0, text: "ERROR: Could not initiate SSL request."}],
+               reset: true
+             )
+             |> put_flash(:error, "Could not initiate SSL request.")}
+        end
+      end
+    rescue
+      e ->
+        Logger.error("[DomainLive.Show] request_ssl failed: #{Exception.message(e)}")
 
         {:noreply,
          socket
-         |> assign(:domain, updated_domain)
-         |> assign(:ssl_cert, cert)
-         |> assign(:ssl_log_counter, 0)
-         |> stream(:ssl_log_lines, [], reset: true)
-         |> put_flash(:info, message)}
-      else
-        {:error, _} ->
-          {:noreply, put_flash(socket, :error, "Could not initiate SSL request.")}
-      end
+         |> assign(:ssl_log_counter, 1)
+         |> stream(
+           :ssl_log_lines,
+           [%{id: 0, text: "ERROR: SSL request crashed before provisioning started."}],
+           reset: true
+         )
+         |> put_flash(:error, "Could not initiate SSL request.")}
     end
+  end
+
+  def handle_event("request_ssl", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:ssl_log_counter, 1)
+     |> stream(
+       :ssl_log_lines,
+       [%{id: 0, text: "ERROR: SSL request payload was invalid."}],
+       reset: true
+     )
+     |> put_flash(:error, "Could not initiate SSL request due to invalid input.")}
   end
 
   # Subdomain events
@@ -1207,7 +1271,12 @@ defmodule HostctlWeb.DomainLive.Show do
                               id={@ssl_form[:covers_wildcard_subdomains].id}
                               name={@ssl_form[:covers_wildcard_subdomains].name}
                               value="true"
-                              checked={Phoenix.HTML.Form.normalize_value("checkbox", @ssl_form[:covers_wildcard_subdomains].value)}
+                              checked={
+                                Phoenix.HTML.Form.normalize_value(
+                                  "checkbox",
+                                  @ssl_form[:covers_wildcard_subdomains].value
+                                )
+                              }
                               class="sr-only peer"
                             />
                             <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-indigo-400 rounded-full peer peer-checked:bg-indigo-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5">
@@ -1358,7 +1427,12 @@ defmodule HostctlWeb.DomainLive.Show do
                           id={@ssl_form[:covers_wildcard_subdomains].id}
                           name={@ssl_form[:covers_wildcard_subdomains].name}
                           value="true"
-                          checked={Phoenix.HTML.Form.normalize_value("checkbox", @ssl_form[:covers_wildcard_subdomains].value)}
+                          checked={
+                            Phoenix.HTML.Form.normalize_value(
+                              "checkbox",
+                              @ssl_form[:covers_wildcard_subdomains].value
+                            )
+                          }
                           class="sr-only peer"
                         />
                         <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-indigo-400 rounded-full peer peer-checked:bg-indigo-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5">
