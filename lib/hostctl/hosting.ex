@@ -975,9 +975,10 @@ defmodule Hostctl.Hosting do
         )
 
         domain = Repo.get!(Domain, domain.id)
-        WebServer.sync_domain(domain)
 
         if cert.cert_type == "lets_encrypt" do
+          # Defer WebServer.sync_domain into the provisioning task so it does not
+          # block cert record creation or the spawning of the Certbot task itself.
           queued_log =
             [
               "SSL request queued at #{DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()}",
@@ -988,6 +989,11 @@ defmodule Hostctl.Hosting do
           _ = update_ssl_certificate(cert, %{status: "pending", log: queued_log})
 
           case Task.Supervisor.start_child(Hostctl.TaskSupervisor, fn ->
+                 Logger.info(
+                   "[SSLTRACE2] provisioning task running domain_id=#{domain.id} cert_id=#{cert.id}"
+                 )
+
+                 WebServer.sync_domain(domain)
                  provision_lets_encrypt_cert(domain, cert)
                end) do
             {:ok, pid} ->
@@ -1011,6 +1017,10 @@ defmodule Hostctl.Hosting do
                 "[SSLTRACE2] provisioning task start failed domain_id=#{domain.id} cert_id=#{cert.id} reason=#{inspect(reason)}"
               )
           end
+        else
+          # Non-lets_encrypt cert (e.g. custom): sync web server inline since
+          # there is no background provisioning task to do it.
+          WebServer.sync_domain(domain)
         end
 
         result
