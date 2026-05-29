@@ -3,6 +3,8 @@ defmodule HostctlWeb.DomainLive.Show do
 
   require Logger
 
+  @ssl_log_poll_ms 1000
+
   alias Hostctl.Hosting
   alias Hostctl.Hosting.{SslCertificate, Subdomain, DomainS3Backend}
   alias Hostctl.Accounts.Scope
@@ -85,7 +87,8 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign(
        :bandwidth_chart_data,
        bandwidth_chart_data(Hosting.list_bandwidth_snapshots(domain))
-     )}
+     )
+     |> maybe_schedule_ssl_log_poll(ssl_cert)}
   end
 
   def handle_params(params, _url, socket) do
@@ -113,7 +116,8 @@ defmodule HostctlWeb.DomainLive.Show do
      |> assign(:ssl_cert, cert)
      |> assign(:domain, domain)
      |> assign(:ssl_log_counter, length(log_lines))
-     |> stream(:ssl_log_lines, log_lines, reset: true)}
+      |> stream(:ssl_log_lines, log_lines, reset: true)
+      |> maybe_schedule_ssl_log_poll(cert)}
   end
 
   def handle_info({:ssl_log, line}, socket) do
@@ -124,6 +128,27 @@ defmodule HostctlWeb.DomainLive.Show do
      socket
      |> assign(:ssl_log_counter, idx + 1)
      |> stream_insert(:ssl_log_lines, entry)}
+  end
+
+  def handle_info(:refresh_ssl_log, socket) do
+    cert = Hosting.get_ssl_certificate(socket.assigns.domain)
+
+    log_lines =
+      if cert && cert.log do
+        cert.log
+        |> String.split("\n")
+        |> Enum.with_index()
+        |> Enum.map(fn {line, idx} -> %{id: idx, text: normalize_ssl_log_line(line)} end)
+      else
+        []
+      end
+
+    {:noreply,
+     socket
+     |> assign(:ssl_cert, cert)
+     |> assign(:ssl_log_counter, length(log_lines))
+     |> stream(:ssl_log_lines, log_lines, reset: true)
+     |> maybe_schedule_ssl_log_poll(cert)}
   end
 
   def handle_info(message, socket) do
@@ -612,6 +637,13 @@ defmodule HostctlWeb.DomainLive.Show do
 
   defp normalize_ssl_log_line(line) when is_binary(line), do: String.replace_invalid(line, "?")
   defp normalize_ssl_log_line(line), do: inspect(line)
+
+  defp maybe_schedule_ssl_log_poll(socket, %SslCertificate{status: "pending"}) do
+    Process.send_after(self(), :refresh_ssl_log, @ssl_log_poll_ms)
+    socket
+  end
+
+  defp maybe_schedule_ssl_log_poll(socket, _), do: socket
 
   defp section_from_param("overview"), do: :overview
   defp section_from_param("subdomains"), do: :subdomains

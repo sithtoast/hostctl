@@ -128,6 +128,7 @@ defmodule Hostctl.CertBot do
         "--non-interactive",
         "--agree-tos",
         "--force-renewal",
+        "--renew-by-default",
         "--expand",
         "--cert-name",
         domain_name
