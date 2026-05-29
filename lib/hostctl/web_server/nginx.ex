@@ -116,9 +116,9 @@ defmodule Hostctl.WebServer.Nginx do
             "#{sub.name}.#{domain.name}",
             "#{sub.name}.#{domain.name}",
             whole_sub_backend,
-            false,
-            nil,
-            false
+            use_ssl,
+            ssl_cert,
+            allow_http_with_ssl
           )
         else
           vhost_block(
@@ -148,9 +148,9 @@ defmodule Hostctl.WebServer.Nginx do
             "#{sub_name}.#{domain.name}",
             "#{sub_name}.#{domain.name}",
             whole_sub_backend,
-            false,
-            nil,
-            false
+            use_ssl,
+            ssl_cert,
+            allow_http_with_ssl
           )
         else
           # No filesystem document root for this subdomain – generate a basic
