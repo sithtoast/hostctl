@@ -15,7 +15,8 @@ config :hostctl, HostctlWeb.Endpoint,
     rewrite_on: [:x_forwarded_proto],
     exclude: [
       # paths: ["/health"],
-      hosts: ["localhost", "127.0.0.1"]
+      hosts: ["localhost", "127.0.0.1"],
+      conn: {HostctlWeb.SSLExclusions, :exclude_force_ssl?, []}
     ]
   ]
 
