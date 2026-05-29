@@ -138,6 +138,11 @@ defmodule Hostctl.CertBot do
         extra_args ++
         domain_args
 
+    Logger.info(
+      "[SSLTRACE2] certbot invocation domain_id=#{domain_id} domain=#{domain_name} " <>
+        "wildcard=#{cert.covers_wildcard_subdomains} letsencrypt_dir=#{le_dir}"
+    )
+
     broadcast_log(domain_id, "Running: #{cmd} #{Enum.join(args, " ")}")
     Logger.info("[CertBot] Running: #{cmd} #{Enum.join(args, " ")}")
 

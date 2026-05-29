@@ -233,6 +233,12 @@ defmodule HostctlWeb.DomainLive.Show do
       covers_wildcard_subdomains = truthy_param?(params["covers_wildcard_subdomains"])
       replacing_existing_cert? = socket.assigns.ssl_cert != nil
 
+      Logger.info(
+        "[SSLTRACE2] request_ssl received domain_id=#{domain.id} domain=#{domain.name} " <>
+          "replace_existing=#{replacing_existing_cert?} wildcard=#{covers_wildcard_subdomains} " <>
+          "allow_http_with_ssl=#{allow_http_with_ssl}"
+      )
+
       submitted_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
       request_scope_line =
@@ -249,6 +255,10 @@ defmodule HostctlWeb.DomainLive.Show do
       ]
 
       if covers_wildcard_subdomains and !Settings.cloudflare_enabled?() do
+        Logger.warning(
+          "[SSLTRACE2] request_ssl blocked domain_id=#{domain.id} reason=wildcard_without_cloudflare"
+        )
+
         {:noreply,
          socket
          |> assign(:ssl_log_counter, 1)
@@ -283,6 +293,10 @@ defmodule HostctlWeb.DomainLive.Show do
                  },
                  replace_existing: replacing_existing_cert?
                ) do
+          Logger.info(
+            "[SSLTRACE2] request_ssl accepted domain_id=#{updated_domain.id} cert_id=#{cert.id} status=#{cert.status}"
+          )
+
           message =
             if replacing_existing_cert? do
               "SSL certificate reissue initiated for #{updated_domain.name}."
@@ -298,7 +312,11 @@ defmodule HostctlWeb.DomainLive.Show do
            |> stream(:ssl_log_lines, initial_log_lines, reset: true)
            |> put_flash(:info, message)}
         else
-          {:error, _} ->
+          {:error, reason} ->
+            Logger.error(
+              "[SSLTRACE2] request_ssl failed domain_id=#{domain.id} reason=#{inspect(reason)}"
+            )
+
             {:noreply,
              socket
              |> assign(:ssl_log_counter, 1)
@@ -312,7 +330,9 @@ defmodule HostctlWeb.DomainLive.Show do
       end
     rescue
       e ->
-        Logger.error("[DomainLive.Show] request_ssl failed: #{Exception.message(e)}")
+        Logger.error(
+          "[SSLTRACE2] request_ssl crashed domain_id=#{socket.assigns.domain.id} error=#{Exception.message(e)}"
+        )
 
         {:noreply,
          socket
@@ -326,7 +346,11 @@ defmodule HostctlWeb.DomainLive.Show do
     end
   end
 
-  def handle_event("request_ssl", _params, socket) do
+  def handle_event("request_ssl", params, socket) do
+    Logger.error(
+      "[SSLTRACE2] request_ssl invalid_payload domain_id=#{socket.assigns.domain.id} payload=#{inspect(params)}"
+    )
+
     {:noreply,
      socket
      |> assign(:ssl_log_counter, 1)

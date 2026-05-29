@@ -933,6 +933,12 @@ defmodule Hostctl.Hosting do
 
   def create_ssl_certificate(%Domain{} = domain, attrs, opts \\ []) do
     replace_existing = Keyword.get(opts, :replace_existing, false)
+    cert_type = Map.get(attrs, :cert_type) || Map.get(attrs, "cert_type")
+
+    Logger.info(
+      "[SSLTRACE2] create_ssl_certificate start domain_id=#{domain.id} domain=#{domain.name} " <>
+        "replace_existing=#{replace_existing} cert_type=#{cert_type}"
+    )
 
     cert_result =
       if replace_existing do
@@ -941,6 +947,10 @@ defmodule Hostctl.Hosting do
             insert_ssl_certificate(domain, attrs)
 
           existing_cert ->
+            Logger.info(
+              "[SSLTRACE2] replacing existing cert domain_id=#{domain.id} old_cert_id=#{existing_cert.id}"
+            )
+
             with {:ok, _} <- Repo.delete(existing_cert) do
               insert_ssl_certificate(domain, attrs)
             end
@@ -951,6 +961,10 @@ defmodule Hostctl.Hosting do
 
     case cert_result do
       {:ok, cert} = result ->
+        Logger.info(
+          "[SSLTRACE2] create_ssl_certificate inserted domain_id=#{domain.id} cert_id=#{cert.id} cert_type=#{cert.cert_type}"
+        )
+
         domain = Repo.get!(Domain, domain.id)
         WebServer.sync_domain(domain)
 
@@ -967,7 +981,11 @@ defmodule Hostctl.Hosting do
           case Task.Supervisor.start_child(Hostctl.TaskSupervisor, fn ->
                  provision_lets_encrypt_cert(domain, cert)
                end) do
-            {:ok, _pid} ->
+            {:ok, pid} ->
+              Logger.info(
+                "[SSLTRACE2] provisioning task started domain_id=#{domain.id} cert_id=#{cert.id} pid=#{inspect(pid)}"
+              )
+
               :ok
 
             {:error, reason} ->
@@ -981,7 +999,7 @@ defmodule Hostctl.Hosting do
               _ = update_ssl_certificate(cert, %{status: "pending", log: task_error_log})
 
               Logger.error(
-                "[Hosting] Failed to start SSL provisioning task for #{domain.name}: #{inspect(reason)}"
+                "[SSLTRACE2] provisioning task start failed domain_id=#{domain.id} cert_id=#{cert.id} reason=#{inspect(reason)}"
               )
           end
         end
@@ -989,6 +1007,10 @@ defmodule Hostctl.Hosting do
         result
 
       error ->
+        Logger.error(
+          "[SSLTRACE2] create_ssl_certificate failed domain_id=#{domain.id} reason=#{inspect(error)}"
+        )
+
         error
     end
   end
@@ -1029,6 +1051,11 @@ defmodule Hostctl.Hosting do
   end
 
   defp provision_lets_encrypt_cert(%Domain{} = domain, %SslCertificate{} = cert) do
+    Logger.info(
+      "[SSLTRACE2] provision_lets_encrypt_cert start domain_id=#{domain.id} cert_id=#{cert.id} " <>
+        "wildcard=#{cert.covers_wildcard_subdomains}"
+    )
+
     try do
       case CertBot.provision(domain, cert) do
         {:ok, expires_at, log} ->
@@ -1050,18 +1077,25 @@ defmodule Hostctl.Hosting do
 
           case update_ssl_certificate(cert, %{status: "active", expires_at: expires_at, log: log}) do
             {:ok, _} ->
-              Logger.info("[Hosting] SSL certificate activated for #{domain.name}")
+              Logger.info(
+                "[SSLTRACE2] certificate activated domain_id=#{domain.id} cert_id=#{cert.id}"
+              )
 
             {:error, reason} ->
               Logger.error(
-                "[Hosting] Failed to mark SSL cert active for #{domain.name}: #{inspect(reason)}"
+                "[SSLTRACE2] failed to mark active domain_id=#{domain.id} cert_id=#{cert.id} reason=#{inspect(reason)}"
               )
           end
 
         {:error, :disabled, _log} ->
+          Logger.warning("[SSLTRACE2] certbot disabled domain_id=#{domain.id} cert_id=#{cert.id}")
           :ok
 
-        {:error, _reason, log} ->
+        {:error, reason, log} ->
+          Logger.error(
+            "[SSLTRACE2] certbot provision failed domain_id=#{domain.id} cert_id=#{cert.id} reason=#{inspect(reason)}"
+          )
+
           update_ssl_certificate(cert, %{status: "pending", log: log})
           Logger.error("[Hosting] SSL provisioning failed for #{domain.name}")
       end
