@@ -276,14 +276,14 @@ defmodule Hostctl.Settings do
     %{
       type: "TXT",
       name: "{{domain}}",
-      value: "v=spf1 +a +mx +a:{{hostname}} -all",
+      value: "v=spf1 ip4:{{ip}} ~all",
       ttl: 300,
       description: "SPF record"
     },
     %{
       type: "TXT",
       name: "_dmarc.{{domain}}",
-      value: "v=DMARC1; p=quarantine; adkim=s; aspf=s",
+      value: "v=DMARC1; p=none",
       ttl: 300,
       description: "DMARC policy"
     },

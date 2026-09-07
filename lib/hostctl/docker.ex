@@ -63,7 +63,6 @@ defmodule Hostctl.Docker do
     case run(["start", container_id]) do
       {:ok, _} -> :ok
       {:error, :command_failed} -> {:error, "Failed to start container"}
-      error -> error
     end
   end
 
@@ -72,7 +71,6 @@ defmodule Hostctl.Docker do
     case run(["stop", container_id]) do
       {:ok, _} -> :ok
       {:error, :command_failed} -> {:error, "Failed to stop container"}
-      error -> error
     end
   end
 
@@ -81,7 +79,6 @@ defmodule Hostctl.Docker do
     case run(["restart", container_id]) do
       {:ok, _} -> :ok
       {:error, :command_failed} -> {:error, "Failed to restart container"}
-      error -> error
     end
   end
 
@@ -145,7 +142,6 @@ defmodule Hostctl.Docker do
     case run(["logs", "--tail", to_string(lines), "--timestamps", container_id]) do
       {:ok, output} -> {:ok, output}
       {:error, :command_failed} -> {:error, "Failed to fetch container logs"}
-      error -> error
     end
   end
 
@@ -174,7 +170,6 @@ defmodule Hostctl.Docker do
        |> Enum.reject(&is_nil/1)}
     else
       {:error, :command_failed} -> {:error, "Search failed or registry unavailable"}
-      error -> error
     end
   end
 
@@ -200,9 +195,6 @@ defmodule Hostctl.Docker do
 
       {:error, :command_failed} ->
         {:error, "Docker Compose not available or no stacks running"}
-
-      error ->
-        error
     end
   end
 
@@ -211,7 +203,6 @@ defmodule Hostctl.Docker do
     case run(["pull", image_name]) do
       {:ok, output} -> {:ok, String.trim(output)}
       {:error, :command_failed} -> {:error, "Failed to pull image"}
-      error -> error
     end
   end
 
@@ -249,9 +240,6 @@ defmodule Hostctl.Docker do
 
       {:error, :command_failed} ->
         {:error, docker_error_message()}
-
-      error ->
-        error
     end
   end
 
@@ -263,9 +251,6 @@ defmodule Hostctl.Docker do
 
       {:error, :command_failed} ->
         {:error, "Failed to remove image. Is it in use by a container?"}
-
-      error ->
-        error
     end
   end
 
@@ -274,7 +259,6 @@ defmodule Hostctl.Docker do
     case run(["rm", container_id]) do
       {:ok, _} -> :ok
       {:error, :command_failed} -> {:error, "Failed to remove container. Is it still running?"}
-      error -> error
     end
   end
 
@@ -286,7 +270,6 @@ defmodule Hostctl.Docker do
     case run(["rename", container_id, new_name]) do
       {:ok, _} -> :ok
       {:error, :command_failed} -> {:error, "Failed to rename container"}
-      error -> error
     end
   end
 
@@ -340,7 +323,6 @@ defmodule Hostctl.Docker do
     case run(args) do
       {:ok, container_id} -> {:ok, String.trim(container_id)}
       {:error, :command_failed} -> {:error, "Failed to run container from image #{image}"}
-      error -> error
     end
   end
 
@@ -379,7 +361,6 @@ defmodule Hostctl.Docker do
     case run(["compose", "-p", project_name, "up", "-d"]) do
       {:ok, _} -> :ok
       {:error, :command_failed} -> {:error, "Failed to start compose stack"}
-      error -> error
     end
   end
 
@@ -388,7 +369,6 @@ defmodule Hostctl.Docker do
     case run(["compose", "-p", project_name, "down"]) do
       {:ok, _} -> :ok
       {:error, :command_failed} -> {:error, "Failed to stop compose stack"}
-      error -> error
     end
   end
 
@@ -397,7 +377,6 @@ defmodule Hostctl.Docker do
     case run(["compose", "-p", project_name, "restart"]) do
       {:ok, _} -> :ok
       {:error, :command_failed} -> {:error, "Failed to restart compose stack"}
-      error -> error
     end
   end
 
@@ -418,7 +397,6 @@ defmodule Hostctl.Docker do
       case run(["compose", "-f", file_path, "-p", project_name, "up", "-d"]) do
         {:ok, _} -> :ok
         {:error, :command_failed} -> {:error, "Failed to deploy compose stack"}
-        error -> error
       end
     else
       {:error, reason} -> {:error, "Failed to save compose file: #{inspect(reason)}"}

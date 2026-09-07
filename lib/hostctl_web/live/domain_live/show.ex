@@ -459,11 +459,20 @@ defmodule HostctlWeb.DomainLive.Show do
     sub = Enum.find(subdomains, &(to_string(&1.id) == id))
 
     if sub do
-      case Hosting.update_subdomain(sub, %{autoindex: !sub.autoindex}) do
-        {:ok, updated} ->
+      result =
+        case subdomain_s3_backend(Hosting.list_s3_backends(socket.assigns.domain), sub) do
+          nil ->
+            Hosting.update_subdomain(sub, %{autoindex: !sub.autoindex})
+
+          backend ->
+            Hosting.update_s3_backend(backend, %{directory_listing: !backend.directory_listing})
+        end
+
+      case result do
+        {:ok, _updated} ->
           {:noreply,
            socket
-           |> stream_insert(:subdomains, updated)
+           |> assign_s3_backends()
            |> put_flash(:info, "Directory listings updated.")}
 
         {:error, _} ->
@@ -775,7 +784,23 @@ defmodule HostctlWeb.DomainLive.Show do
 
   defp assign_s3_backends(socket) do
     backends = Hosting.list_s3_backends(socket.assigns.domain)
-    assign(socket, :s3_backends, backends)
+
+    socket
+    |> assign(:s3_backends, backends)
+    |> stream(:subdomains, Hosting.list_subdomains(socket.assigns.domain), reset: true)
+  end
+
+  defp subdomain_s3_backend(backends, subdomain) do
+    Enum.find(backends, fn backend ->
+      backend.enabled && backend.subdomain == subdomain.name && backend.url_path in [nil, ""]
+    end)
+  end
+
+  defp subdomain_directory_listing?(backends, subdomain) do
+    case subdomain_s3_backend(backends, subdomain) do
+      nil -> subdomain.autoindex
+      backend -> backend.directory_listing
+    end
   end
 
   defp truthy_param?(value), do: value in [true, "true", "on", "1"]
@@ -805,7 +830,7 @@ defmodule HostctlWeb.DomainLive.Show do
     socket =
       case section do
         :subdomains ->
-          stream(socket, :subdomains, Hosting.list_subdomains(domain), reset: true)
+          assign_s3_backends(socket)
 
         :cron ->
           stream(socket, :cron_jobs, Hosting.list_cron_jobs(domain), reset: true)
@@ -1115,7 +1140,10 @@ defmodule HostctlWeb.DomainLive.Show do
               phx-update="stream"
               class="divide-y divide-gray-100 dark:divide-gray-800"
             >
-              <div class="hidden only:flex items-center justify-center py-10 text-sm text-gray-400">
+              <div
+                id="subdomains-empty"
+                class="hidden only:flex items-center justify-center py-10 text-sm text-gray-400"
+              >
                 No subdomains yet.
               </div>
               <div
@@ -1131,11 +1159,13 @@ defmodule HostctlWeb.DomainLive.Show do
                 </div>
                 <div class="flex items-center gap-3">
                   <button
+                    id={"subdomain-listings-#{sub.id}"}
+                    aria-pressed={to_string(subdomain_directory_listing?(@s3_backends, sub))}
                     phx-click="toggle_subdomain_autoindex"
                     phx-value-id={sub.id}
                     class={[
                       "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors",
-                      if(sub.autoindex,
+                      if(subdomain_directory_listing?(@s3_backends, sub),
                         do:
                           "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300",
                         else:
@@ -1145,10 +1175,16 @@ defmodule HostctlWeb.DomainLive.Show do
                     title="Toggle directory listings"
                   >
                     <.icon
-                      name={if sub.autoindex, do: "hero-folder-open", else: "hero-folder"}
+                      name={
+                        if subdomain_directory_listing?(@s3_backends, sub),
+                          do: "hero-folder-open",
+                          else: "hero-folder"
+                      }
                       class="w-3 h-3"
                     />
-                    {if sub.autoindex, do: "Listings on", else: "Listings off"}
+                    {if subdomain_directory_listing?(@s3_backends, sub),
+                      do: "Listings on",
+                      else: "Listings off"}
                   </button>
                   <button
                     phx-click="delete_subdomain"
@@ -1652,10 +1688,10 @@ defmodule HostctlWeb.DomainLive.Show do
                         <.icon name="hero-arrow-path" class="w-3.5 h-3.5 animate-spin" />
                         Connecting to Mailgun and creating SMTP credentials...
                       </p>
-                    <% {:ok, _} -> %>
+                    <% :ok -> %>
                       <p class="mt-2 text-xs text-green-700 dark:text-green-400 flex items-center gap-1">
                         <.icon name="hero-check-circle" class="w-3.5 h-3.5 shrink-0" />
-                        Credentials created and form pre-filled — review and save below.
+                        Credentials created. Save the relay below, then ask your administrator to publish the staged DNS records in Email Delivery.
                       </p>
                     <% {:error, reason} -> %>
                       <p class="mt-2 text-xs text-red-600 dark:text-red-400 flex items-center gap-1">

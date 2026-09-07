@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Run on the development machine. Usage: bash scripts/vm-sync user@vm [--dry-run]
+set -euo pipefail
+
+if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && "$2" != --dry-run ) ]]; then
+  echo "Usage: bash scripts/vm-sync user@vm [--dry-run]" >&2
+  exit 2
+fi
+
+target="$1"
+[[ "$target" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$ ]] || {
+  echo "Use an SSH config alias or user@hostname (no port/path/options)." >&2
+  exit 2
+}
+
+source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+options=()
+[[ $# -eq 1 ]] || options+=(--dry-run)
+
+# Deletion is limited to the dedicated source tree. Excluded VM build caches
+# and local configuration are protected by rsync's default exclusion behavior.
+rsync -rtz --checksum --delete --itemize-changes \
+  --exclude='/.git/' --exclude='/deps/' --exclude='/_build/' \
+  --exclude='/assets/node_modules/' --exclude='/priv/static/assets/' \
+  --exclude='/priv/static/cache_manifest.json' --exclude='/priv/COMMIT' \
+  --exclude='/priv/VERSION' --exclude='/.env*' --exclude='/tmp/' \
+  --exclude='/cover/' --exclude='/erl_crash.dump' \
+  --exclude='.DS_Store' --exclude='__pycache__/' \
+  ${options[@]+"${options[@]}"} "$source_dir/" "$target:/var/lib/hostctl/dev/"
+
+# macOS openrsync accepts --chmod but does not consistently apply it. Set
+# permissions on SSH-user-owned source only; leave service-owned caches alone.
+if [[ $# -eq 1 ]]; then
+  ssh "$target" 'set -eu
+    find /var/lib/hostctl/dev -user "$(id -un)" -exec chgrp hostctl {} +
+    find /var/lib/hostctl/dev -user "$(id -un)" -exec chmod g+rwX {} +
+    find /var/lib/hostctl/dev -type d -user "$(id -un)" -exec chmod g+s {} +'
+fi

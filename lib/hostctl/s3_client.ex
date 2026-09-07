@@ -12,6 +12,166 @@ defmodule Hostctl.S3Client do
 
   require Logger
 
+  @doc "Accepts a bare hostname as HTTPS and rejects credentials, paths and query strings."
+  def normalize_endpoint(value) when is_binary(value) do
+    value = String.trim(value)
+
+    value =
+      if value != "" and not String.contains?(value, "://"), do: "https://" <> value, else: value
+
+    uri = URI.parse(value)
+
+    if uri.scheme in ["https", "http"] and is_binary(uri.host) and uri.host != "" and
+         not String.contains?(uri.host, [" ", "\n", "\t"]) and
+         uri.userinfo == nil and uri.query == nil and uri.fragment == nil and
+         uri.path in [nil, "", "/"] do
+      {:ok, String.trim_trailing(value, "/")}
+    else
+      {:error, "Use an S3 endpoint such as https://s3.wasabisys.com, without a bucket or path"}
+    end
+  end
+
+  def normalize_endpoint(_), do: {:error, "S3 endpoint is required"}
+
+  def normalize_endpoint_change(value) do
+    case normalize_endpoint(value) do
+      {:ok, endpoint} -> endpoint
+      _ -> value
+    end
+  end
+
+  @doc "Lists buckets visible to a connection. Manual entry remains available for restricted keys."
+  def list_buckets(opts, request_opts \\ []) do
+    list_bucket_page(opts, request_opts, nil, [], MapSet.new())
+  end
+
+  defp list_bucket_page(opts, request_opts, token, acc, seen) do
+    query = if token, do: "continuation-token=" <> s3_encode(token), else: ""
+
+    with {:ok, body} <- bucket_request(:get, "/", query, "", opts, request_opts) do
+      names =
+        Regex.scan(~r|<Bucket>(.*?)</Bucket>|s, body, capture: :all_but_first)
+        |> Enum.flat_map(fn [bucket_xml] ->
+          case Regex.run(~r|<Name>([a-z0-9.-]+)</Name>|, bucket_xml, capture: :all_but_first) do
+            [name] -> [name]
+            _ -> []
+          end
+        end)
+
+      next =
+        case Regex.run(~r|<ContinuationToken>([^<]+)</ContinuationToken>|, body,
+               capture: :all_but_first
+             ) do
+          [value] -> String.replace(value, "&amp;", "&")
+          _ -> nil
+        end
+
+      cond do
+        next == nil -> {:ok, Enum.sort(Enum.uniq(acc ++ names))}
+        MapSet.member?(seen, next) -> {:error, "S3 returned a repeated pagination token"}
+        true -> list_bucket_page(opts, request_opts, next, acc ++ names, MapSet.put(seen, next))
+      end
+    end
+  end
+
+  @doc "Creates a private bucket in the connection's region. Does not change existing bucket permissions."
+  def create_bucket(opts, bucket, request_opts \\ []) do
+    region = Map.get(opts, :region, "us-east-1")
+
+    if Regex.match?(~r/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, bucket) and
+         Regex.match?(~r/^[a-z0-9-]+$/, region) do
+      body =
+        if region == "us-east-1",
+          do: "",
+          else:
+            ~s(<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><LocationConstraint>#{region}</LocationConstraint></CreateBucketConfiguration>)
+
+      with {:ok, :missing} <- bucket_request(:head, "/" <> bucket, "", "", opts, request_opts),
+           {:ok, _} <- bucket_request(:put, "/" <> bucket, "", body, opts, request_opts) do
+        :ok
+      else
+        {:ok, _} -> {:error, "This bucket already exists; choose it as an existing bucket"}
+        error -> error
+      end
+    else
+      {:error, "Enter a valid bucket name and region"}
+    end
+  end
+
+  defp bucket_request(method, path, query, body, opts, request_opts) do
+    with {:ok, endpoint} <- normalize_endpoint(Map.get(opts, :endpoint)),
+         key when is_binary(key) and key != "" <- Map.get(opts, :access_key_id),
+         secret when is_binary(secret) and secret != "" <- Map.get(opts, :secret_access_key) do
+      now = DateTime.utc_now()
+      amzdate = amz_datetime(now)
+      hash = hex_sha256(body)
+
+      headers = [
+        {"host", uri_host(endpoint)},
+        {"x-amz-content-sha256", hash},
+        {"x-amz-date", amzdate}
+      ]
+
+      signed = signed_headers_string(headers)
+
+      canonical =
+        Enum.join(
+          [
+            String.upcase(to_string(method)),
+            path,
+            query,
+            canonical_headers_string(headers),
+            signed,
+            hash
+          ],
+          "\n"
+        )
+
+      # The AWS global endpoint is signed in us-east-1, including regional creates.
+      region =
+        if URI.parse(endpoint).host == "s3.amazonaws.com",
+          do: "us-east-1",
+          else: Map.get(opts, :region, "us-east-1")
+
+      authorization =
+        build_auth_header(canonical, amzdate, amz_date(now), signed, key, secret, region, "s3")
+
+      url = endpoint <> path <> if(query == "", do: "", else: "?" <> query)
+
+      request =
+        Keyword.merge(
+          [
+            method: method,
+            url: url,
+            body: body,
+            headers: [{"authorization", authorization} | headers],
+            retry: false,
+            redirect: false,
+            receive_timeout: 15_000,
+            decode_body: false
+          ],
+          request_opts
+        )
+
+      case Req.request(request) do
+        {:ok, %{status: 404}} when method == :head ->
+          {:ok, :missing}
+
+        {:ok, %{status: status, body: response}} when status in 200..299 ->
+          {:ok, response}
+
+        {:ok, %{status: status}} ->
+          {:error, "S3 returned HTTP #{status}; check credentials, region and bucket permissions"}
+
+        {:error, _} ->
+          {:error, "Could not connect to S3; check endpoint and network access"}
+      end
+    else
+      {:error, _} = error -> error
+      _ -> {:error, "S3 access key and secret are required"}
+    end
+  end
+
   @doc """
   Uploads a local file to an S3-compatible bucket.
 

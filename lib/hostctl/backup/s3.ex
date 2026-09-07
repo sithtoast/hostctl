@@ -9,8 +9,6 @@ defmodule Hostctl.Backup.S3 do
   Larger files use multipart upload (5 MB minimum part size, 10 MB chunks).
   """
 
-  require Logger
-
   @multipart_threshold 10 * 1024 * 1024
   @part_size 10 * 1024 * 1024
 

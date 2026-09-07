@@ -69,15 +69,18 @@ defmodule Hostctl.UploadWorker do
     job = Hosting.get_upload_job!(job_id)
 
     if job.status in ["paused", "failed", "pending"] do
-      Hosting.update_upload_job(job, %{status: "pending", error_message: nil})
-
-      case DynamicSupervisor.start_child(
-             Hostctl.UploadSupervisor,
-             {__MODULE__, job.id}
-           ) do
-        {:ok, _pid} -> {:ok, job}
-        {:error, {:already_started, _pid}} -> {:ok, job}
-        {:error, reason} -> {:error, reason}
+      with {:ok, endpoint} <- Hostctl.S3Client.normalize_endpoint(job.s3_endpoint),
+           {:ok, job} <-
+             Hosting.update_upload_job(job, %{
+               status: "pending",
+               error_message: nil,
+               s3_endpoint: endpoint
+             }) do
+        case DynamicSupervisor.start_child(Hostctl.UploadSupervisor, {__MODULE__, job.id}) do
+          {:ok, _pid} -> {:ok, job}
+          {:error, {:already_started, _pid}} -> {:ok, job}
+          {:error, reason} -> {:error, reason}
+        end
       end
     else
       {:error, :invalid_status}
@@ -112,10 +115,21 @@ defmodule Hostctl.UploadWorker do
     broadcast_progress(job)
 
     result =
-      if streaming_mode?(job) do
-        run_streaming_upload(job)
-      else
-        run_staged_upload(job)
+      try do
+        with {:ok, endpoint} <- S3Client.normalize_endpoint(job.s3_endpoint) do
+          job = %{job | s3_endpoint: endpoint}
+          if streaming_mode?(job), do: run_streaming_upload(job), else: run_staged_upload(job)
+        else
+          {:error, message} -> {:error, message, job.uploaded_files, job.failed_files}
+        end
+      rescue
+        exception ->
+          # Exception messages may contain signed URLs or credentials. Persist a safe
+          # failure instead of crashing and leaving this job marked as running.
+          Logger.error("[UploadWorker] Job #{job.id} raised #{inspect(exception.__struct__)}")
+
+          {:error, "Unexpected upload failure; retry after checking the destination",
+           job.uploaded_files, job.failed_files}
       end
 
     total = job.total_files

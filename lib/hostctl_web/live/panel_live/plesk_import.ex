@@ -91,6 +91,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:subscriptions, [])
      |> assign(:domain_configs, %{})
      |> assign(:domain_s3_backends, %{})
+     |> assign(:s3_connections, Hostctl.S3Connections.list(socket.assigns.current_scope))
+     |> assign(:s3_bucket_lists, %{})
+     |> assign(:s3_busy, MapSet.new())
      |> assign(:restore_results, %{})
      |> assign(:restore_progress, %{})
      |> assign(:restore_task_refs, %{})
@@ -228,6 +231,96 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     {:noreply, assign(socket, :domain_configs, Map.put(configs, domain, config))}
   end
 
+  def handle_event("set_s3_config", %{"destination" => params}, socket),
+    do: handle_event("set_s3_config", params, socket)
+
+  def handle_event("use_s3_connection", %{"connection" => params}, socket) do
+    case Hostctl.S3Connections.get(socket.assigns.current_scope, params["id"]) do
+      nil ->
+        {:noreply, put_flash(socket, :error, "Select one of your saved S3 connections")}
+
+      connection ->
+        tc = s3_target(socket, params)
+
+        tc =
+          Map.merge(tc, %{
+            s3_endpoint: connection.endpoint_url,
+            s3_region: connection.region,
+            s3_access_key: connection.access_key_id,
+            s3_secret_key: connection.secret_access_key
+          })
+
+        {:noreply, put_s3_target(socket, params, tc)}
+    end
+  end
+
+  def handle_event("choose_s3_bucket", %{"selection" => params}, socket) do
+    tc = Map.put(s3_target(socket, params), :s3_bucket, params["bucket"])
+    {:noreply, put_s3_target(socket, params, tc)}
+  end
+
+  def handle_event("save_s3_connection", %{"destination" => params}, socket) do
+    {:noreply, socket} = handle_event("set_s3_config", params, socket)
+    tc = s3_target(socket, params)
+
+    attrs = %{
+      name: params["connection_name"],
+      endpoint_url: tc[:s3_endpoint],
+      region: tc[:s3_region],
+      access_key_id: tc[:s3_access_key],
+      secret_access_key: tc[:s3_secret_key]
+    }
+
+    case Hostctl.S3Connections.save(socket.assigns.current_scope, attrs) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> assign(:s3_connections, Hostctl.S3Connections.list(socket.assigns.current_scope))
+         |> put_flash(:info, "S3 connection saved. You can reuse it on another destination.")}
+
+      {:error, cs} ->
+        {:noreply, put_flash(socket, :error, changeset_error_summary(cs))}
+    end
+  end
+
+  def handle_event(event, %{"domain" => _, "target" => _} = params, socket)
+      when event in ["list_s3_buckets", "create_s3_bucket"] do
+    tc = s3_target(socket, params)
+    key = {params["domain"], params["target"]}
+    opts = build_s3_backend_opts_from_config(Map.put_new(tc, :s3_bucket, "placeholder"))
+    # Bucket listing does not require a bucket name.
+    opts =
+      opts ||
+        %{
+          endpoint: tc[:s3_endpoint],
+          access_key_id: tc[:s3_access_key],
+          secret_access_key: tc[:s3_secret_key],
+          region: tc[:s3_region] || "us-east-1"
+        }
+
+    if MapSet.member?(socket.assigns.s3_busy, key) do
+      {:noreply, socket}
+    else
+      bucket = tc[:s3_bucket] || ""
+
+      {:noreply,
+       socket
+       |> assign(:s3_busy, MapSet.put(socket.assigns.s3_busy, key))
+       |> start_async({:s3_operation, key}, fn ->
+         case event do
+           "list_s3_buckets" ->
+             Hostctl.S3Client.list_buckets(opts)
+
+           "create_s3_bucket" ->
+             case Hostctl.S3Client.create_bucket(opts, bucket) do
+               :ok -> {:created, bucket}
+               error -> error
+             end
+         end
+       end)}
+    end
+  end
+
   @impl true
   def handle_event("set_s3_config", %{"domain" => domain} = params, socket) do
     target = Map.get(params, "target", "")
@@ -244,6 +337,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       |> put_s3_field(:s3_access_key, params["access_key"])
       |> put_s3_field(:s3_secret_key, params["secret_key"])
       |> put_s3_field(:s3_prefix, params["prefix"])
+      |> put_s3_field(:connection_name, params["connection_name"])
       |> put_s3_field(:ftp_enabled, params["ftp_enabled"] == "true")
       |> put_s3_field(:directory_listing, params["directory_listing"] == "true")
 
@@ -837,15 +931,19 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
     {status, flash_type, flash_msg} =
       case result do
-        {:ok, r} -> {{:ok, r}, :info, "Restored #{domain} successfully."}
-        {:error, r} -> {{:error, r}, :error, "Failed to restore #{domain}."}
+        {:ok, r} ->
+          {{:ok, r}, :info,
+           "Import configuration finished for #{domain}. Check the transfer jobs below for file upload status."}
+
+        {:error, r} ->
+          {{:error, r}, :error, "Failed to restore #{domain}."}
       end
 
     results = Map.put(socket.assigns.restore_results, domain, status)
 
-    # When inline S3 credentials were used and restore succeeded, persist them
-    # as a DomainS3Backend so nginx is configured to serve from S3.
-    socket = maybe_persist_inline_s3_backend(socket, domain, result)
+    # The importer persists mappings before transfers; reload them even after partial failures.
+    socket =
+      assign(socket, :domain_s3_backends, load_domain_s3_backends(socket.assigns.subscriptions))
 
     {:noreply,
      socket
@@ -942,13 +1040,16 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                   endpoint: backend.endpoint_url,
                   bucket: backend.bucket,
                   prefix: backend.path_prefix || "",
+                  exact_prefix: true,
+                  ftp_mount_enabled: backend.ftp_mount_enabled,
+                  directory_listing: backend.directory_listing,
                   access_key_id: backend.access_key_id,
                   secret_access_key: backend.secret_access_key,
                   region: backend.region || "us-east-1"
                 }
             end
 
-          if opts, do: Map.put(acc, target, opts), else: acc
+          Map.put(acc, target, opts)
         else
           acc
         end
@@ -995,7 +1096,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
     if is_binary(endpoint) && endpoint != "" && is_binary(bucket) && bucket != "" do
       %{
-        endpoint: endpoint,
+        endpoint: Hostctl.S3Client.normalize_endpoint_change(endpoint),
+        ftp_mount_enabled: Map.get(config, :ftp_enabled, false),
+        directory_listing: Map.get(config, :directory_listing, false),
         bucket: bucket,
         prefix: Map.get(config, :s3_prefix, ""),
         access_key_id: Map.get(config, :s3_access_key, ""),
@@ -1011,69 +1114,219 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     end
   end
 
-  # After a successful restore, if the user supplied inline S3 credentials (no
-  # pre-existing DomainS3Backend for this domain), persist them as a new backend
-  # so nginx is reconfigured to serve files from S3 going forward.
-  # After a successful restore, persists inline S3 credentials (entered in the
-  # import UI) as DomainS3Backend records so nginx is reconfigured to serve from
-  # S3 going forward. Creates one backend per target that used inline creds (i.e.
-  # no pre-existing DomainS3Backend for that target).
-  defp maybe_persist_inline_s3_backend(socket, domain_name, result) do
-    with {:ok, _} <- result do
-      import Ecto.Query
-      alias Hostctl.Repo
-      alias Hostctl.Hosting.Domain
+  defp s3_destination(assigns) do
+    tc = assigns.config
 
-      config = Map.get(socket.assigns.domain_configs, domain_name, %{})
-      s3_targets = Map.get(config, :s3_targets, %{})
-      existing_backends = Map.get(socket.assigns.domain_s3_backends, domain_name, %{})
+    params = %{
+      "domain" => assigns.domain,
+      "target" => assigns.target,
+      "endpoint" => Map.get(tc, :s3_endpoint, ""),
+      "bucket" => Map.get(tc, :s3_bucket, ""),
+      "region" => Map.get(tc, :s3_region, "us-east-1"),
+      "access_key" => Map.get(tc, :s3_access_key, ""),
+      "secret_key" => Map.get(tc, :s3_secret_key, ""),
+      "prefix" => Map.get(tc, :s3_prefix, ""),
+      "ftp_enabled" => Map.get(tc, :ftp_enabled, false),
+      "directory_listing" => Map.get(tc, :directory_listing, false),
+      "connection_name" => Map.get(tc, :connection_name, "")
+    }
 
-      targets_needing_creation =
-        Enum.filter(s3_targets, fn {target, tc} ->
-          Map.get(tc, :s3_import, false) && not Map.has_key?(existing_backends, target)
-        end)
+    assigns =
+      assigns
+      |> assign(:form, to_form(params, as: :destination))
+      |> assign(
+        :connection_form,
+        to_form(%{"id" => "", "domain" => assigns.domain, "target" => assigns.target},
+          as: :connection
+        )
+      )
+      |> assign(
+        :bucket_form,
+        to_form(
+          %{"bucket" => params["bucket"], "domain" => assigns.domain, "target" => assigns.target},
+          as: :selection
+        )
+      )
+      |> assign(:uid, "s3-#{assigns.domain}-#{assigns.target}")
+      |> assign(:connection_options, Enum.map(assigns.connections, &{&1.name, &1.id}))
 
-      if targets_needing_creation == [] do
-        socket
-      else
-        db_domain = Repo.one(from d in Domain, where: d.name == ^domain_name, limit: 1)
+    ~H"""
+    <div
+      id={@uid}
+      class="ml-4 rounded-xl border border-sky-200 bg-sky-50/40 p-4 space-y-3 dark:border-sky-800 dark:bg-sky-950/20"
+    >
+      <.form for={@connection_form} id={"#{@uid}-connection"} phx-change="use_s3_connection">
+        <.input field={@connection_form[:domain]} type="hidden" />
+        <.input field={@connection_form[:target]} type="hidden" />
+        <.input
+          field={@connection_form[:id]}
+          id={"#{@uid}-saved"}
+          type="select"
+          label="Use a saved S3 connection"
+          prompt="Enter credentials below or select a connection"
+          options={@connection_options}
+        />
+      </.form>
+      <.form
+        for={@form}
+        id={"s3-config-form-#{@domain}-#{@target}"}
+        phx-change="set_s3_config"
+        phx-submit="save_s3_connection"
+        class="grid grid-cols-2 gap-3"
+      >
+        <.input field={@form[:domain]} type="hidden" />
+        <.input field={@form[:target]} type="hidden" />
+        <.input
+          field={@form[:endpoint]}
+          id={"#{@uid}-endpoint"}
+          label="Endpoint"
+          placeholder="https://s3.wasabisys.com"
+        />
+        <.input field={@form[:region]} id={"#{@uid}-region"} label="Region" />
+        <.input
+          field={@form[:access_key]}
+          id={"#{@uid}-access"}
+          label="Access key"
+          autocomplete="off"
+        />
+        <.input
+          field={@form[:secret_key]}
+          id={"#{@uid}-secret"}
+          type="password"
+          label="Secret key"
+          autocomplete="new-password"
+        />
+        <.input
+          field={@form[:bucket]}
+          id={"#{@uid}-bucket"}
+          label="Bucket name"
+          placeholder="Existing or new bucket"
+        />
+        <.input field={@form[:prefix]} id={"#{@uid}-prefix"} label="Parent key prefix (optional)" />
+        <p class="col-span-2 text-xs text-gray-500">
+          Files and serving settings use this prefix followed by {if @target == "",
+            do: "httpdocs",
+            else: @target <> "." <> @domain}.
+        </p>
+        <.input
+          field={@form[:ftp_enabled]}
+          id={"#{@uid}-ftp"}
+          type="checkbox"
+          label="Transparent FTP access"
+        />
+        <.input
+          field={@form[:directory_listing]}
+          id={"#{@uid}-listing"}
+          type="checkbox"
+          label="Directory listings"
+        />
+        <.input
+          field={@form[:connection_name]}
+          id={"#{@uid}-name"}
+          label="Save connection as"
+          placeholder="Wasabi account"
+        />
+        <button
+          id={"#{@uid}-save"}
+          type="submit"
+          class="self-end rounded-lg bg-sky-700 px-3 py-2 text-sm text-white hover:bg-sky-600 transition-colors"
+        >
+          Save connection
+        </button>
+      </.form>
+      <div class="flex gap-3">
+        <button
+          id={"#{@uid}-load"}
+          type="button"
+          phx-click="list_s3_buckets"
+          phx-value-domain={@domain}
+          phx-value-target={@target}
+          disabled={@busy}
+          class="text-sm text-sky-700 hover:underline disabled:opacity-50"
+        >
+          {if @busy, do: "Working…", else: "Load existing buckets"}
+        </button>
+        <button
+          id={"#{@uid}-create"}
+          type="button"
+          phx-click="create_s3_bucket"
+          phx-value-domain={@domain}
+          phx-value-target={@target}
+          disabled={@busy}
+          class="text-sm text-sky-700 hover:underline disabled:opacity-50"
+        >
+          Create named bucket
+        </button>
+      </div>
+      <.form
+        :if={@buckets != []}
+        for={@bucket_form}
+        id={"#{@uid}-buckets"}
+        phx-change="choose_s3_bucket"
+      >
+        <.input field={@bucket_form[:domain]} type="hidden" />
+        <.input field={@bucket_form[:target]} type="hidden" />
+        <.input
+          field={@bucket_form[:bucket]}
+          id={"#{@uid}-existing"}
+          type="select"
+          label="Existing bucket"
+          prompt="Choose a bucket"
+          options={@buckets}
+        />
+      </.form>
+      <p class="text-xs text-gray-500">
+        You can enter an existing bucket manually if this key cannot list buckets. Creating a bucket requires provider permission.
+      </p>
+    </div>
+    """
+  end
 
-        if db_domain do
-          new_backends =
-            Enum.reduce(targets_needing_creation, existing_backends, fn {target, tc}, acc ->
-              case build_s3_backend_opts_from_config(tc) do
-                nil ->
-                  acc
+  defp s3_target(socket, params) do
+    get_in(socket.assigns.domain_configs, [params["domain"], :s3_targets, params["target"] || ""]) ||
+      %{}
+  end
 
-                opts ->
-                  attrs = %{
-                    endpoint_url: opts.endpoint,
-                    bucket: opts.bucket,
-                    path_prefix: opts.prefix,
-                    access_key_id: opts.access_key_id,
-                    secret_access_key: opts.secret_access_key,
-                    region: opts.region,
-                    subdomain: target,
-                    url_path: "",
-                    ftp_mount_enabled: Map.get(tc, :ftp_enabled, false),
-                    directory_listing: Map.get(tc, :directory_listing, false)
-                  }
+  defp put_s3_target(socket, params, tc) do
+    domain = params["domain"]
+    config = Map.get(socket.assigns.domain_configs, domain, %{})
+    targets = Map.put(Map.get(config, :s3_targets, %{}), params["target"] || "", tc)
 
-                  case Hostctl.Hosting.create_s3_backend(db_domain, attrs) do
-                    {:ok, backend} -> Map.put(acc, target, backend)
-                    {:error, _} -> acc
-                  end
-              end
-            end)
+    assign(
+      socket,
+      :domain_configs,
+      Map.put(socket.assigns.domain_configs, domain, Map.put(config, :s3_targets, targets))
+    )
+  end
 
-          all_backends = Map.put(socket.assigns.domain_s3_backends, domain_name, new_backends)
-          assign(socket, :domain_s3_backends, all_backends)
-        else
-          socket
-        end
-      end
-    else
-      _ -> socket
+  @impl true
+  def handle_async({:s3_operation, key}, result, socket) do
+    socket = assign(socket, :s3_busy, MapSet.delete(socket.assigns.s3_busy, key))
+
+    case result do
+      {:ok, {:ok, buckets}} ->
+        {:noreply,
+         socket
+         |> assign(:s3_bucket_lists, Map.put(socket.assigns.s3_bucket_lists, key, buckets))
+         |> put_flash(:info, "Found #{length(buckets)} buckets")}
+
+      {:ok, {:created, bucket}} ->
+        buckets =
+          [bucket | Map.get(socket.assigns.s3_bucket_lists, key, [])]
+          |> Enum.uniq()
+          |> Enum.sort()
+
+        {:noreply,
+         socket
+         |> assign(:s3_bucket_lists, Map.put(socket.assigns.s3_bucket_lists, key, buckets))
+         |> put_flash(:info, "Created bucket #{bucket}")}
+
+      {:ok, {:error, reason}} ->
+        {:noreply, put_flash(socket, :error, reason)}
+
+      {:exit, _} ->
+        {:noreply,
+         put_flash(socket, :error, "S3 request failed; check the connection and try again")}
     end
   end
 
@@ -2190,78 +2443,14 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                       </div>
                       <%!-- Inline S3 credentials for this target --%>
                       <%= if t_s3_import && not has_backend do %>
-                        <form
-                          id={"s3-config-form-#{sub.domain}-#{target}"}
-                          phx-change="set_s3_config"
-                          class="ml-[7.5rem] grid grid-cols-2 gap-2"
-                        >
-                          <input type="hidden" name="domain" value={sub.domain} />
-                          <input type="hidden" name="target" value={target} />
-                          <input
-                            type="text"
-                            name="endpoint"
-                            value={Map.get(t_config, :s3_endpoint, "")}
-                            placeholder="Endpoint (https://s3.amazonaws.com)"
-                            class="col-span-2 block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                          />
-                          <input
-                            type="text"
-                            name="bucket"
-                            value={Map.get(t_config, :s3_bucket, "")}
-                            placeholder="Bucket name"
-                            class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                          />
-                          <input
-                            type="text"
-                            name="region"
-                            value={Map.get(t_config, :s3_region, "us-east-1")}
-                            placeholder="Region (us-east-1)"
-                            class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                          />
-                          <input
-                            type="text"
-                            name="access_key"
-                            value={Map.get(t_config, :s3_access_key, "")}
-                            placeholder="Access key ID"
-                            class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                          />
-                          <input
-                            type="password"
-                            name="secret_key"
-                            value={Map.get(t_config, :s3_secret_key, "")}
-                            placeholder="Secret access key"
-                            class="block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                          />
-                          <input
-                            type="text"
-                            name="prefix"
-                            value={Map.get(t_config, :s3_prefix, "")}
-                            placeholder="Key prefix (optional)"
-                            class="col-span-2 block w-full rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs font-mono text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-                          />
-                          <div class="col-span-2 flex items-center gap-4 pt-2">
-                            <label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                name="ftp_enabled"
-                                value="true"
-                                checked={Map.get(t_config, :ftp_enabled, false)}
-                                class="rounded border-sky-300 text-sky-600 focus:ring-sky-500"
-                              />
-                              <span>Enable FTP access (rclone mount)</span>
-                            </label>
-                            <label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                name="directory_listing"
-                                value="true"
-                                checked={Map.get(t_config, :directory_listing, false)}
-                                class="rounded border-sky-300 text-sky-600 focus:ring-sky-500"
-                              />
-                              <span>Directory listings</span>
-                            </label>
-                          </div>
-                        </form>
+                        <.s3_destination
+                          domain={sub.domain}
+                          target={target}
+                          config={t_config}
+                          connections={@s3_connections}
+                          buckets={Map.get(@s3_bucket_lists, {sub.domain, target}, [])}
+                          busy={MapSet.member?(@s3_busy, {sub.domain, target})}
+                        />
                       <% end %>
                     <% end %>
                   </div>
@@ -2946,6 +3135,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       {domain,
        %{
          "account_email" => Map.get(config, :account_email, ""),
+         "web_files_path" => Map.get(config, :web_files_path, "/var/www/#{domain}"),
+         "s3_targets" => Hostctl.Plesk.S3Import.encode_targets(Map.get(config, :s3_targets, %{})),
          "categories" => config |> Map.get(:categories, MapSet.new()) |> MapSet.to_list(),
          "inventory_counts" => config |> Map.get(:inventory_counts, %{}) |> ensure_string_keys()
        }}
@@ -3014,6 +3205,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       {domain,
        %{
          categories: categories,
+         web_files_path: Map.get(config, :web_files_path, "/var/www/#{domain}"),
+         s3_targets: Hostctl.Plesk.S3Import.decode_targets(Map.get(config, :s3_targets, %{})),
          account_email: Map.get(config, :account_email, ""),
          inventory_counts: inventory_counts
        }}

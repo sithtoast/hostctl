@@ -12,7 +12,7 @@ defmodule Hostctl.Hosting.DomainS3Backend do
     field :region, :string, default: "us-east-1"
     field :enabled, :boolean, default: true
     field :access_key_id, :string
-    field :secret_access_key, EncryptedField
+    field :secret_access_key, EncryptedField, redact: true
     # Scope fields — both empty = whole domain.
     # subdomain non-empty = applies to that subdomain (e.g. "static" → static.example.com).
     # url_path non-empty = only serves requests under that URL path (e.g. "/assets").
@@ -43,16 +43,19 @@ defmodule Hostctl.Hosting.DomainS3Backend do
       :access_key_id,
       :secret_access_key,
       :subdomain,
-      :url_path,
-      :domain_id
+      :url_path
     ])
+    |> update_change(:endpoint_url, &Hostctl.S3Client.normalize_endpoint_change/1)
     |> validate_required([:endpoint_url, :bucket, :domain_id])
     |> validate_format(:url_path, ~r/^(\/[^\s]*)?$/, message: "must start with / or be empty")
     |> update_change(:subdomain, &String.trim/1)
     |> update_change(:url_path, &normalize_url_path/1)
-    |> validate_format(:endpoint_url, ~r|^https?://[^\s/$.?#].[^\s]*$|,
-      message: "must be a valid URL (e.g. https://s3.amazonaws.com)"
-    )
+    |> validate_change(:endpoint_url, fn :endpoint_url, value ->
+      case Hostctl.S3Client.normalize_endpoint(value) do
+        {:ok, _} -> []
+        {:error, message} -> [endpoint_url: message]
+      end
+    end)
     |> validate_format(:bucket, ~r/^[a-z0-9][a-z0-9\-\.]{1,61}[a-z0-9]$/,
       message: "must be a valid S3 bucket name"
     )

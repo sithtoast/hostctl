@@ -508,3 +508,9 @@ And **never** do this:
 <!-- phoenix:liveview-end -->
 
 <!-- usage-rules-end -->
+## Development environment memory
+
+Before working with the test VM or deployment workflow, read
+[docs/development-memory.md](docs/development-memory.md) for the saved SSH alias,
+service layout, verified setup, and outstanding issues. Recheck live state before
+assuming the VM address or service status is unchanged.

@@ -36,9 +36,22 @@ defmodule Hostctl.DNS.Cloudflare do
   Returns `{:ok, [record]}` or `{:error, reason}`.
   """
   def list_records(api_token, cloudflare_zone_id) do
-    case get(api_token, "/zones/#{cloudflare_zone_id}/dns_records", params: [per_page: 500]) do
-      {:ok, %{"result" => records}} -> {:ok, records}
-      {:error, reason} -> {:error, reason}
+    list_record_pages(api_token, cloudflare_zone_id, 1, [])
+  end
+
+  defp list_record_pages(api_token, zone_id, page, acc) do
+    case get(api_token, "/zones/#{zone_id}/dns_records", params: [per_page: 500, page: page]) do
+      {:ok, %{"result" => records} = body} ->
+        pages = get_in(body, ["result_info", "total_pages"]) || 1
+
+        if page < pages do
+          list_record_pages(api_token, zone_id, page + 1, acc ++ records)
+        else
+          {:ok, acc ++ records}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -110,6 +123,9 @@ defmodule Hostctl.DNS.Cloudflare do
       "content" => Map.get(record, :value),
       "ttl" => Map.get(record, :ttl) || 3600
     }
+
+    body =
+      if Map.has_key?(record, :proxied), do: Map.put(body, "proxied", record.proxied), else: body
 
     if Map.get(record, :priority) do
       Map.put(body, "priority", Map.get(record, :priority))

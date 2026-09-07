@@ -559,9 +559,6 @@ defmodule HostctlWeb.UpdatesLive do
     ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec) |> Enum.at(m - 1)
   end
 
-  defp error_message({:error, :no_releases}),
-    do: "No releases found. Make sure the GitHub repository is configured correctly."
-
   defp error_message({:error, :no_commit_info}),
     do: "Unable to determine the current commit. Make sure /etc/hostctl/commit exists."
 

@@ -30,6 +30,8 @@ DB_USER="hostctl"
 DB_PASSWORD=""
 MYSQL_ROOT_PASSWORD=""
 POSTGRES_ROOT_PASSWORD=""
+SECRET_KEY_BASE=""
+INITIAL_SETUP_TOKEN=""
 DOMAIN=""
 REPO_URL="https://github.com/yourorg/hostctl.git"   # TODO: update when published
 REPO_BRANCH="main"
@@ -49,7 +51,17 @@ LOG_FILE=""
 
 ENV_FILE="/etc/$APP_NAME/env"
 SERVICE_FILE="/etc/systemd/system/$APP_NAME.service"
-DOWNLOAD_DIR="/tmp/hostctl-install-$$"
+STATE_DIR="${HOSTCTL_INSTALL_STATE_DIR:-/var/lib/hostctl-installer}"
+STATE_FILE="$STATE_DIR/choices"
+DOWNLOAD_DIR="$STATE_DIR/downloads"
+STATE_READY=false
+RESUME=false
+LAST_STEP="Not started"
+STATE_SAVED=false
+STATE_KEYS=(DOMAIN APP_DIR REPO_URL REPO_BRANCH DB_PASSWORD MYSQL_ROOT_PASSWORD
+  POSTGRES_ROOT_PASSWORD MYSQL_FLAVOR SKIP_NGINX SKIP_CERTBOT SKIP_POSTGRES
+  SKIP_MYSQL SKIP_PHP SKIP_FAIL2BAN SKIP_SPAMASSASSIN RECONFIGURE CLOUDFLARE_PROXY
+  VERBOSE LOG_FILE SECRET_KEY_BASE INITIAL_SETUP_TOKEN)
 SOURCE_DIR="/usr/local/src/$APP_NAME"
 
 # --- Colours ------------------------------------------------------------------
@@ -64,10 +76,92 @@ info()    { echo -e "${CYAN}[info]${NC}  $*"; }
 success() { echo -e "${GREEN}[ok]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[warn]${NC}  $*"; }
 error()   { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
-step()    { echo -e "\n${BOLD}==> $*${NC}"; }
+step() {
+  LAST_STEP="$*"
+  if [[ "$STATE_READY" == true ]]; then
+    printf '%s\n' "$LAST_STEP" > "$STATE_DIR/last-step"
+  fi
+  echo -e "\n${BOLD}==> $*${NC}"
+}
 
-cleanup() { rm -rf "$DOWNLOAD_DIR"; }
-trap cleanup EXIT
+installer_exit() {
+  local status=$?
+  if [[ $status -ne 0 && "$STATE_SAVED" == true ]]; then
+    warn "Installation stopped during: $LAST_STEP"
+    warn "Choices saved. Retry with: sudo bash install.sh --resume"
+    warn "Saved state: $STATE_DIR"
+  fi
+}
+trap installer_exit EXIT
+
+# --- Installer state (data only; never sourced as shell code) ------------------
+initialize_state() {
+  [[ ! -L "$STATE_DIR" ]] || error "Installer state directory must not be a symlink."
+  mkdir -p "$STATE_DIR"
+  [[ -O "$STATE_DIR" ]] || error "Installer state directory must be owned by the installer user."
+  chmod 700 "$STATE_DIR"
+  # Hold the lock throughout the run so concurrent installs cannot mix choices.
+  exec 9>"$STATE_DIR/lock"
+  flock -n 9 || error "Another Hostctl installer is already running."
+  STATE_READY=true
+}
+
+save_choices() {
+  local trace=false key temporary
+  if [[ $- == *x* ]]; then trace=true; set +x; fi
+  temporary="$(mktemp "$STATE_DIR/choices.XXXXXX")"
+  chmod 600 "$temporary"
+  {
+    printf '%s\0' HOSTCTL_INSTALL_STATE_V1
+    for key in "${STATE_KEYS[@]}"; do
+      printf '%s\0%s\0' "$key" "${!key}"
+    done
+  } > "$temporary"
+  mv -f "$temporary" "$STATE_FILE"
+  STATE_SAVED=true
+  if [[ "$trace" == true ]]; then set -x; fi
+}
+
+load_choices() {
+  [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" && -O "$STATE_FILE" ]] \
+    || error "No trusted saved installation choices found at $STATE_FILE. Run the installer normally first."
+  chmod 600 "$STATE_FILE"
+  local header key value expected
+  # The fixed key order doubles as an allowlist; no eval or source is used.
+  {
+    IFS= read -r -d '' header || error "Incomplete installer state."
+    [[ "$header" == HOSTCTL_INSTALL_STATE_V1 ]] || error "Unsupported installer state version."
+    for expected in "${STATE_KEYS[@]}"; do
+      IFS= read -r -d '' key && IFS= read -r -d '' value \
+        || error "Incomplete installer state."
+      [[ "$key" == "$expected" ]] || error "Invalid installer state key."
+      case "$key" in
+        SKIP_*|RECONFIGURE|CLOUDFLARE_PROXY|VERBOSE)
+          [[ "$value" == true || "$value" == false ]] || error "Invalid saved boolean choice." ;;
+      esac
+      printf -v "$key" '%s' "$value"
+    done
+    if IFS= read -r -d '' value || [[ -n "$value" ]]; then
+      error "Unexpected data in installer state."
+    fi
+  } < "$STATE_FILE"
+  STATE_SAVED=true
+  info "Restored installer choices from $STATE_DIR"
+  if [[ -f "$STATE_DIR/last-step" ]]; then
+    IFS= read -r LAST_STEP < "$STATE_DIR/last-step" || true
+    printf 'Previous step: %s\n' "$LAST_STEP"
+  fi
+}
+
+cached_download() {
+  local url="$1" destination="$2"
+  if [[ -s "$destination" ]]; then
+    info "Using cached download: ${destination##*/}"
+    return 0
+  fi
+  curl -fsSL -o "$destination.part" "$url" || return 1
+  mv -f "$destination.part" "$destination"
+}
 
 # --- Help ---------------------------------------------------------------------
 usage() {
@@ -80,6 +174,7 @@ usage() {
   echo -e "  curl -fsSL https://your-domain.com/install.sh | sudo bash"
   echo -e ""
   echo -e "${BOLD}OPTIONS${NC}"
+  echo -e "  ${CYAN}    --resume${NC}               Restore the last choices; explicit options override them"
   echo -e "  ${CYAN}-i, --interactive${NC}          Prompt for all settings before installing"
   echo -e "  ${CYAN}    --domain=DOMAIN${NC}        Hostname for the panel  ${YELLOW}(required for nginx/certbot)${NC}"
   echo -e "  ${CYAN}    --db-password=PASS${NC}     PostgreSQL password      ${YELLOW}(auto-generated if omitted)${NC}"
@@ -97,6 +192,8 @@ usage() {
   echo -e "  ${CYAN}    --skip-fail2ban${NC}        Skip fail2ban installation and configuration"
   echo -e "  ${CYAN}    --skip-spamassassin${NC}    Skip SpamAssassin installation"
   echo -e ""
+  echo -e "  Skip flags also accept =true or =false when overriding saved choices."
+  echo -e ""
   echo -e "${BOLD}AUTOMATION FLAGS${NC}"
   echo -e "  ${CYAN}-y, --yes${NC}                  Skip confirmation prompts (assume yes)"
   echo -e "  ${CYAN}-v, --verbose${NC}              Show detailed output during installation"
@@ -106,10 +203,14 @@ usage() {
   echo -e "  ${CYAN}    --cloudflare${NC}           Nginx HTTP-only origin behind Cloudflare proxy"
   echo -e "                             (forces X-Forwarded-Proto: https, skips certbot)"
   echo -e "  ${CYAN}    --reconfigure${NC}          Re-run only config/service steps (no build)"
+  echo -e "  Saved choices and downloads: /var/lib/hostctl-installer (root-only)"
+  echo -e "  Override with HOSTCTL_INSTALL_STATE_DIR; keep it consistent when resuming."
   echo -e "  ${CYAN}-h, --help${NC}                 Show this help message"
   echo -e ""
   echo -e "${BOLD}EXAMPLES${NC}"
   echo -e "  sudo bash install.sh --interactive"
+  echo -e "  sudo bash install.sh --resume"
+  echo -e "  sudo bash install.sh --resume --interactive"
   echo -e "  sudo bash install.sh --domain=panel.example.com"
   echo -e "  sudo bash install.sh --domain=panel.example.com --skip-nginx --skip-certbot"
   echo -e "  sudo bash install.sh --domain=panel.example.com --cloudflare"
@@ -137,11 +238,12 @@ interactive_setup() {
   # DB password
   local _pw_hint
   if [[ -n "$DB_PASSWORD" ]]; then
-    _pw_hint="$DB_PASSWORD"
+    _pw_hint="<saved password; Enter to keep>"
   else
     _pw_hint="<auto-generate>"
   fi
-  read -rp "$(echo -e "  ${BOLD}PostgreSQL password for hostctl user${NC} [${_pw_hint}]: ")" _in
+  read -rsp "$(echo -e "  ${BOLD}PostgreSQL password for hostctl user${NC} [${_pw_hint}]: ")" _in
+  echo ""
   [[ -n "$_in" ]] && DB_PASSWORD="$_in"
 
   # DB flavor
@@ -190,33 +292,67 @@ interactive_setup() {
 # --- Argument parsing ---------------------------------------------------------
 INTERACTIVE=false
 
+parse_arguments() {
+  local arg key
+  for arg in "$@"; do
+    case "$arg" in
+      --resume) RESUME=true ;;
+      --domain=*)       DOMAIN="${arg#*=}" ;;
+      --db-password=*)  DB_PASSWORD="${arg#*=}" ;;
+      --app-dir=*)      APP_DIR="${arg#*=}" ;;
+      --repo=*)         REPO_URL="${arg#*=}" ;;
+      --branch=*)       REPO_BRANCH="${arg#*=}" ;;
+      --skip-*=true|--skip-*=false)
+        key="${arg%%=*}"
+        key="${key#--}"
+        key="${key//-/_}"
+        case "$key" in
+          skip_nginx) SKIP_NGINX="${arg#*=}" ;;
+          skip_certbot) SKIP_CERTBOT="${arg#*=}" ;;
+          skip_postgres) SKIP_POSTGRES="${arg#*=}" ;;
+          skip_mysql) SKIP_MYSQL="${arg#*=}" ;;
+          skip_php) SKIP_PHP="${arg#*=}" ;;
+          skip_fail2ban) SKIP_FAIL2BAN="${arg#*=}" ;;
+          skip_spamassassin) SKIP_SPAMASSASSIN="${arg#*=}" ;;
+          *) error "Unknown option: $arg" ;;
+        esac ;;
+      --cloudflare=true|--cloudflare=false) CLOUDFLARE_PROXY="${arg#*=}" ;;
+      --reconfigure=true|--reconfigure=false) RECONFIGURE="${arg#*=}" ;;
+      --skip-nginx)     SKIP_NGINX=true ;;
+      --skip-certbot)   SKIP_CERTBOT=true ;;
+      --skip-postgres)  SKIP_POSTGRES=true ;;
+      --skip-mysql)     SKIP_MYSQL=true ;;
+      --db-flavor=*)    MYSQL_FLAVOR="${arg#*=}" ;;
+      --skip-php)           SKIP_PHP=true ;;
+      --skip-fail2ban)      SKIP_FAIL2BAN=true ;;
+      --skip-spamassassin)  SKIP_SPAMASSASSIN=true ;;
+      --reconfigure)        RECONFIGURE=true ;;
+      --cloudflare)     CLOUDFLARE_PROXY=true ;;
+      --interactive|-i) INTERACTIVE=true ;;
+      --yes|-y)         ASSUME_YES=true ;;
+      --verbose=true|--verbose=false) VERBOSE="${arg#*=}" ;;
+      --verbose|-v)     VERBOSE=true ;;
+      --log=*)          LOG_FILE="${arg#*=}" ;;
+      --help|-h)        usage; exit 0 ;;
+      *) error "Unknown option: $arg" ;;
+    esac
+  done
+}
+
+# --- Begin installation -------------------------------------------------------
+# Load state before parsing options, regardless of where --resume appears.
 for arg in "$@"; do
   case "$arg" in
-    --domain=*)       DOMAIN="${arg#*=}" ;;
-    --db-password=*)  DB_PASSWORD="${arg#*=}" ;;
-    --app-dir=*)      APP_DIR="${arg#*=}" ;;
-    --repo=*)         REPO_URL="${arg#*=}" ;;
-    --branch=*)       REPO_BRANCH="${arg#*=}" ;;
-    --skip-nginx)     SKIP_NGINX=true ;;
-    --skip-certbot)   SKIP_CERTBOT=true ;;
-    --skip-postgres)  SKIP_POSTGRES=true ;;
-    --skip-mysql)     SKIP_MYSQL=true ;;
-    --db-flavor=*)    MYSQL_FLAVOR="${arg#*=}" ;;
-    --skip-php)           SKIP_PHP=true ;;
-    --skip-fail2ban)      SKIP_FAIL2BAN=true ;;
-    --skip-spamassassin)  SKIP_SPAMASSASSIN=true ;;
-    --reconfigure)        RECONFIGURE=true ;;
-    --cloudflare)     CLOUDFLARE_PROXY=true ;;
-    --interactive|-i) INTERACTIVE=true ;;
-    --yes|-y)         ASSUME_YES=true ;;
-    --verbose|-v)     VERBOSE=true ;;
-    --log=*)          LOG_FILE="${arg#*=}" ;;
-    --help|-h)        usage; exit 0 ;;
-    *) error "Unknown option: $arg" ;;
+    --help|-h) usage; exit 0 ;;
+    --resume) RESUME=true ;;
   esac
 done
-
-[[ "$INTERACTIVE" == true ]] && interactive_setup
+[[ $EUID -eq 0 ]] || error "This installer must be run as root (use sudo)."
+initialize_state
+[[ "$RESUME" == false ]] || load_choices
+parse_arguments "$@"
+[[ "$INTERACTIVE" == false ]] || interactive_setup
+save_choices
 
 # --- Logging ------------------------------------------------------------------
 if [[ -n "$LOG_FILE" ]]; then
@@ -245,7 +381,7 @@ confirm() {
 # Cloudflare proxy mode skips certbot for the panel itself (Cloudflare terminates TLS
 # for the control panel), but certbot + the dns-cloudflare plugin are still installed
 # so that hosted domains can obtain Let's Encrypt certs via DNS-01 challenge.
-[[ "$CLOUDFLARE_PROXY" == true ]] && SKIP_CERTBOT=true
+
 
 # Derive package/service names from chosen database flavor
 case "$MYSQL_FLAVOR" in
@@ -313,17 +449,6 @@ RAM_KB="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
 (( RAM_KB >= 1048576 )) || warn "Less than 1 GB RAM available. Build may be slow or fail."
 info "RAM: $(( RAM_KB / 1024 ))MB"
 
-# Check git is available or can be installed
-if ! command -v git &>/dev/null; then
-  info "git not found -- will install it in Phase 1"
-  # Verify apt can reach it now, so we fail early rather than mid-install
-  apt-get update -qq
-  apt-cache show git >/dev/null 2>&1 \
-    || error "git is not installed and could not be found in apt. Install git and retry."
-else
-  info "git: $(git --version)"
-fi
-
 if [[ -z "$DOMAIN" && "$SKIP_NGINX" == false ]]; then
   read -rp "$(echo -e "${BOLD}Enter the domain / hostname for the panel (e.g. panel.example.com): ${NC}")" DOMAIN
   [[ -n "$DOMAIN" ]] || error "Domain is required for nginx. Use --skip-nginx to skip."
@@ -357,6 +482,21 @@ if [[ -z "$DB_PASSWORD" ]]; then
     DB_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)"
   fi
 fi
+
+# Save generated credentials before any package/network operation can fail.
+save_choices
+
+# Check git is available or can be installed
+if ! command -v git &>/dev/null; then
+  info "git not found -- will install it in Phase 1"
+  # Verify apt can reach it now, so we fail early rather than mid-install
+  apt-get update -qq
+  apt-cache show git >/dev/null 2>&1 \
+    || error "git is not installed and could not be found in apt. Install git and retry."
+else
+  info "git: $(git --version)"
+fi
+
 
 echo ""
 echo -e "${BOLD}Installation plan:${NC}"
@@ -410,15 +550,16 @@ success "Erlang cached"
 ELIXIR_ZIP="elixir-otp-${OTP_MAJOR}.zip"
 ELIXIR_URL="https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/${ELIXIR_ZIP}"
 info "Downloading Elixir ${ELIXIR_VERSION} (OTP ${OTP_MAJOR})..."
-curl -fsSL -o "$DOWNLOAD_DIR/elixir.zip" "$ELIXIR_URL" \
+ELIXIR_CACHE="$DOWNLOAD_DIR/elixir-${ELIXIR_VERSION}-otp-${OTP_MAJOR}.zip"
+cached_download "$ELIXIR_URL" "$ELIXIR_CACHE" \
   || error "Failed to download Elixir ${ELIXIR_VERSION} from GitHub. Check network connectivity."
 success "Elixir ${ELIXIR_VERSION} downloaded"
 
 # 1b. PostgreSQL: signing key ---------------------------------------------------
 if [[ "$SKIP_POSTGRES" == false ]] && ! command -v psql &>/dev/null; then
   info "Fetching PostgreSQL $POSTGRES_MAJOR signing key..."
-  curl -fsSL -o "$DOWNLOAD_DIR/postgresql.asc" \
-    "https://www.postgresql.org/media/keys/ACCC4CF8.asc" \
+  cached_download "https://www.postgresql.org/media/keys/ACCC4CF8.asc" \
+    "$DOWNLOAD_DIR/postgresql.asc" \
     || error "Failed to download PostgreSQL signing key."
   success "PostgreSQL signing key cached"
 fi
@@ -517,7 +658,7 @@ if command -v elixir &>/dev/null; then
   success "Elixir already installed ($(elixir --version 2>/dev/null | head -1))"
 else
   info "Installing Elixir ${ELIXIR_VERSION}..."
-  unzip -qo "$DOWNLOAD_DIR/elixir.zip" -d /usr/local/elixir
+  unzip -qo "$ELIXIR_CACHE" -d /usr/local/elixir
   # Add symlinks so elixir/mix/iex are on PATH system-wide
   for bin in elixir elixirc iex mix; do
     ln -sf "/usr/local/elixir/bin/$bin" "/usr/local/bin/$bin"
@@ -629,7 +770,7 @@ if ! command -v docker &>/dev/null; then
   # Add Docker's official GPG key and repository
   apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/$(lsb_release -si | tr '[:upper:]' '[:lower:]')/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  curl -fsSL https://download.docker.com/linux/$(lsb_release -si | tr '[:upper:]' '[:lower:]')/gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$DEB_ARCH signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(lsb_release -si | tr '[:upper:]' '[:lower:]') $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list >/dev/null
   apt-get update -qq
@@ -915,9 +1056,20 @@ chmod 750 "$(dirname "$ENV_FILE")"
 chown "root:$SERVICE_USER" "$(dirname "$ENV_FILE")"
 
 if [[ ! -f "$ENV_FILE" || "$RECONFIGURE" == true ]]; then
-  SECRET_KEY_BASE="$(cd "$SOURCE_DIR" \
-    && MIX_ENV=prod mix phx.gen.secret 2>/dev/null)"
-  INITIAL_SETUP_TOKEN="$(openssl rand -hex 32)"
+  if [[ -z "$SECRET_KEY_BASE" && -f "$ENV_FILE" ]]; then
+    SECRET_KEY_BASE="$(sed -n 's/^SECRET_KEY_BASE=//p' "$ENV_FILE")"
+  fi
+  if [[ -z "$INITIAL_SETUP_TOKEN" && -f "$ENV_FILE" ]]; then
+    INITIAL_SETUP_TOKEN="$(sed -n 's/^INITIAL_SETUP_TOKEN=//p' "$ENV_FILE")"
+  fi
+  if [[ -z "$SECRET_KEY_BASE" ]]; then
+    SECRET_KEY_BASE="$(cd "$SOURCE_DIR" \
+      && MIX_ENV=prod mix phx.gen.secret 2>/dev/null)"
+  fi
+  if [[ -z "$INITIAL_SETUP_TOKEN" ]]; then
+    INITIAL_SETUP_TOKEN="$(openssl rand -hex 32)"
+  fi
+  save_choices
 
   cat > "$ENV_FILE" <<ENVEOF
 PHX_SERVER=true
@@ -1192,3 +1344,5 @@ fi
 echo ""
 echo -e "${YELLOW}${BOLD}Security reminder:${NC} Review $ENV_FILE before exposing this server to the internet."
 echo ""
+
+step "Installation complete"

@@ -732,7 +732,7 @@ defmodule HostctlWeb.PanelLive.Docker do
           <div>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Docker</h1>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Manage containers and proxy them to domain paths.
+              Manage containers and proxy them to whole domains or specific paths.
             </p>
           </div>
           <button
@@ -1457,12 +1457,19 @@ defmodule HostctlWeb.PanelLive.Docker do
                 options={container_options(@all_containers_list)}
               />
 
-              <.input
-                field={@proxy_form[:path]}
-                type="text"
-                label="Domain Path"
-                placeholder="/app"
-              />
+              <div>
+                <.input
+                  field={@proxy_form[:path]}
+                  type="text"
+                  label="Domain Path"
+                  placeholder="/ or /app"
+                  aria-describedby="docker-proxy-path-help"
+                />
+                <p id="docker-proxy-path-help" class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                  Use / to serve the whole domain, or a path such as /app to serve only that path.
+                  Whole-domain S3 backends take precedence over Docker proxies.
+                </p>
+              </div>
 
               <.input
                 field={@proxy_form[:upstream_port]}

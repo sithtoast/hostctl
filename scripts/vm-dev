@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Run via sudo on an already installed, disposable Hostctl VM.
+set -euo pipefail
+
+usage() {
+  echo "Usage: sudo bash scripts/vm-dev {prepare SSH_USER|setup|migrate|start|stop|release|status}" >&2
+  exit 2
+}
+[[ $# -ge 1 ]] || usage
+[[ $EUID -eq 0 ]] || { echo "Run this VM helper with sudo." >&2; exit 1; }
+
+source_dir=/var/lib/hostctl/dev
+[[ -f /etc/hostctl/env ]] || { echo "Install Hostctl on this test VM first." >&2; exit 1; }
+
+run_mix() {
+  systemd-run --wait --pipe --collect \
+    --property=User=hostctl --property=Group=hostctl \
+    --property=WorkingDirectory="$source_dir" \
+    --property=EnvironmentFile=/etc/hostctl/env \
+    --setenv=MIX_ENV=dev --setenv=HOSTCTL_VM_DEV=1 \
+    /usr/bin/env mix "$@"
+}
+
+case "$1" in
+  prepare)
+    [[ $# -eq 2 ]] || usage
+    id "$2" >/dev/null
+    usermod -a -G hostctl "$2"
+    # The SSH user owns synced files; hostctl compiles/reloads through group access.
+    install -d -o "$2" -g hostctl -m 2775 "$source_dir"
+    install -d -o hostctl -g hostctl -m 0750 /var/lib/hostctl/letsencrypt-staging
+    if ! grep -q '^S3_PROXY_TOKEN=.' /etc/hostctl/env; then
+      printf '\nS3_PROXY_TOKEN=%s\n' "$(openssl rand -hex 32)" >> /etc/hostctl/env
+    fi
+    echo "Ready. Sync source from your development machine, then run setup here."
+    ;;
+  setup)
+    [[ $# -eq 1 ]] || usage
+    # Phoenix.LiveReloader uses inotifywait on Linux for browser refreshes.
+    if ! command -v inotifywait >/dev/null; then
+      apt-get install -y --no-install-recommends inotify-tools
+    fi
+    install -m 0644 "$source_dir/priv/dev/hostctl-dev.service" /etc/systemd/system/hostctl-dev.service
+    systemctl daemon-reload
+    run_mix local.hex --force
+    run_mix local.rebar --force
+    run_mix deps.get --check-locked
+    run_mix assets.setup
+    echo "Dependencies ready. Run migrate, then start."
+    ;;
+  migrate)
+    [[ $# -eq 1 ]] || usage
+    systemctl stop hostctl-dev.service hostctl.service
+    run_mix ecto.migrate
+    ;;
+  start)
+    [[ $# -eq 1 ]] || usage
+    systemctl stop hostctl.service
+    systemctl restart hostctl-dev.service
+    echo "Development server starting. Logs: journalctl -u hostctl-dev -f"
+    ;;
+  stop)
+    [[ $# -eq 1 ]] || usage
+    systemctl stop hostctl-dev.service
+    ;;
+  release)
+    [[ $# -eq 1 ]] || usage
+    systemctl stop hostctl-dev.service
+    systemctl start hostctl.service
+    ;;
+  status)
+    [[ $# -eq 1 ]] || usage
+    systemctl status hostctl-dev.service --no-pager
+    ;;
+  *) usage ;;
+esac

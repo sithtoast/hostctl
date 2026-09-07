@@ -86,6 +86,8 @@ defmodule HostctlWeb.Router do
       live "/panel/smarthost", PanelLive.Smarthost, :index
       live "/panel/databases", PanelLive.Databases, :index
       live "/panel/emails", PanelLive.Emails, :index
+      live "/panel/spam-protection", PanelLive.SpamProtectionLive, :index
+      live "/panel/email-delivery", PanelLive.EmailDeliveryLive, :index
       live "/panel/backup", PanelLive.Backup, :index
       live "/panel/backups", PanelLive.CompletedBackups, :index
       live "/panel/plesk-import", PanelLive.PleskImport, :index

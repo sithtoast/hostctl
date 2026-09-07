@@ -311,7 +311,10 @@ defmodule Hostctl.Plesk.Importer do
     web_files_path = Keyword.get(opts, :web_files_path)
     progress_pid = Keyword.get(opts, :progress_pid)
     server_credentials = Keyword.get(opts, :server_credentials)
-    s3_backend_opts = Keyword.get(opts, :s3_backend_opts)
+
+    s3_backend_opts =
+      if "web_files" in categories, do: Keyword.get(opts, :s3_backend_opts), else: nil
+
     user_id = Keyword.get(opts, :user_id)
     domain_name = subscription.domain
 
@@ -333,15 +336,38 @@ defmodule Hostctl.Plesk.Importer do
     if dry_run do
       {:ok, build_restore_plan(scope, subscription, inventory, categories, apply_dns_template)}
     else
-      do_restore_domain(
-        scope,
-        subscription,
-        inventory,
-        categories,
-        apply_dns_template,
-        restore_opts,
-        result
-      )
+      with {:ok, targets} <- Hostctl.Plesk.S3Import.prepare(s3_backend_opts, domain_name),
+           :ok <-
+             Hostctl.Plesk.ImportPreflight.run(categories, inventory, targets, fn key ->
+               notify_progress(
+                 progress_pid,
+                 domain_name,
+                 "Preparing #{key}",
+                 0,
+                 length(categories),
+                 :in_progress
+               )
+             end) do
+        do_restore_domain(
+          scope,
+          subscription,
+          inventory,
+          categories,
+          apply_dns_template,
+          Map.put(restore_opts, :s3_backend_opts, targets),
+          result
+        )
+      else
+        {:error, reason} ->
+          {:error,
+           %{
+             result
+             | domain_status: {:failed, reason},
+               categories: %{
+                 "prerequisites" => %{created: 0, skipped: 0, failed: 1, errors: [reason]}
+               }
+           }}
+      end
     end
   end
 
@@ -511,7 +537,16 @@ defmodule Hostctl.Plesk.Importer do
           |> Enum.with_index(1)
           |> Enum.reduce(%{}, fn {category, index}, acc ->
             notify_progress(progress_pid, domain_name, category, index, total, :in_progress)
-            cat_result = restore_category(category, domain, subscription, inventory, restore_opts)
+
+            cat_result =
+              case if(category == "web_files",
+                     do: Hostctl.Plesk.S3Import.persist(domain, restore_opts.s3_backend_opts),
+                     else: :ok
+                   ) do
+                :ok -> restore_category(category, domain, subscription, inventory, restore_opts)
+                {:error, reason} -> %{created: 0, skipped: 0, failed: 1, errors: [reason]}
+              end
+
             notify_progress(progress_pid, domain_name, category, index, total, cat_result)
             Map.put(acc, category, cat_result)
           end)
@@ -519,7 +554,12 @@ defmodule Hostctl.Plesk.Importer do
         # Clean up the pre-downloaded backup
         if extract_dir, do: File.rm_rf(extract_dir)
 
-        {:ok, %{result | categories: category_results}}
+        status =
+          if Enum.any?(category_results, fn {_, r} -> Map.get(r, :failed, 0) > 0 end),
+            do: :error,
+            else: :ok
+
+        {status, %{result | categories: category_results}}
     end
   end
 
@@ -916,8 +956,6 @@ defmodule Hostctl.Plesk.Importer do
     opts |> Map.keys() |> Enum.all?(&is_binary/1)
   end
 
-  defp per_target_s3_opts?(_), do: false
-
   # Extracts the remote docroot and parent home directory from the inventory item.
   defp compute_remote_docroot(item, domain_name) do
     if is_binary(item.document_root) and item.document_root != "" do
@@ -1027,7 +1065,11 @@ defmodule Hostctl.Plesk.Importer do
        ) do
     if is_map(s3_opts) do
       raw_prefix = Map.get(s3_opts, :prefix, "")
-      s3_prefix = if raw_prefix != "", do: "#{raw_prefix}/#{dir_name}", else: dir_name
+
+      s3_prefix =
+        if Map.get(s3_opts, :exact_prefix, false),
+          do: raw_prefix,
+          else: if(raw_prefix != "", do: "#{raw_prefix}/#{dir_name}", else: dir_name)
 
       # Pass SSH credentials to the worker so it can do batched rsync itself.
       # This avoids pre-staging all files locally (which would overflow disk on

@@ -161,7 +161,6 @@ defmodule HostctlWeb.PanelLive.CompletedBackups do
     result =
       case Restore.import_sql(kind, dump_path, target_db) do
         :ok -> %{dump: dump_path, status: :ok, message: "Imported successfully."}
-        {:ok, _} -> %{dump: dump_path, status: :ok, message: "Imported successfully."}
         {:error, reason} -> %{dump: dump_path, status: :error, message: reason}
       end
 

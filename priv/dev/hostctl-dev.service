@@ -1,0 +1,21 @@
+[Unit]
+Description=Hostctl VM development server
+After=network.target postgresql.service
+Requires=postgresql.service
+Conflicts=hostctl.service
+
+[Service]
+Type=exec
+User=hostctl
+Group=hostctl
+SupplementaryGroups=adm
+WorkingDirectory=/var/lib/hostctl/dev
+EnvironmentFile=/etc/hostctl/env
+Environment=MIX_ENV=dev HOSTCTL_VM_DEV=1
+ExecStart=/usr/bin/env mix phx.server
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hostctl-dev

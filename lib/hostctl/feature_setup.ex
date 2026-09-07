@@ -15,12 +15,19 @@ defmodule Hostctl.FeatureSetup do
   via PubSub. The install runs on the server via `System.cmd/3`.
   """
 
-  require Logger
-
   alias Hostctl.Settings
   alias Hostctl.MailServer
 
   @features [
+    %{
+      key: "postgresql",
+      label: "PostgreSQL Server",
+      description: "PostgreSQL databases for hosted applications.",
+      icon: "hero-circle-stack",
+      packages: ["postgresql", "postgresql-client"],
+      services: ["postgresql"],
+      setup_fn: nil
+    },
     %{
       key: "ftp",
       label: "FTP Server",
@@ -137,7 +144,7 @@ defmodule Hostctl.FeatureSetup do
       key: "spamassassin",
       label: "SpamAssassin",
       description:
-        "Mail spam filter using heuristics, Bayesian learning, and DNS blocklists. Integrates with Postfix to tag or reject incoming spam.",
+        "Standalone SpamAssassin daemon; Postfix integration must be configured manually. For managed filtering and Junk-folder learning, use Spam Protection.",
       icon: "hero-no-symbol",
       packages: ["spamassassin", "spamc"],
       services: [],
@@ -246,11 +253,54 @@ defmodule Hostctl.FeatureSetup do
     feature = get_feature(key)
 
     if feature do
-      Task.start(fn -> do_install(feature) end)
+      Task.start(fn ->
+        :global.trans({{__MODULE__, :import_setup}, self()}, fn -> do_install(feature) end)
+      end)
+
       :ok
     else
       {:error, :unknown_feature}
     end
+  end
+
+  @doc "Ensures a component is ready before an import starts, waiting for setup to finish."
+  def ensure_installed(key) do
+    # Serialize prerequisite checks and package operations across simultaneous imports.
+    :global.trans({{__MODULE__, :import_setup}, self()}, fn ->
+      key =
+        if key == "mysql" and packages_installed?(get_feature("mariadb").packages),
+          do: "mariadb",
+          else: key
+
+      case get_feature(key) do
+        nil ->
+          {:error, :unknown_feature}
+
+        feature ->
+          setting = Settings.get_feature_setting(key)
+
+          ready =
+            Enum.all?(feature.packages, &packages_installed?([&1])) and
+              services_active?(feature.services) and setting.enabled and
+              setting.status == "installed"
+
+          cond do
+            ready ->
+              :ok
+
+            setting.status == "installing" ->
+              {:error, "Component installation is already running; retry when it finishes"}
+
+            Enum.any?(Map.get(feature, :conflicts, []), fn conflict ->
+              packages_installed?(get_feature(conflict).packages)
+            end) ->
+              {:error, "A conflicting database server is installed; select the existing server"}
+
+            true ->
+              do_install(feature)
+          end
+      end
+    end)
   end
 
   @doc """
@@ -295,6 +345,7 @@ defmodule Hostctl.FeatureSetup do
 
       broadcast(feature.key, :log, "#{feature.label} installed successfully.")
       broadcast(feature.key, :status_changed, "installed")
+      :ok
     else
       {:error, reason} ->
         message = "Installation failed: #{inspect(reason)}"
@@ -307,6 +358,7 @@ defmodule Hostctl.FeatureSetup do
 
         broadcast(feature.key, :log, message)
         broadcast(feature.key, :status_changed, "failed")
+        {:error, reason}
     end
   end
 

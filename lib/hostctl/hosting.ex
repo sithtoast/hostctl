@@ -1358,8 +1358,8 @@ defmodule Hostctl.Hosting do
   Provisions Mailgun for a domain in three steps:
 
   1. Fetches the existing Mailgun domain (or creates it if absent).
-  2. Syncs all sending/receiving DNS records to Cloudflare (best-effort, skipped
-     when Cloudflare is not configured or the zone cannot be found).
+  2. Stages sending DNS requirements for review in Email Delivery. Existing
+     DNS policies and inbound MX records remain unchanged.
   3. Creates (or updates) a `hostctl` SMTP credential on that domain.
 
   Returns `{:ok, %{login: login, password: password}}` or `{:error, reason}`.
@@ -1367,16 +1367,8 @@ defmodule Hostctl.Hosting do
   def provision_mailgun_for_domain(domain_name, api_key, region \\ :us) do
     Logger.info("[Mailgun] Provisioning #{domain_name} (region: #{region})")
 
-    with {:ok, domain_info} <- get_or_create_mailgun_domain(api_key, domain_name, region) do
-      # Fetch Mailgun DMARC records separately (different API endpoint)
-      dmarc_records =
-        case MailgunClient.get_dmarc_records(api_key, domain_name, region) do
-          {:ok, records} -> records
-          _ -> []
-        end
-
-      sync_mailgun_dns_to_cloudflare(domain_name, domain_info, dmarc_records)
-      ensure_dmarc_record(domain_name, dmarc_records)
+    with {:ok, domain_info} <- get_or_create_mailgun_domain(api_key, domain_name, region),
+         {:ok, _} <- stage_mailgun_delivery(domain_name, domain_info) do
       MailgunClient.create_smtp_credential(api_key, domain_name, region)
     end
   end
@@ -1397,125 +1389,27 @@ defmodule Hostctl.Hosting do
     end
   end
 
-  defp sync_mailgun_dns_to_cloudflare(
-         domain_name,
-         %{
-           sending_dns_records: sending
-         },
-         dmarc_records
-       ) do
-    # Only use sending records (SPF, DKIM) — never receiving_dns_records,
-    # which are Mailgun's own inbound MX servers, not ours.
-    mg_sending_records =
-      Enum.map(sending, fn mg_record ->
-        %{
-          type: mg_record["record_type"],
-          name: mg_record["name"] || "@",
-          value: mg_record["value"],
-          priority: mg_record["priority"],
-          ttl: 3600
-        }
-      end)
+  # Provider requirements are staged for the admin's conflict-checked delivery
+  # workflow. Existing public/local DNS and DMARC policies remain untouched.
+  defp stage_mailgun_delivery(domain_name, domain_info) do
+    with %Domain{} = domain <- Repo.get_by(Domain, name: domain_name) do
+      alias Hostctl.EmailDelivery.Setting
+      setting = Repo.get_by(Setting, domain_id: domain.id) || %Setting{domain_id: domain.id}
+      attrs = Hostctl.EmailDelivery.mailgun_requirements(domain_info, domain.name)
 
-    # Merge in DMARC records fetched from the separate Mailgun endpoint
-    cf_records = mg_sending_records ++ dmarc_records
+      %{setting | domain: domain}
+      |> Setting.changeset(attrs)
+      |> Repo.insert_or_update()
+      |> case do
+        {:ok, setting} ->
+          {:ok, setting}
 
-    # Sync to local hostctl DNS zone (best-effort)
-    sync_mailgun_dns_to_local_zone(domain_name, cf_records)
-
-    case Settings.get_dns_provider_setting() do
-      %{provider: "cloudflare", cloudflare_api_token: token}
-      when is_binary(token) and token != "" ->
-        case Cloudflare.find_zone(token, domain_name) do
-          {:ok, zone_id} ->
-            Logger.info(
-              "[Mailgun] Syncing #{length(cf_records)} DNS records to Cloudflare zone #{zone_id}"
-            )
-
-            existing_cf =
-              case Cloudflare.list_records(token, zone_id) do
-                {:ok, records} -> records
-                _ -> []
-              end
-
-            # Upsert each record: find by name+type in CF list, update or create.
-            # This avoids stale-ID errors and handles the case where sync_mailgun_dns_to_local_zone
-            # already pushed some records via maybe_sync_create_to_cloudflare.
-            Enum.each(cf_records, fn record ->
-              case cf_upsert(token, zone_id, existing_cf, record, domain_name) do
-                {:ok, _} ->
-                  :ok
-
-                {:error, reason} ->
-                  Logger.warning(
-                    "[Mailgun] DNS sync failed for #{record.name}: #{inspect(reason)}"
-                  )
-              end
-            end)
-
-          {:error, reason} ->
-            Logger.info(
-              "[Mailgun] Cloudflare zone not found for #{domain_name}: #{reason}, skipping DNS sync"
-            )
-        end
-
-      _ ->
-        Logger.info("[Mailgun] Cloudflare not configured, skipping DNS sync")
-    end
-
-    :ok
-  end
-
-  # Ensures a _dmarc TXT record exists for the domain. Called after Mailgun
-  # provisioning as a fallback — Mailgun's DMARC API often returns nothing.
-  # Upserts the _dmarc TXT record using Mailgun-provided records when available,
-  # falling back to a sensible default. Always upserts so re-provisioning updates
-  # any stale value. Uses cf_upsert to avoid stale cloudflare_record_id issues.
-  defp ensure_dmarc_record(domain_name, mailgun_dmarc_records) do
-    with %Domain{} = domain <- Repo.get_by(Domain, name: domain_name),
-         %DnsZone{} = zone <- Repo.get_by(DnsZone, domain_id: domain.id) do
-      dmarc_name = "_dmarc.#{domain_name}"
-
-      # Prefer the record Mailgun provides; fall back to a sensible default
-      dmarc_value =
-        case Enum.find(mailgun_dmarc_records, fn r ->
-               r.name == dmarc_name or r.name == "_dmarc" or
-                 String.starts_with?(to_string(r.name), "_dmarc")
-             end) do
-          %{value: v} when is_binary(v) and v != "" -> v
-          _ -> "v=DMARC1; p=none; pct=100; fo=1; ri=3600; rua=mailto:postmaster@#{domain_name}"
-        end
-
-      attrs = %{type: "TXT", name: dmarc_name, value: dmarc_value, ttl: 300}
-
-      # Delete old local record without touching CF (stale IDs cause CF errors).
-      # We'll push to CF fresh right after.
-      existing = Repo.get_by(DnsRecord, dns_zone_id: zone.id, type: "TXT", name: dmarc_name)
-      if existing, do: Repo.delete(existing)
-
-      case %DnsRecord{dns_zone_id: zone.id} |> DnsRecord.changeset(attrs) |> Repo.insert() do
-        {:ok, record} ->
-          Logger.info("[DMARC] Upserted #{dmarc_name} = #{dmarc_value}")
-
-          # Sync to CF via upsert (matches by name+type, never uses stale stored IDs)
-          if is_binary(zone.cloudflare_zone_id) do
-            with %{provider: "cloudflare", cloudflare_api_token: token}
-                 when is_binary(token) and token != "" <- Settings.get_dns_provider_setting(),
-                 {:ok, cf_records} <- Cloudflare.list_records(token, zone.cloudflare_zone_id),
-                 {:ok, cf_id} <-
-                   cf_upsert(token, zone.cloudflare_zone_id, cf_records, record, domain_name) do
-              Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_id))
-            else
-              _ -> :ok
-            end
-          end
-
-        {:error, changeset} ->
-          Logger.warning("[DMARC] Failed to upsert record: #{inspect(changeset.errors)}")
+        {:error, _} ->
+          {:error, "Could not stage Mailgun DNS requirements; review them in Email Delivery"}
       end
+    else
+      _ -> {:error, "Add this domain to Hostctl before configuring its Mailgun delivery"}
     end
-
-    :ok
   end
 
   # Upserts a record in Cloudflare by matching on name+type against the live CF
@@ -1549,39 +1443,6 @@ defmodule Hostctl.Hosting do
     if name == domain_name or String.ends_with?(name, ".#{domain_name}"),
       do: name,
       else: "#{name}.#{domain_name}"
-  end
-
-  defp sync_mailgun_dns_to_local_zone(domain_name, mg_records) do
-    with %Domain{} = domain <- Repo.get_by(Domain, name: domain_name),
-         %DnsZone{} = zone <- Repo.get_by(DnsZone, domain_id: domain.id) do
-      mg_types = Enum.map(mg_records, & &1.type) |> MapSet.new()
-      mg_names = Enum.map(mg_records, & &1.name) |> MapSet.new()
-
-      # Remove existing local records that conflict with what Mailgun provides
-      existing =
-        Repo.all(from r in DnsRecord, where: r.dns_zone_id == ^zone.id)
-
-      Enum.each(existing, fn record ->
-        if MapSet.member?(mg_types, record.type) and MapSet.member?(mg_names, record.name) do
-          maybe_sync_delete_to_cloudflare(record)
-          Repo.delete(record)
-        end
-      end)
-
-      # Insert the new Mailgun records
-      Enum.each(mg_records, fn attrs ->
-        %DnsRecord{dns_zone_id: zone.id}
-        |> DnsRecord.changeset(attrs)
-        |> Repo.insert()
-        |> case do
-          {:ok, record} -> maybe_sync_create_to_cloudflare(zone, record)
-          _ -> :ok
-        end
-      end)
-    else
-      _ ->
-        Logger.info("[Mailgun] Local DNS zone not found for #{domain_name}, skipping local sync")
-    end
   end
 
   # ---------------------------------------------------------------------------

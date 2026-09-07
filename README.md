@@ -1,5 +1,11 @@
 # Hostctl
 
+For fast iteration against real Linux hosting services, see
+[the VM development guide](docs/vm-development.md).
+
+The installer saves your choices for retries with `sudo bash install.sh --resume`.
+See [resuming an installation](docs/installer-resume.md).
+
 To start your Phoenix server:
 
 * Run `mix setup` to install and setup dependencies

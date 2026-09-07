@@ -106,6 +106,13 @@ defmodule HostctlWeb.PanelLive.Features do
             Enable or disable optional server features. Installing a feature will set up the required
             packages and services on this server.
           </p>
+          <.link
+            id="features-spam-protection"
+            navigate={~p"/panel/spam-protection"}
+            class="mt-3 inline-flex items-center gap-2 text-sm font-medium text-indigo-600 transition-colors hover:text-indigo-800 dark:text-indigo-400"
+          >
+            <.icon name="hero-shield-check" class="size-4" /> Configure managed Spam Protection
+          </.link>
         </div>
 
         <%!-- Feature cards --%>

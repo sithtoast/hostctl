@@ -1,5 +1,7 @@
 import Config
 
+vm_dev? = config_env() == :dev and System.get_env("HOSTCTL_VM_DEV") in ~w(1 true)
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration
@@ -79,7 +81,7 @@ if System.get_env("GITHUB_PRERELEASES") in ~w(true 1) do
   config :hostctl, :github_prereleases, true
 end
 
-if config_env() == :prod do
+if config_env() == :prod or vm_dev? do
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """
@@ -120,7 +122,7 @@ if config_env() == :prod do
       # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
       # See the documentation on https://hexdocs.pm/bandit/Bandit.html#t:options/0
       # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0}
+      ip: if(vm_dev?, do: {127, 0, 0, 1}, else: {0, 0, 0, 0, 0, 0, 0, 0})
     ],
     secret_key_base: secret_key_base
 
@@ -177,4 +179,14 @@ if config_env() == :prod do
   if token = System.get_env("S3_PROXY_TOKEN") do
     config :hostctl, :s3_proxy_token, token
   end
+end
+
+if vm_dev? do
+  if System.get_env("S3_PROXY_TOKEN") in [nil, ""] do
+    raise "S3_PROXY_TOKEN is required for HOSTCTL_VM_DEV; run scripts/vm-dev prepare on the VM"
+  end
+
+  config :hostctl, :certbot,
+    acme_server: "https://acme-staging-v02.api.letsencrypt.org/directory",
+    letsencrypt_dir: "/var/lib/hostctl/letsencrypt-staging"
 end

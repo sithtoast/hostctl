@@ -122,6 +122,12 @@ defmodule Hostctl.CertBot do
 
     domain_args = build_domain_args(domain_name, domain_id, cert)
 
+    server_args =
+      case Keyword.get(certbot_config(), :acme_server) do
+        nil -> []
+        server -> ["--server", server]
+      end
+
     args =
       [
         "certonly",
@@ -136,7 +142,7 @@ defmodule Hostctl.CertBot do
         email_args ++
         dir_args ++
         extra_args ++
-        domain_args
+        domain_args ++ server_args
 
     Logger.info(
       "[SSLTRACE2] certbot invocation domain_id=#{domain_id} domain=#{domain_name} " <>

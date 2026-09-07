@@ -198,7 +198,7 @@ defmodule Hostctl.WebServer.Nginx do
     proxy_locations = proxy_location_blocks(proxies)
     s3_locations = s3_location_blocks(s3_path_backends)
     s3_error_handler = s3_path_error_handler(s3_path_backends)
-    root_location = root_location_block(autoindex)
+    root_location = root_location_block(autoindex, proxies)
 
     """
     # #{log_name} — managed by hostctl
@@ -217,9 +217,7 @@ defmodule Hostctl.WebServer.Nginx do
 
       #{s3_locations}
 
-        location / {
-            #{root_location}
-        }
+        #{root_location}
 
         location ~ \\.php$ {
             fastcgi_pass unix:#{php_socket};
@@ -254,7 +252,7 @@ defmodule Hostctl.WebServer.Nginx do
     proxy_locations = proxy_location_blocks(proxies)
     s3_locations = s3_location_blocks(s3_path_backends)
     s3_error_handler = s3_path_error_handler(s3_path_backends)
-    root_location = root_location_block(autoindex)
+    root_location = root_location_block(autoindex, proxies)
 
     http_block =
       http_php_server_block(
@@ -296,9 +294,7 @@ defmodule Hostctl.WebServer.Nginx do
 
       #{s3_locations}
 
-        location / {
-            #{root_location}
-        }
+        #{root_location}
 
         location ~ \\.php$ {
             fastcgi_pass unix:#{php_socket};
@@ -313,6 +309,18 @@ defmodule Hostctl.WebServer.Nginx do
         }
     #{s3_error_handler}}
     """
+  end
+
+  # A root proxy suppresses regex filesystem handlers, while longer path
+  # proxies and S3 locations still take precedence.
+  defp root_location_block(autoindex, proxies) do
+    case Enum.find(proxies, &(&1.enabled && normalize_proxy_path(&1.path) == "/")) do
+      nil ->
+        "location / {\n            #{root_location_block(autoindex)}\n        }"
+
+      proxy ->
+        "location ^~ / {\n#{proxy_directives(proxy)}        }"
+    end
   end
 
   # Returns the `location /` body for a filesystem vhost.
@@ -403,10 +411,9 @@ defmodule Hostctl.WebServer.Nginx do
 
   defp proxy_location_blocks(proxies) do
     proxies
-    |> Enum.filter(& &1.enabled)
+    |> Enum.filter(&(&1.enabled && normalize_proxy_path(&1.path) != "/"))
     |> Enum.map(fn proxy ->
       path = normalize_proxy_path(proxy.path)
-      target = "http://127.0.0.1:#{proxy.upstream_port}/"
 
       """
         location = #{path} {
@@ -414,7 +421,15 @@ defmodule Hostctl.WebServer.Nginx do
         }
 
         location ^~ #{path}/ {
-            proxy_pass #{target};
+      #{proxy_directives(proxy)}        }
+      """
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp proxy_directives(proxy) do
+    """
+            proxy_pass http://127.0.0.1:#{proxy.upstream_port}/;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -426,10 +441,7 @@ defmodule Hostctl.WebServer.Nginx do
             proxy_connect_timeout 60s;
             proxy_read_timeout 86400s;
             proxy_send_timeout 86400s;
-        }
-      """
-    end)
-    |> Enum.join("\n")
+    """
   end
 
   # ---------------------------------------------------------------------------
@@ -846,9 +858,7 @@ defmodule Hostctl.WebServer.Nginx do
 
       #{s3_locations}
 
-        location / {
-            #{root_location}
-        }
+        #{root_location}
 
         location ~ \\.php$ {
             fastcgi_pass unix:#{php_socket};

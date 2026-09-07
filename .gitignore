@@ -38,3 +38,5 @@ hostctl-*.tar
 npm-debug.log
 /assets/node_modules/
 
+# Standalone installer regression tests.
+/test/installer/__pycache__/

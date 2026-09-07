@@ -142,6 +142,26 @@ defmodule Hostctl.HostingTest do
       assert hd(proxies).container_name == "web-app"
     end
 
+    test "persists a root proxy and prevents duplicate root mappings" do
+      scope = user_scope_fixture()
+
+      {:ok, domain} =
+        Hosting.create_domain(scope, %{name: "root-proxy.com", apply_dns_template: false})
+
+      attrs = %{domain_id: domain.id, path: "/", container_name: "mastodon", upstream_port: 3000}
+
+      assert {:ok, proxy} = Hosting.create_domain_proxy(attrs)
+      assert proxy.path == "/"
+
+      assert Enum.any?(
+               Hosting.list_domain_proxies(domain),
+               &(&1.id == proxy.id && &1.path == "/")
+             )
+
+      assert {:error, changeset} = Hosting.create_domain_proxy(%{attrs | path: "//"})
+      assert %{path: ["has already been taken"]} = errors_on(changeset)
+    end
+
     test "rejects duplicate path for the same domain" do
       scope = user_scope_fixture()
 

@@ -98,6 +98,18 @@ defmodule HostctlWeb.Layouts do
               active={@active_tab == :panel_emails}
             />
             <.nav_item
+              icon="hero-shield-check"
+              label="Spam Protection"
+              href={~p"/panel/spam-protection"}
+              active={@active_tab == :panel_spam_protection}
+            />
+            <.nav_item
+              icon="hero-paper-airplane"
+              label="Email Delivery"
+              href={~p"/panel/email-delivery"}
+              active={@active_tab == :panel_email_delivery}
+            />
+            <.nav_item
               icon="hero-server-stack"
               label="All FTP"
               href={~p"/panel/ftp"}

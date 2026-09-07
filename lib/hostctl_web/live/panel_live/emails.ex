@@ -16,9 +16,13 @@ defmodule HostctlWeb.PanelLive.Emails do
               All email accounts across every user and domain.
             </p>
           </div>
-          <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-xs font-medium text-gray-600 dark:text-gray-300">
-            {@total} total
-          </span>
+          <.link
+            id="email-spam-protection"
+            navigate={~p"/panel/spam-protection"}
+            class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
+          >
+            <.icon name="hero-shield-check" class="size-4" /> Spam Protection
+          </.link>
         </div>
 
         <%!-- Table --%>

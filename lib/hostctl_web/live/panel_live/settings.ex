@@ -90,20 +90,13 @@ defmodule HostctlWeb.PanelLive.Settings do
   def handle_event("auto_detect_ips", _, socket) do
     socket = assign(socket, :detecting_ips, true)
 
-    case Settings.auto_detect_external_ips() do
-      {:ok, ip_settings} ->
-        {:noreply,
-         socket
-         |> assign(:detecting_ips, false)
-         |> put_flash(:info, "External IPs auto-detected for non-Docker interfaces.")
-         |> stream(:ip_settings, ip_settings, reset: true)}
+    {:ok, ip_settings} = Settings.auto_detect_external_ips()
 
-      _ ->
-        {:noreply,
-         socket
-         |> assign(:detecting_ips, false)
-         |> put_flash(:error, "External IP detection failed.")}
-    end
+    {:noreply,
+     socket
+     |> assign(:detecting_ips, false)
+     |> put_flash(:info, "External IPs auto-detected for non-Docker interfaces.")
+     |> stream(:ip_settings, ip_settings, reset: true)}
   end
 
   @impl true

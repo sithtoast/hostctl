@@ -20,7 +20,7 @@ defmodule Hostctl.Hosting.UploadJob do
     field :s3_prefix, :string
     field :s3_region, :string, default: "us-east-1"
     field :s3_access_key_id, :string
-    field :s3_secret_access_key, EncryptedField
+    field :s3_secret_access_key, EncryptedField, redact: true
     field :total_files, :integer, default: 0
     field :uploaded_files, :integer, default: 0
     field :failed_files, :integer, default: 0
@@ -37,7 +37,7 @@ defmodule Hostctl.Hosting.UploadJob do
     field :ssh_username, :string
     field :ssh_auth_method, :string
     field :ssh_private_key_path, :string
-    field :ssh_password, EncryptedField
+    field :ssh_password, EncryptedField, redact: true
 
     belongs_to :domain, Domain
     belongs_to :user, User
@@ -76,6 +76,7 @@ defmodule Hostctl.Hosting.UploadJob do
       :ssh_private_key_path,
       :ssh_password
     ])
+    |> update_change(:s3_endpoint, &Hostctl.S3Client.normalize_endpoint_change/1)
     |> validate_required([
       :domain_id,
       :user_id,

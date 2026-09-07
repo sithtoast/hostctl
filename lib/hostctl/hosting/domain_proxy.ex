@@ -23,13 +23,6 @@ defmodule Hostctl.Hosting.DomainProxy do
     |> validate_format(:path, ~r|^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$|,
       message: "must be a valid URL path"
     )
-    |> validate_change(:path, fn :path, path ->
-      if path == "/" do
-        [path: "must target a subpath, not the root path"]
-      else
-        []
-      end
-    end)
     |> validate_format(:container_name, ~r/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
       message: "must be a valid Docker container name"
     )
