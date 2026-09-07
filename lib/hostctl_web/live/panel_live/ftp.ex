@@ -261,7 +261,12 @@ defmodule HostctlWeb.PanelLive.Ftp do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="space-y-6">
         <%!-- Header --%>
         <div>

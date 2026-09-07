@@ -85,6 +85,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:form_params, @default_params)
      |> assign(:form, to_form(@default_params, as: :import))
      |> assign(:phase, :discovery)
+     |> assign(:import_step, "source")
+     |> assign(:review_domain, nil)
      |> assign(:discovering, false)
      |> assign(:discover_task_ref, nil)
      |> assign(:ssh_discovery, nil)
@@ -157,6 +159,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     {:noreply,
      socket
      |> assign(:phase, :discovery)
+     |> assign(:import_step, "source")
+     |> assign(:review_domain, nil)
      |> assign(:discovering, false)
      |> assign(:discover_task_ref, nil)
      |> assign(:ssh_discovery, nil)
@@ -607,6 +611,37 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     end
   end
 
+  def handle_event("import_step", %{"step" => step}, socket)
+      when step in ["source", "mapping", "review", "progress"] do
+    allowed = socket.assigns.phase != :discovery or step == "source"
+    {:noreply, if(allowed, do: assign(socket, :import_step, step), else: socket)}
+  end
+
+  def handle_event("review_domain", %{"domain" => domain}, socket) do
+    if Enum.any?(socket.assigns.subscriptions, &(&1.domain == domain)) do
+      {:noreply, assign(socket, import_step: "review", review_domain: domain)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("review_all", _, socket),
+    do: {:noreply, assign(socket, import_step: "review", review_domain: nil)}
+
+  def handle_event("confirm_import", _, socket) do
+    if socket.assigns.import_step == "review" do
+      result =
+        if socket.assigns.review_domain,
+          do: handle_event("restore_domain", %{"domain" => socket.assigns.review_domain}, socket),
+          else: handle_event("restore_all", %{}, socket)
+
+      {:noreply, updated} = result
+      {:noreply, assign(updated, :import_step, "progress")}
+    else
+      {:noreply, socket}
+    end
+  end
+
   @impl true
   def handle_event("restore_domain", %{"domain" => domain}, socket) do
     # Ignore if already restoring or restored
@@ -738,6 +773,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     {:noreply,
      socket
      |> assign(:phase, :restore)
+     |> assign(:import_step, "mapping")
+     |> assign(:review_domain, nil)
      |> assign(:form_params, form_params)
      |> assign(:form, to_form(form_params, as: :import))
      |> assign(:ssh_discovery, ssh_discovery)
@@ -840,6 +877,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         {:noreply,
          socket
          |> assign(:phase, :restore)
+         |> assign(:import_step, "mapping")
+         |> assign(:review_domain, nil)
          |> assign(:ssh_discovery, ssh_discovery)
          |> assign(:subscriptions, subscriptions)
          |> assign(:domain_configs, domain_configs)
@@ -1335,13 +1374,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="max-w-6xl mx-auto space-y-6">
-        <%!-- Upload Jobs Panel --%>
-        <%= if @upload_jobs != [] do %>
-          {render_upload_jobs(assigns)}
-        <% end %>
-
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Plesk Import</h1>
@@ -1377,17 +1416,159 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           {render_saved_migrations(assigns)}
         <% end %>
 
-        <%= if @discovering do %>
-          {render_discovering(assigns)}
-        <% else %>
-          <%= if @phase == :discovery do %>
+        <nav id="plesk-steps" aria-label="Import steps" class="flex flex-wrap gap-2">
+          <button
+            :for={
+              {step, label} <- [
+                {"source", "1 · Source"},
+                {"mapping", "2 · Map & select"},
+                {"review", "3 · Review"},
+                {"progress", "4 · Progress"}
+              ]
+            }
+            id={"plesk-step-#{step}"}
+            phx-click="import_step"
+            phx-value-step={step}
+            disabled={@phase == :discovery && step != "source"}
+            aria-current={if @import_step == step, do: "step"}
+            class={[
+              "app-button disabled:opacity-40",
+              @import_step == step && "!border-indigo-500 !text-indigo-600 dark:!text-indigo-300"
+            ]}
+          >
+            {label}
+          </button>
+        </nav>
+        <%= cond do %>
+          <% @discovering -> %>
+            {render_discovering(assigns)}
+          <% @import_step == "source" -> %>
             {render_discovery_phase(assigns)}
-          <% else %>
+          <% @import_step == "review" -> %>
+            {render_import_review(assigns)}
+          <% @import_step == "progress" -> %>
+            {render_import_progress(assigns)}
+          <% true -> %>
             {render_restore_phase(assigns)}
-          <% end %>
         <% end %>
       </div>
     </Layouts.app>
+    """
+  end
+
+  defp render_import_review(assigns) do
+    plans =
+      Enum.filter(
+        assigns.subscriptions,
+        &(assigns.review_domain == nil || &1.domain == assigns.review_domain)
+      )
+
+    assigns = assign(assigns, :plans, plans)
+
+    ~H"""
+    <div id="plesk-review" class="space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold">Review import plan</h2>
+        <p class="mt-1 text-sm text-gray-500">
+          Review owners, categories, and storage destinations. Source discovery does not verify the finished website.
+        </p>
+      </div>
+      <div
+        :for={sub <- @plans}
+        id={"review-#{sub.domain}"}
+        class="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900"
+      >
+        <% config = Map.get(@domain_configs, sub.domain, %{}) %>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <h3 class="font-semibold">{sub.domain}</h3>
+          <span class="text-sm text-gray-500">Owner: {Map.get(config, :account_email, "")}</span>
+        </div>
+        <p :if={Map.get(config, :account_email, "") == ""} class="mt-2 text-sm text-red-600">
+          Assign an account before importing this domain.
+        </p>
+        <p class="mt-3 text-sm">
+          Selected: {config
+          |> Map.get(:categories, MapSet.new())
+          |> Enum.sort()
+          |> Enum.map_join(", ", &category_display_name/1)}
+        </p>
+        <p class="mt-2 text-xs text-gray-500">Unselected categories will not be imported.</p>
+        <div
+          :for={{target, storage} <- Map.get(config, :s3_targets, %{})}
+          class="mt-3 border-t border-gray-100 pt-3 text-sm dark:border-gray-800"
+        >
+          <p>{target} → {if Map.get(storage, :s3_import, false), do: "S3", else: "Local files"}</p>
+          <p :if={Map.get(storage, :s3_import, false)} class="break-all text-xs text-gray-500">
+            Bucket: {Map.get(storage, :s3_bucket, "")} · Prefix: {Map.get(storage, :s3_prefix, "")}
+          </p>
+        </div>
+      </div>
+      <p class="rounded-lg bg-indigo-50 p-4 text-sm text-indigo-800 dark:bg-indigo-950/30 dark:text-indigo-200">
+        Required services and destination validation run before restore. Configuration and background uploads have separate results. Verify sites and mail before changing public traffic.
+      </p>
+      <div class="flex flex-wrap justify-between gap-4">
+        <button phx-click="import_step" phx-value-step="mapping" class="app-button">
+          ← Edit mappings
+        </button>
+        <button
+          id="confirm-plesk-import"
+          phx-click="confirm_import"
+          disabled={
+            @plans == [] ||
+              Enum.any?(
+                @plans,
+                &(Map.get(Map.get(@domain_configs, &1.domain, %{}), :account_email, "") == "")
+              )
+          }
+          data-confirm="Start this import using the reviewed owners, categories, and destinations?"
+          class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+        >Start import</button>
+      </div>
+    </div>
+    """
+  end
+
+  defp render_import_progress(assigns) do
+    ~H"""
+    <div id="plesk-progress" class="space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold">Import progress</h2>
+        <p class="mt-1 text-sm text-gray-500">
+          Configuration, transfers, and verification are separate stages.
+        </p>
+      </div>
+      <div
+        :for={sub <- @subscriptions}
+        id={"import-progress-#{sub.domain}"}
+        class="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900"
+      >
+        <% result = Map.get(@restore_results, sub.domain) %>
+        <% progress = Map.get(@restore_progress, sub.domain) %>
+        <h3 class="font-semibold">{sub.domain}</h3>
+        <div class="mt-4 flex justify-between gap-3 text-sm">
+          <span>Configuration</span><span>{cond do
+          Map.has_key?(@restore_task_refs, sub.domain) -> "In progress"
+          match?({:ok, _}, result) -> "Finished — review transfers"
+          match?({:error, _}, result) -> "Failed — review result"
+          true -> "Not started"
+        end}</span>
+        </div>
+        <p :if={progress} class="mt-2 text-xs text-gray-500">
+          {Map.get(progress, :status, "Working")}
+        </p>
+        <p class="mt-3 text-sm text-gray-500">
+          Verification: not recorded. Check the destination website, data, and mail delivery.
+        </p>
+      </div>
+      <%= if @upload_jobs != [] do %>
+        {render_upload_jobs(assigns)}
+      <% else %>
+        <p class="text-sm text-gray-500">No background S3 transfer jobs recorded.</p>
+      <% end %>
+      <button phx-click="import_step" phx-value-step="mapping" class="app-button">
+        View detailed configuration results
+      </button>
+    </div>
     """
   end
 
@@ -1569,7 +1750,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                 "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold shrink-0",
                 migration_status_class(m.status)
               ]}>
-                {m.status}
+                {if m.status == "completed", do: "Configuration finished", else: m.status}
               </span>
               <div class="min-w-0">
                 <p class="text-sm font-medium text-gray-900 dark:text-white truncate">{m.name}</p>
@@ -2014,8 +2195,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
           <button
             id="plesk-restore-all-btn"
-            phx-click="restore_all"
-            data-confirm="Restore all domains with their selected categories?"
+            phx-click="review_all"
             disabled={@restore_task_refs != %{}}
             class={[
               "inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-white text-sm font-medium transition-colors shadow-sm",
@@ -2050,7 +2230,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
               </svg>
               Restoring {map_size(@restore_task_refs)} domain(s)...
             <% else %>
-              <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Restore All
+              <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Review all domains
             <% end %>
           </button>
         </div>
@@ -2481,7 +2661,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                   <button
                     id={"restore-btn-#{sub.domain}"}
                     type="button"
-                    phx-click="restore_domain"
+                    phx-click="review_domain"
                     phx-value-domain={sub.domain}
                     disabled={restoring or (has_result and result_ok)}
                     class={[
@@ -2504,7 +2684,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                   >
                     <%= cond do %>
                       <% has_result and result_ok -> %>
-                        <.icon name="hero-check" class="w-3.5 h-3.5" /> Restored
+                        <.icon name="hero-check" class="w-3.5 h-3.5" /> Configuration finished
                       <% restoring -> %>
                         <svg
                           class="animate-spin w-3.5 h-3.5"
@@ -2530,7 +2710,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                         </svg>
                         Restoring...
                       <% true -> %>
-                        <.icon name="hero-arrow-down-tray" class="w-3.5 h-3.5" /> Restore
+                        <.icon name="hero-arrow-down-tray" class="w-3.5 h-3.5" /> Review import
                     <% end %>
                   </button>
                 </div>

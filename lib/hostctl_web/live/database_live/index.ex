@@ -5,10 +5,13 @@ defmodule HostctlWeb.DatabaseLive.Index do
   alias Hostctl.Hosting.Database
   alias Hostctl.Hosting.DbUser
   alias Hostctl.Settings
+  alias HostctlWeb.ResourceScope
 
   def mount(_params, _session, socket) do
-    domains = Hosting.list_domains(socket.assigns.current_scope)
-    all_databases = Enum.flat_map(domains, &Hosting.list_databases/1)
+    domains =
+      if socket.assigns.current_scope.user.role == "admin",
+        do: Hosting.list_all_domains_with_users(),
+        else: Hosting.list_domains(socket.assigns.current_scope)
 
     {:ok,
      socket
@@ -16,34 +19,31 @@ defmodule HostctlWeb.DatabaseLive.Index do
      |> assign(:active_tab, :databases)
      |> assign(:domains, domains)
      |> assign(:selected_domain_id, nil)
+     |> assign(:query, "")
      |> assign(:expanded_db, nil)
      |> assign(:db_users, [])
      |> assign(:db_user_form, nil)
      |> assign(:editing_db_user_id, nil)
      |> assign(:edit_db_user_form, nil)
-     |> assign(:dbs_empty?, all_databases == [])
+     |> assign(:dbs_empty?, true)
      |> assign(:db_admin_links, db_admin_links(socket.assigns.current_scope))
      |> assign_db_form()
-     |> stream(:databases, all_databases)}
+     |> stream(:databases, [])}
   end
 
-  def handle_event("select_domain", %{"domain_id" => domain_id}, socket) do
-    domain_id = if domain_id == "", do: nil, else: String.to_integer(domain_id)
-
-    databases =
-      if domain_id do
-        domain = Hosting.get_domain!(socket.assigns.current_scope, domain_id)
-        Hosting.list_databases(domain)
-      else
-        Enum.flat_map(socket.assigns.domains, &Hosting.list_databases/1)
-      end
-
-    {:noreply,
-     socket
-     |> assign(:selected_domain_id, domain_id)
-     |> assign(:dbs_empty?, databases == [])
-     |> stream(:databases, databases, reset: true)}
+  def handle_params(params, _uri, socket) do
+    domain = ResourceScope.selected(socket.assigns.domains, params["domain_id"])
+    {:noreply, socket |> assign(:selected_domain_id, domain && domain.id) |> reload_resources()}
   end
+
+  def handle_event("scope_domain", %{"domain_id" => id}, socket),
+    do: {:noreply, push_patch(socket, to: ~p"/databases?#{%{domain_id: id}}")}
+
+  def handle_event("select_domain", params, socket),
+    do: handle_event("scope_domain", params, socket)
+
+  def handle_event("search_resources", %{"query" => query}, socket),
+    do: {:noreply, socket |> assign(:query, query) |> reload_resources()}
 
   def handle_event("validate_db", %{"database" => params}, socket) do
     form =
@@ -56,14 +56,13 @@ defmodule HostctlWeb.DatabaseLive.Index do
 
   def handle_event("save_db", %{"database" => params}, socket) do
     domain_id = socket.assigns.selected_domain_id || get_first_domain_id(socket)
-    domain = Hosting.get_domain!(socket.assigns.current_scope, domain_id)
+    domain = ResourceScope.selected(socket.assigns.domains, domain_id)
 
     case Hosting.create_database(domain, params) do
       {:ok, database} ->
         {:noreply,
          socket
-         |> assign(:dbs_empty?, false)
-         |> stream_insert(:databases, database)
+         |> reload_resources()
          |> assign_db_form()
          |> put_flash(:info, "Database #{database.name} created.")}
 
@@ -78,12 +77,10 @@ defmodule HostctlWeb.DatabaseLive.Index do
 
     if database do
       {:ok, _} = Hosting.delete_database(database)
-      all_dbs = Enum.flat_map(socket.assigns.domains, &Hosting.list_databases/1)
 
       {:noreply,
        socket
-       |> assign(:dbs_empty?, all_dbs == [])
-       |> stream_delete(:databases, database)
+       |> reload_resources()
        |> put_flash(:info, "Database deleted.")}
     else
       {:noreply, socket}
@@ -313,11 +310,30 @@ defmodule HostctlWeb.DatabaseLive.Index do
     end
   end
 
+  defp reload_resources(socket) do
+    resources =
+      socket.assigns.domains
+      |> Enum.filter(
+        &(is_nil(socket.assigns.selected_domain_id) || &1.id == socket.assigns.selected_domain_id)
+      )
+      |> Enum.flat_map(&Hosting.list_databases/1)
+      |> Enum.filter(
+        &String.contains?(String.downcase(&1.name), String.downcase(socket.assigns.query))
+      )
+
+    socket |> assign(:dbs_empty?, resources == []) |> stream(:databases, resources, reset: true)
+  end
+
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="space-y-6">
-        <div class="flex items-center justify-between">
+        <div class="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Databases</h1>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -342,6 +358,21 @@ defmodule HostctlWeb.DatabaseLive.Index do
           <% end %>
         </div>
 
+        <HostctlWeb.ResourceComponents.domain_scope
+          domains={@domains}
+          selected_domain_id={@selected_domain_id}
+          id="databases-scope"
+        />
+        <.form for={to_form(%{"query" => @query})} id="databases-search" phx-change="search_resources">
+          <.input
+            type="search"
+            name="query"
+            value={@query}
+            label="Search databases"
+            phx-debounce="200"
+          />
+        </.form>
+
         <%= if @domains == [] do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-12 text-center">
             <.icon
@@ -361,16 +392,19 @@ defmodule HostctlWeb.DatabaseLive.Index do
           </div>
         <% else %>
           <%!-- Create database form --%>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
-            <h2 class="text-base font-semibold text-gray-900 dark:text-white mb-4">
+          <details
+            id="create-database-panel"
+            class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6"
+          >
+            <summary class="cursor-pointer text-sm font-semibold text-indigo-600 dark:text-indigo-300">
               Create Database
-            </h2>
+            </summary>
             <.form
               for={@db_form}
               id="database-form"
               phx-change="validate_db"
               phx-submit="save_db"
-              class="space-y-4"
+              class="mt-5 space-y-4"
             >
               <%!-- Base errors (e.g. MySQL connection failure) --%>
               <%= if error = @db_form.errors[:base] do %>
@@ -421,44 +455,10 @@ defmodule HostctlWeb.DatabaseLive.Index do
                 </div>
               </div>
             </.form>
-          </div>
-
-          <%!-- Filter by domain --%>
-          <div class="flex items-center gap-3 flex-wrap">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Filter:</span>
-            <button
-              phx-click="select_domain"
-              phx-value-domain_id=""
-              class={[
-                "px-3 py-1 rounded-full text-xs font-medium transition-colors",
-                if(@selected_domain_id == nil,
-                  do: "bg-indigo-600 text-white",
-                  else:
-                    "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
-                )
-              ]}
-            >
-              All
-            </button>
-            <button
-              :for={domain <- @domains}
-              phx-click="select_domain"
-              phx-value-domain_id={domain.id}
-              class={[
-                "px-3 py-1 rounded-full text-xs font-medium transition-colors",
-                if(@selected_domain_id == domain.id,
-                  do: "bg-indigo-600 text-white",
-                  else:
-                    "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
-                )
-              ]}
-            >
-              {domain.name}
-            </button>
-          </div>
+          </details>
 
           <%!-- Databases list --%>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-x-auto">
             <div class={[
               "flex flex-col items-center justify-center py-16 gap-3",
               if(@dbs_empty?, do: "block", else: "hidden")
@@ -568,7 +568,7 @@ defmodule HostctlWeb.DatabaseLive.Index do
           <%= if @expanded_db do %>
             <div
               id="db-users-panel"
-              class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden"
+              class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-x-auto"
             >
               <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 dark:border-gray-800">
                 <div class="flex items-center gap-3">

@@ -39,7 +39,7 @@ defmodule HostctlWeb.Router do
     pipe_through [:browser, :require_authenticated_user]
 
     live_session :require_authenticated_user,
-      on_mount: [{HostctlWeb.UserAuth, :require_authenticated}] do
+      on_mount: [{HostctlWeb.UserAuth, :require_authenticated}, HostctlWeb.NavigationHook] do
       # User settings
       live "/users/settings", UserLive.Settings, :edit
       live "/users/settings/confirm-email/:token", UserLive.Settings, :confirm_email
@@ -63,14 +63,14 @@ defmodule HostctlWeb.Router do
       live "/ftp", FtpLive.Index, :index
 
       # Cron
-      live "/cron", DomainLive.Index, :index
+      live "/cron", CronLive.Index, :index
 
       # Updates
       live "/updates", UpdatesLive, :index
     end
 
     live_session :require_admin_or_reseller,
-      on_mount: [{HostctlWeb.UserAuth, :require_admin_or_reseller}] do
+      on_mount: [{HostctlWeb.UserAuth, :require_admin_or_reseller}, HostctlWeb.NavigationHook] do
       live "/users/new", UserLive.Registration, :new
 
       # Panel users management (admin + reseller)
@@ -78,8 +78,12 @@ defmodule HostctlWeb.Router do
     end
 
     live_session :require_admin,
-      on_mount: [{HostctlWeb.UserAuth, :require_admin}] do
+      on_mount: [{HostctlWeb.UserAuth, :require_admin}, HostctlWeb.NavigationHook] do
       # Panel settings (admin only)
+      live "/panel", PanelLive.Overview, :overview
+      live "/panel/mail", PanelLive.Overview, :mail
+      live "/panel/migration", PanelLive.Overview, :backup
+      live "/panel/system", PanelLive.Overview, :system
       live "/panel/settings", PanelLive.Settings, :index
       live "/panel/features", PanelLive.Features, :index
       live "/panel/docker", PanelLive.Docker, :index

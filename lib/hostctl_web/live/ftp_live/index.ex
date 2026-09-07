@@ -3,19 +3,27 @@ defmodule HostctlWeb.FtpLive.Index do
 
   alias Hostctl.Hosting
   alias Hostctl.Hosting.FtpAccount
+  alias HostctlWeb.ResourceScope
 
   def mount(_params, _session, socket) do
     scope = socket.assigns.current_scope
-    domains = Hosting.list_domains(scope)
-    ftp_accounts = Hosting.list_all_ftp_accounts(scope)
+
+    domains =
+      if scope.user.role == "admin",
+        do: Hosting.list_all_domains_with_users(),
+        else: Hosting.list_domains(scope)
+
     ftp_dir_options = build_ftp_dir_options(domains)
 
     {:ok,
      socket
-     |> stream(:ftp_accounts, ftp_accounts)
+     |> stream(:ftp_accounts, [])
      |> assign(:page_title, "FTP Accounts")
      |> assign(:active_tab, :ftp)
      |> assign(:domains, domains)
+     |> assign(:selected_domain_id, nil)
+     |> assign(:query, "")
+     |> assign(:account_scope, "all")
      |> assign(:ftp_dir_options, ftp_dir_options)
      |> assign(:editing_ftp_id, nil)
      |> assign(:ftp_edit_form, nil)
@@ -25,8 +33,20 @@ defmodule HostctlWeb.FtpLive.Index do
      |> assign_ftp_form()}
   end
 
-  def handle_params(_params, _url, socket) do
+  def handle_params(params, _url, socket) do
+    domain = ResourceScope.selected(socket.assigns.domains, params["domain_id"])
+    socket = socket |> assign(:selected_domain_id, domain && domain.id) |> reload_accounts()
     {:noreply, socket}
+  end
+
+  def handle_event("scope_domain", %{"domain_id" => id}, socket),
+    do: {:noreply, push_patch(socket, to: ~p"/ftp?#{%{domain_id: id}}")}
+
+  def handle_event("filter_accounts", params, socket) do
+    {:noreply,
+     socket
+     |> assign(query: params["query"] || "", account_scope: params["account_scope"] || "all")
+     |> reload_accounts()}
   end
 
   def handle_event("set_ftp_mode", %{"mode" => mode}, socket) when mode in ["single", "multi"] do
@@ -75,6 +95,7 @@ defmodule HostctlWeb.FtpLive.Index do
          |> stream_insert(:ftp_accounts, account)
          |> assign_ftp_form()
          |> assign(:ftp_access_mode, "single")
+         |> reload_accounts()
          |> put_flash(:info, "FTP account #{account.username} created.")}
 
       {:error, changeset} ->
@@ -140,8 +161,8 @@ defmodule HostctlWeb.FtpLive.Index do
 
           {:noreply,
            socket
-           |> stream_insert(:ftp_accounts, updated)
            |> assign(:editing_ftp_id, nil)
+           |> reload_accounts()
            |> put_flash(:info, "FTP account #{updated.username} updated.")}
 
         {:error, changeset} ->
@@ -225,9 +246,34 @@ defmodule HostctlWeb.FtpLive.Index do
     |> Map.delete("mount_paths")
   end
 
+  defp reload_accounts(socket) do
+    accounts =
+      Hosting.list_all_ftp_accounts(socket.assigns.current_scope)
+      |> Enum.filter(fn account ->
+        domains = ResourceScope.ftp_domains(account, socket.assigns.domains)
+
+        (is_nil(socket.assigns.selected_domain_id) ||
+           Enum.any?(domains, &(&1.id == socket.assigns.selected_domain_id))) &&
+          String.contains?(
+            String.downcase(account.username),
+            String.downcase(socket.assigns.query)
+          ) &&
+          (socket.assigns.account_scope == "all" ||
+             (socket.assigns.account_scope == "shared" && length(domains) > 1) ||
+             (socket.assigns.account_scope == "single" && length(domains) == 1))
+      end)
+
+    stream(socket, :ftp_accounts, accounts, reset: true)
+  end
+
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="space-y-6">
         <%!-- Header --%>
         <div>
@@ -237,13 +283,29 @@ defmodule HostctlWeb.FtpLive.Index do
           </p>
         </div>
 
+        <HostctlWeb.ResourceComponents.domain_scope
+          domains={@domains}
+          selected_domain_id={@selected_domain_id}
+          id="ftp-scope"
+        />
+        <.form
+          for={to_form(%{"query" => @query, "account_scope" => @account_scope})}
+          id="ftp-filters"
+          phx-change="filter_accounts"
+          class="ui-filterbar"
+        >
+          <.input name="query" value={@query} type="search" label="Search logins" phx-debounce="200" />
+          <.input
+            name="account_scope"
+            value={@account_scope}
+            type="select"
+            label="Account scope"
+            options={[{"All accounts", "all"}, {"Single-domain", "single"}, {"Shared", "shared"}]}
+          />
+        </.form>
         <%!-- Create new account --%>
-        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
-          <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
-            <h3 class="text-base font-semibold text-gray-900 dark:text-white">
-              New FTP Account
-            </h3>
-          </div>
+        <details id="ftp-create-panel" class="ui-panel ui-disclosure">
+          <summary>Create FTP account <span>One directory or multiple websites</span></summary>
           <div class="p-6">
             <.form
               for={@ftp_form}
@@ -336,7 +398,7 @@ defmodule HostctlWeb.FtpLive.Index do
               </div>
             </.form>
           </div>
-        </div>
+        </details>
 
         <%!-- Accounts list --%>
         <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
@@ -348,7 +410,10 @@ defmodule HostctlWeb.FtpLive.Index do
             phx-update="stream"
             class="divide-y divide-gray-100 dark:divide-gray-800"
           >
-            <div class="hidden only:flex items-center justify-center py-10 text-sm text-gray-400">
+            <div
+              id="ftp-empty"
+              class="hidden only:flex items-center justify-center py-10 text-sm text-gray-400"
+            >
               No FTP accounts yet.
             </div>
             <div
@@ -476,9 +541,20 @@ defmodule HostctlWeb.FtpLive.Index do
                         </span>
                       <% end %>
                     </div>
+                    <% accessible_domains = ResourceScope.ftp_domains(account, @domains) %>
+                    <span
+                      :if={length(accessible_domains) > 1}
+                      id={"ftp-shared-#{account.id}"}
+                      class="inline-flex rounded bg-indigo-50 px-2 py-1 text-xs text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
+                    >
+                      Shared · {length(accessible_domains)} domains
+                    </span>
+                    <p class="text-xs text-gray-500">
+                      {Enum.map_join(accessible_domains, ", ", & &1.name)}
+                    </p>
                     <%= if account.mounts && account.mounts != [] do %>
                       <p class="text-xs text-gray-500">
-                        Virtual: {Enum.map_join(account.mounts, ", ", & &1["name"])}
+                        Directories: {Enum.map_join(account.mounts, ", ", & &1["path"])}
                       </p>
                     <% else %>
                       <p class="text-xs text-gray-500">{account.home_dir || "/"}</p>
@@ -499,12 +575,12 @@ defmodule HostctlWeb.FtpLive.Index do
                       phx-value-id={account.id}
                       class="text-xs text-indigo-500 hover:text-indigo-600"
                     >
-                      Edit
+                      Manage
                     </button>
                     <button
                       phx-click="delete_ftp"
                       phx-value-id={account.id}
-                      data-confirm="Delete this FTP account?"
+                      data-confirm="Delete this FTP login and remove its access to every assigned directory? Website files are not deleted."
                       class="text-xs text-red-500 hover:text-red-600"
                     >
                       Delete

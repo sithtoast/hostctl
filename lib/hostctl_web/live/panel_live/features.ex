@@ -97,8 +97,13 @@ defmodule HostctlWeb.PanelLive.Features do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
-      <div class="max-w-4xl mx-auto space-y-6">
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
+      <div class="space-y-6">
         <%!-- Header --%>
         <div>
           <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Features</h1>
@@ -116,12 +121,13 @@ defmodule HostctlWeb.PanelLive.Features do
         </div>
 
         <%!-- Feature cards --%>
-        <div class="grid gap-4">
+        <div id="feature-catalog" class="grid gap-4 xl:grid-cols-2">
           <div
             :for={feature <- @features}
+            id={"feature-#{feature.key}"}
             class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 transition-shadow hover:shadow-sm"
           >
-            <div class="flex items-start gap-4">
+            <div class="flex flex-wrap items-start gap-4">
               <%!-- Icon --%>
               <div class={[
                 "flex items-center justify-center w-11 h-11 rounded-xl shrink-0",
@@ -144,7 +150,7 @@ defmodule HostctlWeb.PanelLive.Features do
 
               <%!-- Info --%>
               <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2.5">
+                <div class="flex flex-wrap items-center gap-2.5">
                   <h3 class="text-base font-semibold text-gray-900 dark:text-white">
                     {feature.label}
                   </h3>

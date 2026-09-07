@@ -29,6 +29,7 @@ defmodule Hostctl.Application do
         {Phoenix.PubSub, name: Hostctl.PubSub},
         {Registry, keys: :unique, name: Hostctl.UploadRegistry},
         {Task.Supervisor, name: Hostctl.TaskSupervisor},
+        {Hostctl.UpdateMonitor, Application.get_env(:hostctl, Hostctl.UpdateMonitor, [])},
         {DynamicSupervisor, name: Hostctl.UploadSupervisor, strategy: :one_for_one},
         # Reset any upload jobs that were left "running" by a previous server crash
         {Task, &Hostctl.Hosting.reset_orphaned_upload_jobs/0}

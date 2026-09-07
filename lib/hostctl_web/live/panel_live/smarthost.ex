@@ -150,7 +150,12 @@ defmodule HostctlWeb.PanelLive.Smarthost do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="max-w-2xl mx-auto space-y-6">
         <%!-- Header --%>
         <div>

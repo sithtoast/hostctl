@@ -152,7 +152,12 @@ defmodule HostctlWeb.PanelLive.SpamProtectionLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={:panel_spam_protection}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={:panel_spam_protection}
+    >
       <div id="spam-protection" class="mx-auto max-w-5xl space-y-6">
         <div class="flex flex-wrap items-center justify-between gap-4">
           <div>

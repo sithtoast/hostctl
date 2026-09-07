@@ -17,11 +17,16 @@ defmodule HostctlWeb.DashboardLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="space-y-6">
         <%!-- Header --%>
         <div>
-          <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Dashboard</h1>
+          <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Overview</h1>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
             Welcome back, {if @current_scope.user.name,
               do: @current_scope.user.name,
@@ -30,7 +35,7 @@ defmodule HostctlWeb.DashboardLive do
         </div>
 
         <%!-- Stats cards --%>
-        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <.stat_card
             icon="hero-globe-alt"
             label="Total Domains"
@@ -48,12 +53,6 @@ defmodule HostctlWeb.DashboardLive do
             label="SSL Enabled"
             value={@stats.ssl_enabled}
             color="blue"
-          />
-          <.stat_card
-            icon="hero-server"
-            label="Server Status"
-            value="Online"
-            color="emerald"
           />
         </div>
 
@@ -74,7 +73,10 @@ defmodule HostctlWeb.DashboardLive do
             phx-update="stream"
             class="divide-y divide-gray-100 dark:divide-gray-800"
           >
-            <div class="hidden only:flex items-center justify-center py-12 text-sm text-gray-500 dark:text-gray-400">
+            <div
+              id="recent-domains-empty"
+              class="hidden only:flex items-center justify-center py-12 text-sm text-gray-500 dark:text-gray-400"
+            >
               No domains yet.
               <.link
                 navigate={~p"/domains/new"}

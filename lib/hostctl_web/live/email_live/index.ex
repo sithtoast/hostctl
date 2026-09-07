@@ -4,6 +4,7 @@ defmodule HostctlWeb.EmailLive.Index do
   alias Hostctl.Hosting
   alias Hostctl.Hosting.EmailAccount
   alias Hostctl.Settings
+  alias HostctlWeb.ResourceScope
 
   def mount(_params, _session, socket) do
     scope = socket.assigns.current_scope
@@ -16,8 +17,6 @@ defmodule HostctlWeb.EmailLive.Index do
         Hosting.list_domains(scope)
       end
 
-    all_accounts = Enum.flat_map(domains, &Hosting.list_email_accounts/1)
-
     {:ok,
      socket
      |> assign(:page_title, "Email Accounts")
@@ -25,29 +24,26 @@ defmodule HostctlWeb.EmailLive.Index do
      |> assign(:is_admin?, is_admin)
      |> assign(:domains, domains)
      |> assign(:selected_domain_id, nil)
-     |> assign(:accounts_empty?, all_accounts == [])
+     |> assign(:query, "")
+     |> assign(:accounts_empty?, true)
      |> assign(:webmail_links, webmail_links())
      |> assign_form()
-     |> stream(:email_accounts, all_accounts)}
+     |> stream(:email_accounts, [])}
   end
 
-  def handle_event("select_domain", %{"domain_id" => domain_id}, socket) do
-    domain_id = if domain_id == "", do: nil, else: String.to_integer(domain_id)
-
-    accounts =
-      if domain_id do
-        domain = find_domain!(socket, domain_id)
-        Hosting.list_email_accounts(domain)
-      else
-        Enum.flat_map(socket.assigns.domains, &Hosting.list_email_accounts/1)
-      end
-
-    {:noreply,
-     socket
-     |> assign(:selected_domain_id, domain_id)
-     |> assign(:accounts_empty?, accounts == [])
-     |> stream(:email_accounts, accounts, reset: true)}
+  def handle_params(params, _uri, socket) do
+    domain = ResourceScope.selected(socket.assigns.domains, params["domain_id"])
+    {:noreply, socket |> assign(:selected_domain_id, domain && domain.id) |> reload_resources()}
   end
+
+  def handle_event("scope_domain", %{"domain_id" => id}, socket),
+    do: {:noreply, push_patch(socket, to: ~p"/email?#{%{domain_id: id}}")}
+
+  def handle_event("select_domain", params, socket),
+    do: handle_event("scope_domain", params, socket)
+
+  def handle_event("search_resources", %{"query" => query}, socket),
+    do: {:noreply, socket |> assign(:query, query) |> reload_resources()}
 
   def handle_event("validate", %{"email_account" => params}, socket) do
     form =
@@ -66,8 +62,7 @@ defmodule HostctlWeb.EmailLive.Index do
       {:ok, account} ->
         {:noreply,
          socket
-         |> assign(:accounts_empty?, false)
-         |> stream_insert(:email_accounts, account)
+         |> reload_resources()
          |> assign_form()
          |> put_flash(:info, "Email account #{account.username}@#{domain.name} created.")}
 
@@ -82,12 +77,10 @@ defmodule HostctlWeb.EmailLive.Index do
 
     if account do
       {:ok, _} = Hosting.delete_email_account(account)
-      all_accounts = Enum.flat_map(socket.assigns.domains, &Hosting.list_email_accounts/1)
 
       {:noreply,
        socket
-       |> assign(:accounts_empty?, all_accounts == [])
-       |> stream_delete(:email_accounts, account)
+       |> reload_resources()
        |> put_flash(:info, "Email account deleted.")}
     else
       {:noreply, socket}
@@ -121,11 +114,32 @@ defmodule HostctlWeb.EmailLive.Index do
     |> Enum.filter(fn {key, _, _, _} -> Settings.feature_enabled?(key) end)
   end
 
+  defp reload_resources(socket) do
+    resources =
+      socket.assigns.domains
+      |> Enum.filter(
+        &(is_nil(socket.assigns.selected_domain_id) || &1.id == socket.assigns.selected_domain_id)
+      )
+      |> Enum.flat_map(&Hosting.list_email_accounts/1)
+      |> Enum.filter(
+        &String.contains?(String.downcase(&1.username), String.downcase(socket.assigns.query))
+      )
+
+    socket
+    |> assign(:accounts_empty?, resources == [])
+    |> stream(:email_accounts, resources, reset: true)
+  end
+
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="space-y-6">
-        <div class="flex items-center justify-between">
+        <div class="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Email Accounts</h1>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -149,6 +163,15 @@ defmodule HostctlWeb.EmailLive.Index do
           <% end %>
         </div>
 
+        <HostctlWeb.ResourceComponents.domain_scope
+          domains={@domains}
+          selected_domain_id={@selected_domain_id}
+          id="email-scope"
+        />
+        <.form for={to_form(%{"query" => @query})} id="email-search" phx-change="search_resources">
+          <.input type="search" name="query" value={@query} label="Search email" phx-debounce="200" />
+        </.form>
+
         <%= if @domains == [] do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-12 text-center">
             <.icon
@@ -168,16 +191,19 @@ defmodule HostctlWeb.EmailLive.Index do
           </div>
         <% else %>
           <%!-- Create account form --%>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
-            <h2 class="text-base font-semibold text-gray-900 dark:text-white mb-4">
+          <details
+            id="create-email-panel"
+            class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6"
+          >
+            <summary class="cursor-pointer text-sm font-semibold text-indigo-600 dark:text-indigo-300">
               Create Email Account
-            </h2>
+            </summary>
             <.form
               for={@form}
               id="email-account-form"
               phx-change="validate"
               phx-submit="save"
-              class="space-y-4"
+              class="mt-5 space-y-4"
             >
               <div class="flex flex-col sm:flex-row items-start gap-3">
                 <div class="flex-1 w-full sm:w-auto">
@@ -247,46 +273,10 @@ defmodule HostctlWeb.EmailLive.Index do
                 </div>
               <% end %>
             </.form>
-          </div>
-
-          <%!-- Filter by domain --%>
-          <div class="flex items-center gap-3">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Filter by domain:</span>
-            <div class="flex gap-2 flex-wrap">
-              <button
-                phx-click="select_domain"
-                phx-value-domain_id=""
-                class={[
-                  "px-3 py-1 rounded-full text-xs font-medium transition-colors",
-                  if(@selected_domain_id == nil,
-                    do: "bg-indigo-600 text-white",
-                    else:
-                      "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
-                  )
-                ]}
-              >
-                All
-              </button>
-              <button
-                :for={domain <- @domains}
-                phx-click="select_domain"
-                phx-value-domain_id={domain.id}
-                class={[
-                  "px-3 py-1 rounded-full text-xs font-medium transition-colors",
-                  if(@selected_domain_id == domain.id,
-                    do: "bg-indigo-600 text-white",
-                    else:
-                      "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
-                  )
-                ]}
-              >
-                {domain.name}
-              </button>
-            </div>
-          </div>
+          </details>
 
           <%!-- Accounts list --%>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-x-auto">
             <div
               :if={@accounts_empty?}
               class="flex flex-col items-center justify-center py-16 gap-3"
@@ -350,6 +340,19 @@ defmodule HostctlWeb.EmailLive.Index do
                     </span>
                   </td>
                   <td class="px-6 py-4 text-right">
+                    <a
+                      :for={{key, label, path, _icon} <- @webmail_links}
+                      id={"webmail-#{account.id}-#{key}"}
+                      href={path}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={"Open #{label} webmail for #{account.username}@#{account.domain.name}"}
+                      class="mr-4 whitespace-nowrap text-sm text-indigo-600 dark:text-indigo-400"
+                    >
+                      {if length(@webmail_links) == 1, do: "Webmail", else: label}
+                      <.icon name="hero-arrow-top-right-on-square" class="size-3.5" />
+                    </a>
+
                     <button
                       phx-click="delete"
                       phx-value-id={account.id}

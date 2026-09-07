@@ -304,7 +304,12 @@ defmodule HostctlWeb.DnsLive.Index do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="space-y-6">
         <%!-- Header --%>
         <div class="flex items-center gap-4">
@@ -417,7 +422,7 @@ defmodule HostctlWeb.DnsLive.Index do
         </div>
 
         <%!-- Records table --%>
-        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-x-auto">
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
             <h2 class="text-base font-semibold text-gray-900 dark:text-white">DNS Records</h2>
             <span class="text-sm text-gray-500 dark:text-gray-400">TTL: {@zone.ttl}s</span>
@@ -596,7 +601,7 @@ defmodule HostctlWeb.DnsLive.Index do
             </button>
           </div>
 
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-x-auto">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h2 class="text-base font-semibold text-gray-900 dark:text-white">

@@ -15,6 +15,8 @@ defmodule HostctlWeb.PanelLive.Docker do
       |> assign(:page_title, "Docker")
       |> assign(:active_tab, :panel_docker)
       |> assign(:tab, "containers")
+      |> assign(:container_query, "")
+      |> assign(:container_filter, "all")
       |> assign(:domains, domains)
       |> assign(:proxies_empty?, proxies == [])
       |> assign(:inspecting, nil)
@@ -37,75 +39,118 @@ defmodule HostctlWeb.PanelLive.Docker do
       |> assign(:deploying_compose, false)
       |> stream(:proxies, proxies)
 
-    if connected?(socket) do
-      {docker_status, containers} = load_containers()
-      all_containers = load_all_containers()
-
-      form =
-        %DomainProxy{}
-        |> Hosting.change_domain_proxy(default_proxy_params(domains, all_containers))
-        |> to_form(as: :domain_proxy)
-
-      {:ok,
-       socket
-       |> allow_upload(:compose_file,
-         accept: ~w(.yml .yaml),
-         max_entries: 1,
-         max_file_size: 1_000_000
-       )
-       |> assign(:containers, containers)
-       |> assign(:all_containers_list, all_containers)
-       |> assign(:docker_status, docker_status)
-       |> assign(:proxy_form, form)
-       |> assign(:compose_stacks, load_compose_stacks())
-       |> assign(:images, load_images())
-       |> stream(:all_containers, all_containers)}
-    else
-      form =
-        %DomainProxy{}
-        |> Hosting.change_domain_proxy(default_proxy_params(domains, []))
-        |> to_form(as: :domain_proxy)
-
-      {:ok,
-       socket
-       |> assign(:containers, [])
-       |> assign(:all_containers_list, [])
-       |> assign(:docker_status, :ok)
-       |> assign(:proxy_form, form)
-       |> assign(:compose_stacks, [])
-       |> assign(:images, [])
-       |> stream(:all_containers, [])}
-    end
-  end
-
-  @impl true
-  def handle_event("switch_tab", %{"tab" => tab}, socket) do
-    {:noreply, assign(socket, :tab, tab)}
-  end
-
-  @impl true
-  def handle_event("refresh_containers", _params, socket) do
-    {docker_status, containers} = load_containers()
-    all_containers = load_all_containers()
-    proxies = Hosting.list_domain_proxies_for_admin()
-
-    proxy_form =
+    form =
       %DomainProxy{}
-      |> Hosting.change_domain_proxy(default_proxy_params(socket.assigns.domains, all_containers))
+      |> Hosting.change_domain_proxy(default_proxy_params(domains, []))
+      |> to_form(as: :domain_proxy)
+
+    socket =
+      socket
+      |> allow_upload(:compose_file,
+        accept: ~w(.yml .yaml),
+        max_entries: 1,
+        max_file_size: 1_000_000
+      )
+      |> assign(
+        containers: [],
+        all_containers_list: [],
+        docker_status: :loading,
+        proxy_form: form,
+        compose_stacks: [],
+        images: [],
+        inventory_timer: nil
+      )
+      |> stream(:all_containers, [])
+
+    {:ok, if(connected?(socket), do: load_inventory_async(socket), else: socket)}
+  end
+
+  defp load_inventory_async(socket) do
+    if socket.assigns.inventory_timer, do: Process.cancel_timer(socket.assigns.inventory_timer)
+    token = make_ref()
+    timer = Process.send_after(self(), {:inventory_timeout, token}, 15_000)
+
+    socket
+    |> cancel_async(:docker_inventory)
+    |> assign(docker_status: :loading, inventory_token: token, inventory_timer: timer)
+    |> start_async(:docker_inventory, fn ->
+      {status, containers} = load_containers()
+
+      if status == :ok,
+        do: {status, containers, load_all_containers(), load_compose_stacks(), load_images()},
+        else: {status, [], [], [], []}
+    end)
+  end
+
+  @impl true
+  def handle_async(:docker_inventory, {:ok, {status, containers, all, stacks, images}}, socket) do
+    Process.cancel_timer(socket.assigns.inventory_timer)
+
+    form =
+      %DomainProxy{}
+      |> Hosting.change_domain_proxy(default_proxy_params(socket.assigns.domains, all))
       |> to_form(as: :domain_proxy)
 
     {:noreply,
      socket
-     |> assign(:docker_status, docker_status)
-     |> assign(:containers, containers)
-     |> assign(:all_containers_list, all_containers)
-     |> assign(:proxy_form, proxy_form)
+     |> assign(
+       docker_status: status,
+       containers: containers,
+       all_containers_list: all,
+       compose_stacks: stacks,
+       images: images,
+       proxy_form: form,
+       inventory_timer: nil
+     )
+     |> filter_container_stream()}
+  end
+
+  def handle_async(:docker_inventory, {:exit, _reason}, socket) do
+    if socket.assigns.inventory_timer, do: Process.cancel_timer(socket.assigns.inventory_timer)
+    {:noreply, assign(socket, docker_status: :unavailable, inventory_timer: nil)}
+  end
+
+  @impl true
+  def handle_info({:inventory_timeout, token}, socket) do
+    if socket.assigns.inventory_timer && token == socket.assigns.inventory_token do
+      {:noreply,
+       socket
+       |> cancel_async(:docker_inventory)
+       |> assign(docker_status: :unavailable, inventory_timer: nil)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("switch_tab", %{"tab" => tab}, socket)
+      when tab in ["containers", "proxies", "images", "compose"] do
+    proxies = Hosting.list_domain_proxies_for_admin()
+
+    {:noreply,
+     socket
+     |> assign(:tab, tab)
      |> assign(:proxies_empty?, proxies == [])
-     |> assign(:inspecting, nil)
-     |> assign(:compose_stacks, load_compose_stacks())
-     |> assign(:images, load_images())
-     |> stream(:all_containers, all_containers, reset: true)
-     |> stream(:proxies, proxies, reset: true)}
+     |> stream(:proxies, proxies, reset: true)
+     |> filter_container_stream()}
+  end
+
+  def handle_event("filter_containers", params, socket) do
+    {:noreply,
+     socket
+     |> assign(container_query: params["query"] || "", container_filter: params["state"] || "all")
+     |> filter_container_stream()}
+  end
+
+  @impl true
+  def handle_event("refresh_containers", _params, socket) do
+    proxies = Hosting.list_domain_proxies_for_admin()
+
+    {:noreply,
+     socket
+     |> assign(:proxies_empty?, proxies == [])
+     |> stream(:proxies, proxies, reset: true)
+     |> load_inventory_async()}
   end
 
   @impl true
@@ -120,7 +165,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
          |> assign(:all_containers_list, all_containers)
-         |> stream(:all_containers, all_containers, reset: true)
+         |> filter_container_stream()
          |> put_flash(:info, "Container #{container_id} started.")}
 
       {:error, msg} ->
@@ -140,7 +185,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
          |> assign(:all_containers_list, all_containers)
-         |> stream(:all_containers, all_containers, reset: true)
+         |> filter_container_stream()
          |> put_flash(:info, "Container #{container_id} stopped.")}
 
       {:error, msg} ->
@@ -160,7 +205,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
          |> assign(:all_containers_list, all_containers)
-         |> stream(:all_containers, all_containers, reset: true)
+         |> filter_container_stream()
          |> put_flash(:info, "Container #{container_id} restarted.")}
 
       {:error, msg} ->
@@ -257,7 +302,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:containers, containers)
          |> assign(:editing, nil)
          |> assign(:all_containers_list, all_containers)
-         |> stream(:all_containers, all_containers, reset: true)
+         |> filter_container_stream()
          |> put_flash(:info, "Container recreated with updated settings.")}
 
       {:error, msg} ->
@@ -336,7 +381,7 @@ defmodule HostctlWeb.PanelLive.Docker do
            |> assign(:show_run_form, false)
            |> assign(:run_env_count, 1)
            |> assign(:all_containers_list, all_containers)
-           |> stream(:all_containers, all_containers, reset: true)
+           |> filter_container_stream()
            |> put_flash(:info, "Container started from #{image}.")}
 
         {:error, msg} ->
@@ -381,7 +426,7 @@ defmodule HostctlWeb.PanelLive.Docker do
            |> assign(:pull_image_name, "")
            |> assign(:images, load_images())
            |> assign(:all_containers_list, all_containers)
-           |> stream(:all_containers, all_containers, reset: true)
+           |> filter_container_stream()
            |> put_flash(:info, "Image #{image_name} pulled successfully.")}
 
         {:error, msg} ->
@@ -406,7 +451,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:pulling, false)
          |> assign(:images, load_images())
          |> assign(:all_containers_list, all_containers)
-         |> stream(:all_containers, all_containers, reset: true)
+         |> filter_container_stream()
          |> put_flash(:info, "Image #{image_name} pulled successfully.")}
 
       {:error, msg} ->
@@ -462,8 +507,10 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:deploy_image, nil)
          |> assign(:deploy_env_count, 1)
          |> assign(:tab, "containers")
+         |> assign(:container_query, "")
+         |> assign(:container_filter, "all")
          |> assign(:all_containers_list, all_containers)
-         |> stream(:all_containers, all_containers, reset: true)
+         |> filter_container_stream()
          |> put_flash(:info, "Container started from #{image}.")}
 
       {:error, msg} ->
@@ -497,7 +544,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:docker_status, docker_status)
          |> assign(:containers, containers)
          |> assign(:all_containers_list, all_containers)
-         |> stream(:all_containers, all_containers, reset: true)
+         |> filter_container_stream()
          |> put_flash(:info, "Container #{container_id} removed.")}
 
       {:error, msg} ->
@@ -518,7 +565,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:containers, containers)
          |> assign(:all_containers_list, all_containers)
          |> assign(:compose_stacks, load_compose_stacks())
-         |> stream(:all_containers, all_containers, reset: true)
+         |> filter_container_stream()
          |> put_flash(:info, "Compose stack \"#{name}\" started.")}
 
       {:error, msg} ->
@@ -539,7 +586,7 @@ defmodule HostctlWeb.PanelLive.Docker do
          |> assign(:containers, containers)
          |> assign(:all_containers_list, all_containers)
          |> assign(:compose_stacks, load_compose_stacks())
-         |> stream(:all_containers, all_containers, reset: true)
+         |> filter_container_stream()
          |> put_flash(:info, "Compose stack \"#{name}\" stopped.")}
 
       {:error, msg} ->
@@ -631,7 +678,7 @@ defmodule HostctlWeb.PanelLive.Docker do
              |> assign(:compose_project_name, "")
              |> assign(:compose_yaml, "")
              |> assign(:deploying_compose, false)
-             |> stream(:all_containers, all_containers, reset: true)
+             |> filter_container_stream()
              |> put_flash(:info, "Compose stack \"#{name}\" deployed successfully.")}
 
           {:error, msg} ->
@@ -722,10 +769,28 @@ defmodule HostctlWeb.PanelLive.Docker do
      |> put_flash(:info, "Proxy mapping removed and Nginx reloaded.")}
   end
 
+  defp filter_container_stream(socket) do
+    query = String.downcase(socket.assigns.container_query)
+
+    rows =
+      Enum.filter(socket.assigns.all_containers_list, fn container ->
+        String.contains?(String.downcase(container.name <> " " <> container.image), query) &&
+          (socket.assigns.container_filter == "all" ||
+             running?(container) == (socket.assigns.container_filter == "running"))
+      end)
+
+    stream(socket, :all_containers, rows, reset: true)
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="max-w-6xl mx-auto space-y-6">
         <%!-- Header --%>
         <div class="flex items-center justify-between gap-4 flex-wrap">
@@ -737,6 +802,7 @@ defmodule HostctlWeb.PanelLive.Docker do
           </div>
           <button
             id="docker-refresh-btn"
+            disabled={@docker_status == :loading}
             phx-click="refresh_containers"
             class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
           >
@@ -744,104 +810,88 @@ defmodule HostctlWeb.PanelLive.Docker do
           </button>
         </div>
 
-        <%!-- Status badge --%>
-        <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-5">
-          <div class="flex items-start gap-3">
-            <div class={[
-              "mt-0.5 flex items-center justify-center w-8 h-8 rounded-lg",
-              if(@docker_status == :ok,
-                do: "bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300",
-                else: "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300"
-              )
-            ]}>
-              <.icon name="hero-cube" class="w-4 h-4" />
+        <div id="docker-overview" class="ui-metrics">
+          <div class="ui-metric">
+            <div>
+              <p>Docker engine</p>
+              <strong>
+                {case @docker_status do
+                  :ok -> "Connected"
+                  :loading -> "Checking…"
+                  _ -> "Unavailable"
+                end}
+              </strong>
             </div>
-            <div class="space-y-1">
-              <%= if @docker_status == :ok do %>
-                <p class="text-sm font-medium text-gray-900 dark:text-white">
-                  Docker daemon is reachable.
-                </p>
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  Found {length(@containers)} running container(s).
-                </p>
-              <% else %>
-                <p class="text-sm font-medium text-amber-700 dark:text-amber-300">
-                  Docker is currently unavailable.
-                </p>
-                <p class="text-xs text-amber-600 dark:text-amber-400">
-                  Install Docker from the Features page, or start the daemon manually.
-                </p>
-              <% end %>
+            <.icon name="hero-cube" class="size-5 text-gray-400" />
+          </div>
+          <div class="ui-metric">
+            <div>
+              <p>Running containers</p>
+              <strong>{if @docker_status == :ok, do: length(@containers), else: "—"}</strong>
             </div>
+            <.icon name="hero-play" class="size-5 text-gray-400" />
+          </div>
+          <div class="ui-metric">
+            <div>
+              <p>Known containers</p>
+              <strong>{if @docker_status == :ok, do: length(@all_containers_list), else: "—"}</strong>
+            </div>
+            <.icon name="hero-server-stack" class="size-5 text-gray-400" />
           </div>
         </div>
-
-        <%!-- Tab bar --%>
-        <div class="flex gap-1 border-b border-gray-200 dark:border-gray-800">
-          <button
-            phx-click="switch_tab"
-            phx-value-tab="containers"
-            class={[
-              "px-4 py-2 text-sm font-medium rounded-t-lg transition-colors -mb-px",
-              if(@tab == "containers",
-                do:
-                  "border-b-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400",
-                else:
-                  "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 border-b-2 border-transparent"
-              )
-            ]}
-          >
-            <.icon name="hero-server-stack" class="w-4 h-4 inline mr-1 -mt-0.5" /> Containers
-          </button>
-          <button
-            phx-click="switch_tab"
-            phx-value-tab="proxies"
-            class={[
-              "px-4 py-2 text-sm font-medium rounded-t-lg transition-colors -mb-px",
-              if(@tab == "proxies",
-                do:
-                  "border-b-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400",
-                else:
-                  "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 border-b-2 border-transparent"
-              )
-            ]}
-          >
-            <.icon name="hero-link" class="w-4 h-4 inline mr-1 -mt-0.5" /> Proxy Mappings
-          </button>
-          <button
-            phx-click="switch_tab"
-            phx-value-tab="images"
-            class={[
-              "px-4 py-2 text-sm font-medium rounded-t-lg transition-colors -mb-px",
-              if(@tab == "images",
-                do:
-                  "border-b-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400",
-                else:
-                  "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 border-b-2 border-transparent"
-              )
-            ]}
-          >
-            <.icon name="hero-arrow-down-tray" class="w-4 h-4 inline mr-1 -mt-0.5" /> Images
-          </button>
-          <button
-            phx-click="switch_tab"
-            phx-value-tab="compose"
-            class={[
-              "px-4 py-2 text-sm font-medium rounded-t-lg transition-colors -mb-px",
-              if(@tab == "compose",
-                do:
-                  "border-b-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400",
-                else:
-                  "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 border-b-2 border-transparent"
-              )
-            ]}
-          >
-            <.icon name="hero-square-3-stack-3d" class="w-4 h-4 inline mr-1 -mt-0.5" /> Compose
-          </button>
+        <div
+          :if={@docker_status not in [:ok, :loading]}
+          id="docker-unavailable"
+          class="ui-panel ui-panel-body text-sm"
+        >
+          <p>Docker is unavailable. Container counts cannot be checked.</p>
+          <.link navigate={~p"/panel/features"} class="ui-text-link">
+            Review installed features →
+          </.link>
         </div>
+        <nav class="ui-tabs" aria-label="Docker sections">
+          <button
+            :for={
+              {key, label, icon} <- [
+                {"containers", "Containers", "hero-server-stack"},
+                {"proxies", "Proxy mappings", "hero-link"},
+                {"images", "Images", "hero-arrow-down-tray"},
+                {"compose", "Compose stacks", "hero-square-3-stack-3d"}
+              ]
+            }
+            id={"docker-tab-#{key}"}
+            phx-click="switch_tab"
+            phx-value-tab={key}
+            aria-pressed={to_string(@tab == key)}
+          >
+            <.icon name={icon} class="size-4 mr-1" />{label}
+          </button>
+        </nav>
 
         <%!-- ============= Containers tab ============= --%>
         <div :if={@tab == "containers"} class="space-y-4">
+          <.form
+            for={to_form(%{})}
+            id="docker-container-filters"
+            phx-change="filter_containers"
+            class="ui-filterbar"
+          >
+            <.input
+              type="search"
+              name="query"
+              value={@container_query}
+              label="Search containers"
+              placeholder="Name or image…"
+              phx-debounce="200"
+            />
+            <.input
+              type="select"
+              name="state"
+              value={@container_filter}
+              label="State"
+              options={[{"All containers", "all"}, {"Running", "running"}, {"Not running", "stopped"}]}
+            />
+          </.form>
           <%!-- Run new container --%>
           <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
             <button
@@ -971,14 +1021,19 @@ defmodule HostctlWeb.PanelLive.Docker do
             </div>
 
             <div id="docker-containers" phx-update="stream">
-              <div class="hidden only:block py-16 text-center text-gray-400 dark:text-gray-500">
-                No containers found. Pull an image and start a container to get started.
+              <div
+                id="docker-containers-empty"
+                class="hidden only:block py-16 text-center text-gray-400 dark:text-gray-500"
+              >
+                {if @docker_status == :ok,
+                  do: "No containers match this view. Change the filters or deploy a container.",
+                  else: "Container data is unavailable until Docker connects."}
               </div>
 
               <div
                 :for={{dom_id, container} <- @streams.all_containers}
                 id={dom_id}
-                class="flex items-center gap-4 px-6 py-4 border-b border-gray-100 dark:border-gray-800 last:border-b-0"
+                class="ui-container-row flex items-center gap-4 px-6 py-4 border-b border-gray-100 dark:border-gray-800 last:border-b-0"
               >
                 <div class={[
                   "flex items-center justify-center w-9 h-9 rounded-lg shrink-0",

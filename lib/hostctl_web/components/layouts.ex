@@ -1,251 +1,216 @@
 defmodule HostctlWeb.Layouts do
-  @moduledoc """
-  This module holds layouts and related functionality
-  used by your application.
-  """
   use HostctlWeb, :html
-
-  alias Hostctl.Settings
-
+  alias Hostctl.{Settings}
+  alias HostctlWeb.Navigation
   embed_templates "layouts/*"
 
-  attr :flash, :map, required: true, doc: "the map of flash messages"
-
-  attr :current_scope, :map,
-    default: nil,
-    doc: "the current [scope](https://hexdocs.pm/phoenix/scopes.html)"
-
-  attr :active_tab, :atom, default: nil, doc: "the currently active navigation tab"
-
+  attr :flash, :map, required: true
+  attr :current_scope, :map, default: nil
+  attr :active_tab, :atom, default: nil
+  attr :update_status, :map, default: nil
   slot :inner_block, required: true
 
   def app(assigns) do
-    ~H"""
-    <div class="flex h-screen overflow-hidden bg-gray-50 dark:bg-gray-950">
-      <%!-- Sidebar --%>
-      <aside class="flex flex-col w-64 shrink-0 bg-gray-900 text-gray-100">
-        <%!-- Logo --%>
-        <div class="flex items-center gap-3 px-6 py-5 border-b border-gray-800">
-          <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-600">
-            <.icon name="hero-server-stack" class="w-5 h-5 text-white" />
-          </div>
-          <span class="text-lg font-bold tracking-tight text-white">hostctl</span>
-        </div>
+    assigns =
+      assigns
+      |> assign(:admin?, assigns.current_scope && assigns.current_scope.user.role == "admin")
+      |> assign(:nav_title, Navigation.title(assigns.active_tab))
+      |> assign(
+        :hosting_links,
+        Enum.reject(Navigation.hosting(), fn {key, _, _, _} ->
+          key == :ftp and not Settings.feature_enabled?("ftp")
+        end)
+      )
+      |> assign(:groups, Navigation.groups())
 
-        <%!-- Nav --%>
-        <nav class="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
+    ~H"""
+    <div id="hostctl-shell" class={["hostctl-shell", is_nil(@current_scope) && "guest-shell"]}>
+      <a
+        href="#main-content"
+        class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50"
+      >
+        Skip to content
+      </a>
+      <aside :if={@current_scope} id="app-sidebar" class="app-sidebar" aria-label="Main navigation">
+        <.link navigate={~p"/"} class="app-brand">
+          <span class="flex size-8 items-center justify-center rounded-lg bg-indigo-600 text-white">
+            <.icon name="hero-server-stack" class="size-5" />
+          </span>
+          hostctl
+        </.link>
+        <nav class="flex-1 overflow-y-auto px-3 pb-5">
+          <p class="nav-section">Hosting</p>
           <.nav_item
-            icon="hero-squares-2x2"
-            label="Dashboard"
-            href={~p"/"}
-            active={@active_tab == :dashboard}
+            :for={{key, label, path, icon} <- @hosting_links}
+            id={"nav-#{key}"}
+            label={label}
+            href={path}
+            icon={icon}
+            active={@active_tab == key}
           />
-          <.nav_item
-            icon="hero-globe-alt"
-            label="Domains"
-            href={~p"/domains"}
-            active={@active_tab == :domains}
-          />
-          <div class="pt-4 pb-1 px-3">
-            <p class="text-xs font-semibold uppercase tracking-wider text-gray-500">Services</p>
-          </div>
-          <.nav_item
-            icon="hero-envelope"
-            label="Email"
-            href={~p"/email"}
-            active={@active_tab == :email}
-          />
-          <.nav_item
-            icon="hero-circle-stack"
-            label="Databases"
-            href={~p"/databases"}
-            active={@active_tab == :databases}
-          />
-          <%= if Settings.feature_enabled?("ftp") do %>
+          <%= if @admin? do %>
+            <p class="nav-section">Administration</p>
             <.nav_item
-              icon="hero-folder"
-              label="FTP Accounts"
-              href={~p"/ftp"}
-              active={@active_tab == :ftp}
+              id="nav-admin"
+              label="Overview"
+              href={~p"/panel"}
+              icon="hero-squares-2x2"
+              active={@active_tab == :admin_overview}
             />
-          <% end %>
-          <.nav_item
-            icon="hero-clock"
-            label="Cron Jobs"
-            href={~p"/cron"}
-            active={@active_tab == :cron}
-          />
-          <div class="pt-4 pb-1 px-3">
-            <p class="text-xs font-semibold uppercase tracking-wider text-gray-500">System</p>
-          </div>
-          <.nav_item
-            icon="hero-arrow-up-circle"
-            label="Updates"
-            href={~p"/updates"}
-            active={@active_tab == :updates}
-          />
-          <%= if @current_scope && @current_scope.user && @current_scope.user.role == "admin" do %>
+            <details
+              :for={{key, label, path, items} <- @groups}
+              id={"nav-group-#{key}"}
+              open={Navigation.group_active?(@active_tab, key, items)}
+              class="nav-group"
+            >
+              <summary class="nav-group-heading">
+                <span>{label}</span>
+                <.update_badge
+                  :if={key == :admin_system}
+                  status={@update_status}
+                  id="system-update-badge"
+                />
+              </summary>
+              <.nav_item
+                id={"nav-#{key}"}
+                label={"#{label} overview"}
+                href={path}
+                icon="hero-squares-2x2"
+                active={@active_tab == key}
+              />
+              <.nav_item
+                :for={{item, title, href, icon} <- items}
+                id={"nav-#{item}"}
+                label={title}
+                href={href}
+                icon={icon}
+                active={@active_tab == item}
+                update_status={if item == :updates, do: @update_status}
+              />
+            </details>
+          <% else %>
+            <p class="nav-section">System</p>
             <.nav_item
-              icon="hero-circle-stack"
-              label="All Databases"
-              href={~p"/panel/databases"}
-              active={@active_tab == :panel_databases}
+              id="nav-updates"
+              label="Updates"
+              href={~p"/updates"}
+              icon="hero-arrow-up-circle"
+              active={@active_tab == :updates}
             />
             <.nav_item
-              icon="hero-envelope"
-              label="All Emails"
-              href={~p"/panel/emails"}
-              active={@active_tab == :panel_emails}
-            />
-            <.nav_item
-              icon="hero-shield-check"
-              label="Spam Protection"
-              href={~p"/panel/spam-protection"}
-              active={@active_tab == :panel_spam_protection}
-            />
-            <.nav_item
-              icon="hero-paper-airplane"
-              label="Email Delivery"
-              href={~p"/panel/email-delivery"}
-              active={@active_tab == :panel_email_delivery}
-            />
-            <.nav_item
-              icon="hero-server-stack"
-              label="All FTP"
-              href={~p"/panel/ftp"}
-              active={@active_tab == :panel_ftp}
-            />
-            <.nav_item
-              icon="hero-puzzle-piece"
-              label="Features"
-              href={~p"/panel/features"}
-              active={@active_tab == :panel_features}
-            />
-            <.nav_item
-              icon="hero-cube"
-              label="Docker"
-              href={~p"/panel/docker"}
-              active={@active_tab == :panel_docker}
-            />
-            <.nav_item
-              icon="hero-envelope-open"
-              label="Smarthost"
-              href={~p"/panel/smarthost"}
-              active={@active_tab == :panel_smarthost}
-            />
-            <.nav_item
-              icon="hero-arrow-down-tray"
-              label="Backup"
-              href={~p"/panel/backup"}
-              active={@active_tab == :panel_backup}
-            />
-            <.nav_item
-              icon="hero-arrow-down-on-square-stack"
-              label="Plesk Import"
-              href={~p"/panel/plesk-import"}
-              active={@active_tab == :panel_plesk_import}
-            />
-            <.nav_item
-              icon="hero-archive-box"
-              label="Completed Backups"
-              href={~p"/panel/backups"}
-              active={@active_tab == :panel_completed_backups}
-            />
-            <.nav_item
-              icon="hero-adjustments-horizontal"
-              label="Panel Settings"
-              href={~p"/panel/settings"}
-              active={@active_tab == :panel_settings}
-            />
-            <.nav_item
-              icon="hero-users"
-              label="Panel Users"
+              :if={@current_scope.user.role == "reseller"}
+              id="nav-panel-users"
+              label="Panel users"
               href={~p"/panel/users"}
+              icon="hero-users"
               active={@active_tab == :panel_users}
             />
           <% end %>
-          <div class="pt-4 pb-1 px-3">
-            <p class="text-xs font-semibold uppercase tracking-wider text-gray-500">Account</p>
-          </div>
+          <p class="nav-section">Account</p>
           <.nav_item
-            icon="hero-cog-6-tooth"
+            id="nav-settings"
             label="Settings"
             href={~p"/users/settings"}
+            icon="hero-cog-6-tooth"
             active={@active_tab == :settings}
           />
         </nav>
-
-        <%!-- User --%>
-        <%= if @current_scope do %>
-          <div class="px-4 py-4 border-t border-gray-800">
-            <div class="flex items-center gap-3">
-              <div class="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-700 text-white text-sm font-semibold shrink-0">
-                {String.upcase(String.slice(@current_scope.user.email, 0, 1))}
-              </div>
-              <div class="flex-1 min-w-0">
-                <p class="text-sm font-medium text-white truncate">
-                  {if @current_scope.user.name,
-                    do: @current_scope.user.name,
-                    else: @current_scope.user.email}
-                </p>
-                <p class="text-xs text-gray-400 truncate capitalize">{@current_scope.user.role}</p>
-              </div>
-              <.link
-                href={~p"/users/log-out"}
-                method="delete"
-                class="text-gray-400 hover:text-white transition-colors"
-                title="Sign out"
-              >
-                <.icon name="hero-arrow-right-on-rectangle" class="w-4 h-4" />
-              </.link>
-            </div>
+        <div class="app-user">
+          <div class="min-w-0 flex-1">
+            <p class="truncate font-medium">
+              {@current_scope.user.name || @current_scope.user.email}
+            </p>
+            <p class="text-xs capitalize text-gray-500 dark:text-gray-400">
+              {@current_scope.user.role}
+            </p>
           </div>
-        <% end %>
+          <.link href={~p"/users/log-out"} method="delete" aria-label="Sign out">
+            <.icon name="hero-arrow-right-on-rectangle" class="size-5" />
+          </.link>
+        </div>
       </aside>
-
-      <%!-- Main content --%>
-      <div class="flex flex-col flex-1 min-w-0 overflow-hidden">
-        <%!-- Top bar --%>
-        <header class="flex items-center justify-between px-6 py-3 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 shrink-0">
-          <div class="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
-            <%!-- Breadcrumb slot could go here --%>
-          </div>
-          <div class="flex items-center gap-3">
-            <.theme_toggle />
-          </div>
+      <div class="app-workspace">
+        <header class="app-topbar">
+          <button
+            :if={@current_scope}
+            id="navigation-toggle"
+            type="button"
+            class="app-button lg:hidden"
+            aria-controls="app-sidebar"
+            aria-expanded="false"
+            phx-click={
+              JS.toggle_class("navigation-open", to: "#hostctl-shell")
+              |> JS.toggle_attribute({"aria-expanded", "true", "false"}, to: "#navigation-toggle")
+            }
+          >
+            <.icon name="hero-bars-3" class="size-5" /><span class="sr-only">Toggle navigation</span>
+          </button>
+          <nav aria-label="Breadcrumb" class="text-sm text-gray-500 dark:text-gray-400">
+            <span :if={
+              @admin? &&
+                @active_tab not in [
+                  :admin_overview,
+                  :dashboard,
+                  :domains,
+                  :email,
+                  :databases,
+                  :ftp,
+                  :cron,
+                  :settings
+                ]
+            }>
+              Administration <span aria-hidden="true">/</span>
+            </span>
+            <span aria-current="page">{@nav_title}</span>
+          </nav>
+          <div class="ml-auto flex items-center gap-3"><.theme_toggle /></div>
         </header>
-
-        <%!-- Page content --%>
-        <main class="flex-1 overflow-y-auto px-6 py-6">
-          {render_slot(@inner_block)}
-        </main>
+        <main id="main-content" class="app-content">{render_slot(@inner_block)}</main>
       </div>
     </div>
-
     <.flash_group flash={@flash} />
     """
   end
 
+  attr :id, :string, required: true
   attr :icon, :string, required: true
   attr :label, :string, required: true
   attr :href, :string, required: true
   attr :active, :boolean, default: false
+  attr :update_status, :map, default: nil
 
   defp nav_item(assigns) do
     ~H"""
     <.link
+      id={@id}
       navigate={@href}
-      class={[
-        "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
-        if(@active,
-          do: "bg-indigo-600 text-white",
-          else: "text-gray-400 hover:bg-gray-800 hover:text-white"
-        )
-      ]}
+      class={["app-nav-link", @active && "is-active"]}
+      aria-current={if @active, do: "page"}
     >
-      <.icon name={@icon} class="w-4 h-4 shrink-0" />
-      {@label}
+      <.icon name={@icon} class="size-4 shrink-0" /><span>{@label}</span>
+      <.update_badge status={@update_status} id={"#{@id}-badge"} />
     </.link>
+    """
+  end
+
+  attr :status, :map, default: nil
+  attr :id, :string, required: true
+
+  def update_badge(assigns) do
+    ~H"""
+    <span
+      :if={@status && (@status.available? || @status.status == :error)}
+      id={@id}
+      class={["update-badge", @status.status == :error && "update-badge-error"]}
+      aria-label={if @status.status == :error, do: "Update check failed", else: "Update available"}
+      title={
+        if @status.status == :error,
+          do: "Update check failed; open Updates for details",
+          else: "Hostctl update available"
+      }
+    >
+      {if @status.status == :error, do: "!", else: "1"}
+    </span>
     """
   end
 
@@ -292,6 +257,7 @@ defmodule HostctlWeb.Layouts do
       <button
         class="flex p-1.5 cursor-pointer w-1/3"
         phx-click={JS.dispatch("phx:set-theme")}
+        aria-label="Use system theme"
         data-phx-theme="system"
       >
         <.icon name="hero-computer-desktop-micro" class="size-3.5 opacity-60 hover:opacity-100" />
@@ -299,6 +265,7 @@ defmodule HostctlWeb.Layouts do
       <button
         class="flex p-1.5 cursor-pointer w-1/3"
         phx-click={JS.dispatch("phx:set-theme")}
+        aria-label="Use light theme"
         data-phx-theme="light"
       >
         <.icon name="hero-sun-micro" class="size-3.5 opacity-60 hover:opacity-100" />
@@ -306,6 +273,7 @@ defmodule HostctlWeb.Layouts do
       <button
         class="flex p-1.5 cursor-pointer w-1/3"
         phx-click={JS.dispatch("phx:set-theme")}
+        aria-label="Use dark theme"
         data-phx-theme="dark"
       >
         <.icon name="hero-moon-micro" class="size-3.5 opacity-60 hover:opacity-100" />

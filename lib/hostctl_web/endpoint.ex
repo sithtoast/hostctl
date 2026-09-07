@@ -25,7 +25,10 @@ defmodule HostctlWeb.Endpoint do
     from: :hostctl,
     gzip: not code_reloading?,
     only: HostctlWeb.static_paths(),
-    raise_on_missing_only: code_reloading?
+    raise_on_missing_only: code_reloading?,
+    cache_control_for_etags: if(code_reloading?, do: "no-store", else: "public"),
+    cache_control_for_vsn_requests:
+      if(code_reloading?, do: "no-store", else: "public, max-age=31536000, immutable")
 
   # Code reloading can be explicitly enabled under the
   # :code_reloader configuration of your endpoint.

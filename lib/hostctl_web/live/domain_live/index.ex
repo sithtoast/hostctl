@@ -24,12 +24,20 @@ defmodule HostctlWeb.DomainLive.Index do
      |> assign(:is_admin?, is_admin)
      |> assign(:delete_modal, nil)
      |> assign(:deleting_domain_ids, MapSet.new())
-     |> assign(:domains_empty?, domains == [])
-     |> stream(:domains, domains)}
+     |> assign(:domain_query, "")
+     |> assign(:domain_status, "all")
+     |> assign(:ssl_filter, "all")
+     |> assign_domain_list(domains)}
   end
 
   def handle_params(params, _url, socket) do
-    {:noreply, apply_action(socket, socket.assigns.live_action, params)}
+    domains =
+      if socket.assigns.is_admin?,
+        do: Hosting.list_all_domains_with_users(),
+        else: Hosting.list_domains(socket.assigns.current_scope)
+
+    {:noreply,
+     socket |> assign_domain_list(domains) |> apply_action(socket.assigns.live_action, params)}
   end
 
   defp apply_action(socket, :index, _params) do
@@ -44,6 +52,22 @@ defmodule HostctlWeb.DomainLive.Index do
     socket
     |> assign(:domain, domain)
     |> assign(:form, to_form(Hosting.change_domain(domain)))
+  end
+
+  def handle_event("filter_domains", params, socket) do
+    domains =
+      if socket.assigns.is_admin?,
+        do: Hosting.list_all_domains_with_users(),
+        else: Hosting.list_domains(socket.assigns.current_scope)
+
+    {:noreply,
+     socket
+     |> assign(
+       domain_query: params["query"] || "",
+       domain_status: params["status"] || "all",
+       ssl_filter: params["ssl"] || "all"
+     )
+     |> assign_domain_list(domains)}
   end
 
   def handle_event("open_delete", %{"id" => id}, socket) do
@@ -194,9 +218,8 @@ defmodule HostctlWeb.DomainLive.Index do
 
     {:noreply,
      socket
-     |> assign(:domains_empty?, domains == [])
      |> assign(:deleting_domain_ids, MapSet.delete(socket.assigns.deleting_domain_ids, domain_id))
-     |> stream(:domains, domains, reset: true)
+     |> assign_domain_list(domains)
      |> put_flash(:info, message)}
   end
 
@@ -207,9 +230,34 @@ defmodule HostctlWeb.DomainLive.Index do
      |> put_flash(:error, "Domain deletion failed: #{delete_error_message(reason)}")}
   end
 
+  defp assign_domain_list(socket, domains) do
+    query = String.downcase(socket.assigns.domain_query)
+
+    visible =
+      Enum.filter(domains, fn domain ->
+        String.contains?(String.downcase(domain.name), query) &&
+          (socket.assigns.domain_status == "all" || domain.status == socket.assigns.domain_status) &&
+          (socket.assigns.ssl_filter == "all" ||
+             domain.ssl_enabled == (socket.assigns.ssl_filter == "enabled"))
+      end)
+
+    socket
+    |> assign(:domain_total, length(domains))
+    |> assign(:domain_active, Enum.count(domains, &(&1.status == "active")))
+    |> assign(:domain_ssl, Enum.count(domains, & &1.ssl_enabled))
+    |> assign(:domain_visible_count, length(visible))
+    |> assign(:domains_empty?, visible == [])
+    |> stream(:domains, visible, reset: true)
+  end
+
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="space-y-6">
         <%!-- Header --%>
         <div class="flex items-center justify-between">
@@ -287,8 +335,62 @@ defmodule HostctlWeb.DomainLive.Index do
           </div>
         <% end %>
 
+        <div id="domain-list-summary" class="ui-metrics">
+          <div class="ui-metric">
+            <div>
+              <p>Total domains</p>
+              <strong>{@domain_total}</strong>
+            </div>
+            <.icon name="hero-globe-alt" class="size-5 text-gray-400" />
+          </div>
+          <div class="ui-metric">
+            <div>
+              <p>Active</p>
+              <strong>{@domain_active}</strong>
+            </div>
+            <.icon name="hero-check-circle" class="size-5 text-gray-400" />
+          </div>
+          <div class="ui-metric">
+            <div>
+              <p>HTTPS enabled</p>
+              <strong>{@domain_ssl}</strong>
+            </div>
+            <.icon name="hero-lock-closed" class="size-5 text-gray-400" />
+          </div>
+        </div>
+        <.form for={to_form(%{})} id="domain-filters" phx-change="filter_domains" class="ui-filterbar">
+          <.input
+            type="search"
+            name="query"
+            value={@domain_query}
+            label="Search domains"
+            placeholder="Find a domain…"
+            phx-debounce="200"
+          />
+          <.input
+            type="select"
+            name="status"
+            value={@domain_status}
+            label="Status"
+            options={[
+              {"All statuses", "all"},
+              {"Active", "active"},
+              {"Suspended", "suspended"},
+              {"Pending", "pending"}
+            ]}
+          />
+          <.input
+            type="select"
+            name="ssl"
+            value={@ssl_filter}
+            label="HTTPS"
+            options={[{"All domains", "all"}, {"Enabled", "enabled"}, {"Not enabled", "disabled"}]}
+          />
+          <p aria-live="polite">{@domain_visible_count} of {@domain_total} domains</p>
+        </.form>
+
         <%!-- Domain list --%>
-        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-x-auto">
           <div class={[
             "flex flex-col items-center justify-center py-16 gap-3",
             if(@domains_empty?, do: "block", else: "hidden")
@@ -296,9 +398,13 @@ defmodule HostctlWeb.DomainLive.Index do
             <div class="flex items-center justify-center w-12 h-12 rounded-xl bg-gray-100 dark:bg-gray-800">
               <.icon name="hero-globe-alt" class="w-6 h-6 text-gray-400" />
             </div>
-            <p class="text-sm font-medium text-gray-900 dark:text-white">No domains yet</p>
+            <p class="text-sm font-medium text-gray-900 dark:text-white">
+              {if @domain_total == 0, do: "No domains yet", else: "No matching domains"}
+            </p>
             <p class="text-sm text-gray-500 dark:text-gray-400">
-              Get started by adding your first domain.
+              {if @domain_total == 0,
+                do: "Get started by adding your first domain.",
+                else: "Try a different search or change the filters."}
             </p>
             <.link
               patch={~p"/domains/new"}
@@ -359,7 +465,12 @@ defmodule HostctlWeb.DomainLive.Index do
                       />
                     </div>
                     <div>
-                      <p class="text-sm font-medium text-gray-900 dark:text-white">{domain.name}</p>
+                      <.link
+                        navigate={~p"/domains/#{domain.id}"}
+                        class="text-sm font-semibold text-gray-900 hover:text-indigo-600 dark:text-white"
+                      >
+                        {domain.name}
+                      </.link>
                       <p class="text-xs text-gray-500 dark:text-gray-400">
                         {domain.document_root || "/"}
                       </p>

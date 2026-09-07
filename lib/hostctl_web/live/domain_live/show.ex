@@ -844,7 +844,12 @@ defmodule HostctlWeb.DomainLive.Show do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="space-y-6">
         <%!-- Header --%>
         <div class="flex items-center gap-4">
@@ -855,8 +860,10 @@ defmodule HostctlWeb.DomainLive.Show do
             <.icon name="hero-arrow-left" class="w-5 h-5" />
           </.link>
           <div class="flex-1">
-            <div class="flex items-center gap-3">
-              <h1 class="text-2xl font-bold text-gray-900 dark:text-white">{@domain.name}</h1>
+            <div class="flex flex-wrap items-center gap-3">
+              <h1 class="break-all text-2xl font-bold text-gray-900 dark:text-white">
+                {@domain.name}
+              </h1>
               <span class={[
                 "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium",
                 cond do
@@ -882,7 +889,7 @@ defmodule HostctlWeb.DomainLive.Show do
         </div>
 
         <%!-- Section tabs --%>
-        <div class="flex gap-1 p-1 bg-gray-100 dark:bg-gray-800 rounded-lg w-fit">
+        <div class="ui-tabs" aria-label="Domain sections">
           <% tabs = [
             {"Overview", :overview, "hero-home"},
             {"Subdomains", :subdomains, "hero-link"},
@@ -903,6 +910,8 @@ defmodule HostctlWeb.DomainLive.Show do
             <button
               phx-click="set_section"
               phx-value-section={section}
+              id={"domain-tab-#{section}"}
+              aria-pressed={to_string(@active_section == section)}
               class={[
                 "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
                 if(@active_section == section,
@@ -915,166 +924,222 @@ defmodule HostctlWeb.DomainLive.Show do
               {label}
             </button>
           <% end %>
+          <.link
+            id="domain-email-link"
+            navigate={~p"/email?#{%{domain_id: @domain.id}}"}
+            class="px-3 py-1.5 text-sm text-indigo-600 dark:text-indigo-400"
+          >
+            Email
+          </.link>
+          <.link
+            id="domain-databases-link"
+            navigate={~p"/databases?#{%{domain_id: @domain.id}}"}
+            class="px-3 py-1.5 text-sm text-indigo-600 dark:text-indigo-400"
+          >
+            Databases
+          </.link>
+          <.link
+            :if={Settings.feature_enabled?("ftp")}
+            id="domain-ftp-link"
+            navigate={~p"/ftp?#{%{domain_id: @domain.id}}"}
+            class="px-3 py-1.5 text-sm text-indigo-600 dark:text-indigo-400"
+          >
+            FTP accounts
+          </.link>
         </div>
 
         <%!-- Overview --%>
         <%= if @active_section == :overview do %>
-          <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div id="domain-summary" class="ui-metrics">
             <.info_card
-              label="Document Root"
-              value={@domain.document_root || "Not set"}
-              icon="hero-folder"
+              label="Local disk usage"
+              value={format_mb(@domain.disk_usage_mb)}
+              icon="hero-circle-stack"
             />
             <.info_card
-              label="PHP Version"
-              value={"PHP #{@domain.php_version}"}
-              icon="hero-code-bracket"
+              label="Monthly bandwidth"
+              value={format_mb(@domain.bandwidth_used_mb)}
+              icon="hero-arrow-trending-up"
             />
             <.info_card
-              label="SSL Certificate"
-              value={
-                cond do
-                  @ssl_cert && @ssl_cert.status == "active" -> "Active"
-                  @ssl_cert && @ssl_cert.status == "pending" -> "Issuing…"
-                  @ssl_cert && @ssl_cert.status == "expired" -> "Expired"
-                  true -> "None"
-                end
-              }
+              label="SSL certificate"
+              value={if @ssl_cert, do: String.capitalize(@ssl_cert.status), else: "Not configured"}
               icon="hero-lock-closed"
             />
           </div>
+          <div class="ui-columns">
+            <section id="domain-hosting-configuration" class="ui-panel">
+              <div class="ui-panel-heading">
+                <div>
+                  <h2>Hosting configuration</h2>
+                  <p>Runtime and website access</p>
+                </div>
+                <.icon name="hero-adjustments-horizontal" class="size-5 text-gray-400" />
+              </div>
+              <dl class="ui-facts">
+                <div>
+                  <dt>PHP runtime</dt>
+                  <dd>PHP {@domain.php_version}</dd>
+                </div>
+                <div>
+                  <dt>Document root</dt>
+                  <dd class="ui-code">{@domain.document_root || "Default root"}</dd>
+                </div>
+                <div>
+                  <dt>HTTPS access</dt>
+                  <dd>
+                    <button
+                      id="domain-https-settings"
+                      phx-click="set_section"
+                      phx-value-section="ssl"
+                      class="ui-text-link"
+                    >
+                      {if @domain.ssl_enabled, do: "Enabled", else: "Not enabled"} →
+                    </button>
+                  </dd>
+                </div>
+              </dl>
+            </section>
+            <section id="domain-services" class="ui-panel">
+              <div class="ui-panel-heading">
+                <div>
+                  <h2>Domain services</h2>
+                  <p>Manage resources for this website</p>
+                </div>
+              </div>
+              <div class="ui-service-grid">
+                <button phx-click="set_section" phx-value-section="subdomains" class="ui-service">
+                  <.icon name="hero-link" class="size-5" />
+                  <span>
+                    Subdomains<small>{length(@subdomain_names)} configured</small>
+                  </span>
+                  <span aria-hidden="true">→</span>
+                </button>
+                <button phx-click="set_section" phx-value-section="dns" class="ui-service">
+                  <.icon name="hero-server" class="size-5" />
+                  <span>
+                    DNS records<small>Zone configuration</small>
+                  </span>
+                  <span aria-hidden="true">→</span>
+                </button>
+                <.link navigate={~p"/email?#{%{domain_id: @domain.id}}"} class="ui-service">
+                  <.icon name="hero-envelope" class="size-5" />
+                  <span>
+                    Email accounts<small>Mailboxes & webmail</small>
+                  </span>
+                  <span aria-hidden="true">→</span>
+                </.link>
+                <.link navigate={~p"/databases?#{%{domain_id: @domain.id}}"} class="ui-service">
+                  <.icon name="hero-circle-stack" class="size-5" />
+                  <span>
+                    Databases<small>Databases & users</small>
+                  </span>
+                  <span aria-hidden="true">→</span>
+                </.link>
+              </div>
+            </section>
+          </div>
+          <section id="domain-storage-summary" class="ui-panel">
+            <div class="ui-panel-heading">
+              <div>
+                <h2>Storage configuration</h2>
+                <p>Local files and object storage destinations</p>
+              </div>
+              <button phx-click="set_section" phx-value-section="s3" class="ui-text-link">
+                Manage S3 →
+              </button>
+            </div>
+            <div class="ui-destination">
+              <.icon name="hero-folder" class="size-5 text-gray-400" />
+              <div>
+                <strong>Local document root</strong>
+                <p class="ui-code">{@domain.document_root || "Default root"}</p>
+              </div>
+              <span class="ui-tag">Local files</span>
+            </div>
+            <div
+              :for={backend <- @s3_backends}
+              id={"storage-summary-#{backend.id}"}
+              class="ui-destination"
+            >
+              <.icon name="hero-cloud" class="size-5 text-gray-400" />
+              <div>
+                <strong>
+                  {if backend.subdomain in [nil, ""],
+                    do: @domain.name,
+                    else: "#{backend.subdomain}.#{@domain.name}"}{if backend.url_path in [nil, ""],
+                    do: "/",
+                    else: backend.url_path}
+                </strong>
+                <p>
+                  {backend.bucket}<span :if={backend.path_prefix not in [nil, ""]}> / {backend.path_prefix}</span>
+                </p>
+              </div>
+              <span class="ui-tag">{if backend.enabled, do: "S3 enabled", else: "S3 disabled"}</span>
+            </div>
+            <p :if={@s3_backends == []} class="ui-panel-note">No S3 destinations configured.</p>
+          </section>
 
           <%!-- Resource Usage --%>
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
-            <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-4">Resource Usage</h3>
-            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div class="flex items-center gap-4 p-4 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/50">
-                <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-indigo-100 dark:bg-indigo-900/50 shrink-0">
-                  <.icon
-                    name="hero-circle-stack"
-                    class="w-5 h-5 text-indigo-600 dark:text-indigo-400"
-                  />
-                </div>
-                <div>
-                  <p class="text-xs text-indigo-600 dark:text-indigo-400 font-medium uppercase tracking-wide">
-                    Disk Usage
+          <details id="domain-bandwidth-history" class="ui-panel ui-disclosure">
+            <summary>Bandwidth history <span>Last six months</span></summary>
+            <div class="ui-panel-body">
+              <%!-- Bandwidth history chart --%>
+              <%= if @bandwidth_chart_data != [] do %>
+                <div class="mt-6">
+                  <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-3">
+                    Bandwidth — last 6 months
                   </p>
-                  <p class="text-2xl font-bold text-indigo-700 dark:text-indigo-300 leading-tight">
-                    {format_mb(@domain.disk_usage_mb)}
-                  </p>
-                </div>
-              </div>
-              <div class="flex items-center gap-4 p-4 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/50">
-                <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-emerald-100 dark:bg-emerald-900/50 shrink-0">
-                  <.icon
-                    name="hero-arrow-up-tray"
-                    class="w-5 h-5 text-emerald-600 dark:text-emerald-400"
-                  />
-                </div>
-                <div>
-                  <p class="text-xs text-emerald-600 dark:text-emerald-400 font-medium uppercase tracking-wide">
-                    Bandwidth Used
-                  </p>
-                  <p class="text-2xl font-bold text-emerald-700 dark:text-emerald-300 leading-tight">
-                    {format_mb(@domain.bandwidth_used_mb)}
-                  </p>
-                  <p class="text-xs text-emerald-500 dark:text-emerald-400 mt-0.5">this month</p>
-                </div>
-              </div>
-            </div>
-
-            <%!-- Bandwidth history chart --%>
-            <%= if @bandwidth_chart_data != [] do %>
-              <div class="mt-6">
-                <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-3">
-                  Bandwidth — last 6 months
-                </p>
-                <% max_mb =
-                  Enum.max_by(@bandwidth_chart_data, & &1.mb_used, fn -> %{mb_used: 1} end).mb_used %>
-                <% max_mb = max(max_mb, 1) %>
-                <div class="flex items-end gap-2 h-24">
-                  <%= for bar <- @bandwidth_chart_data do %>
-                    <% pct = round(bar.mb_used / max_mb * 100) %>
-                    <div class="flex-1 flex flex-col items-center gap-1">
-                      <span class="text-xs text-gray-500 dark:text-gray-400">
-                        <%= if bar.mb_used > 0 do %>
-                          {format_mb(bar.mb_used)}
-                        <% end %>
-                      </span>
-                      <div
-                        class="w-full bg-gray-100 dark:bg-gray-800 rounded-t relative"
-                        style="height: 56px"
-                      >
+                  <% max_mb =
+                    Enum.max_by(@bandwidth_chart_data, & &1.mb_used, fn -> %{mb_used: 1} end).mb_used %>
+                  <% max_mb = max(max_mb, 1) %>
+                  <div class="flex items-end gap-2 h-24">
+                    <%= for bar <- @bandwidth_chart_data do %>
+                      <% pct = round(bar.mb_used / max_mb * 100) %>
+                      <div class="flex-1 flex flex-col items-center gap-1">
+                        <span class="text-xs text-gray-500 dark:text-gray-400">
+                          <%= if bar.mb_used > 0 do %>
+                            {format_mb(bar.mb_used)}
+                          <% end %>
+                        </span>
                         <div
-                          class={[
-                            "absolute bottom-0 left-0 right-0 rounded-t transition-all duration-500",
-                            if(bar.current?,
-                              do: "bg-emerald-500",
-                              else: "bg-emerald-300 dark:bg-emerald-700"
-                            )
-                          ]}
-                          style={"height: #{pct}%"}
+                          class="w-full bg-gray-100 dark:bg-gray-800 rounded-t relative"
+                          style="height: 56px"
                         >
+                          <div
+                            class={[
+                              "absolute bottom-0 left-0 right-0 rounded-t transition-all duration-500",
+                              if(bar.current?,
+                                do: "bg-emerald-500",
+                                else: "bg-emerald-300 dark:bg-emerald-700"
+                              )
+                            ]}
+                            style={"height: #{pct}%"}
+                          >
+                          </div>
                         </div>
+                        <span class="text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap">
+                          {bar.label}
+                        </span>
                       </div>
-                      <span class="text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap">
-                        {bar.label}
-                      </span>
-                    </div>
-                  <% end %>
+                    <% end %>
+                  </div>
                 </div>
-              </div>
-            <% end %>
-          </div>
+              <% end %>
+            </div>
+          </details>
 
-          <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
-            <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-4">Quick Actions</h3>
-            <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <button
-                phx-click="set_section"
-                phx-value-section="dns"
-                class="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
-              >
-                <.icon name="hero-server" class="w-5 h-5 text-gray-500 dark:text-gray-400" />
-                <span class="text-xs font-medium text-gray-700 dark:text-gray-300">Manage DNS</span>
-              </button>
-              <.link
-                navigate={~p"/email"}
-                class="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
-              >
-                <.icon name="hero-envelope" class="w-5 h-5 text-gray-500 dark:text-gray-400" />
-                <span class="text-xs font-medium text-gray-700 dark:text-gray-300">
-                  Email Accounts
-                </span>
-              </.link>
-              <.link
-                navigate={~p"/databases"}
-                class="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
-              >
-                <.icon name="hero-circle-stack" class="w-5 h-5 text-gray-500 dark:text-gray-400" />
-                <span class="text-xs font-medium text-gray-700 dark:text-gray-300">Databases</span>
-              </.link>
-              <button
-                phx-click="set_section"
-                phx-value-section="ssl"
-                class="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
-              >
-                <.icon name="hero-lock-closed" class="w-5 h-5 text-gray-500 dark:text-gray-400" />
-                <span class="text-xs font-medium text-gray-700 dark:text-gray-300">
-                  SSL Certificate
-                </span>
-              </button>
-              <button
-                phx-click="sync_nginx"
-                class="flex flex-col items-center gap-2 p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-orange-300 dark:hover:border-orange-700 hover:bg-orange-50 dark:hover:bg-orange-950/30 transition-colors"
-              >
-                <.icon name="hero-arrow-path" class="w-5 h-5 text-gray-500 dark:text-gray-400" />
-                <span class="text-xs font-medium text-gray-700 dark:text-gray-300">
-                  Rebuild Config
-                </span>
+          <details class="ui-panel ui-disclosure">
+            <summary>Advanced actions <span>Web server configuration</span></summary>
+            <div class="ui-panel-body flex flex-wrap items-center justify-between gap-4">
+              <p class="text-sm text-gray-500">
+                Regenerate the web server configuration from the saved domain settings.
+              </p>
+              <button id="domain-rebuild-config" phx-click="sync_nginx" class="app-button">
+                <.icon name="hero-arrow-path" class="size-4" /> Rebuild configuration
               </button>
             </div>
-          </div>
+          </details>
         <% end %>
 
         <%!-- Subdomains --%>
@@ -2152,16 +2217,12 @@ defmodule HostctlWeb.DomainLive.Show do
 
   defp info_card(assigns) do
     ~H"""
-    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5">
-      <div class="flex items-center gap-3">
-        <div class="flex items-center justify-center w-9 h-9 rounded-lg bg-gray-100 dark:bg-gray-800 shrink-0">
-          <.icon name={@icon} class="w-4 h-4 text-gray-500 dark:text-gray-400" />
-        </div>
-        <div>
-          <p class="text-xs text-gray-500 dark:text-gray-400">{@label}</p>
-          <p class="text-sm font-semibold text-gray-900 dark:text-white">{@value}</p>
-        </div>
+    <div class="ui-metric">
+      <div>
+        <p>{@label}</p>
+        <strong>{@value}</strong>
       </div>
+      <.icon name={@icon} class="size-5 text-gray-400" />
     </div>
     """
   end

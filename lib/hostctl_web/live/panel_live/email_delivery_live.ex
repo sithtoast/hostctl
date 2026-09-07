@@ -140,7 +140,12 @@ defmodule HostctlWeb.PanelLive.EmailDeliveryLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={:panel_email_delivery}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={:panel_email_delivery}
+    >
       <div id="email-delivery" class="mx-auto max-w-6xl space-y-6">
         <div class="flex items-start justify-between gap-5">
           <div>

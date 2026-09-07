@@ -72,10 +72,15 @@ defmodule HostctlWeb.UpdatesLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={:updates}>
-      <div class="max-w-3xl mx-auto space-y-6">
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={:updates}
+    >
+      <div class="space-y-6">
         <%!-- Page header --%>
-        <div class="flex items-center justify-between">
+        <div class="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Updates</h1>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -138,6 +143,45 @@ defmodule HostctlWeb.UpdatesLive do
               </button>
             <% end %>
           </div>
+        </div>
+
+        <div id="updates-overview" class="ui-metrics">
+          <div class="ui-metric">
+            <div>
+              <p>Installed version</p>
+              <strong>{Updater.current_version()}</strong>
+            </div>
+            <.icon name="hero-server-stack" class="size-5 text-gray-400" />
+          </div>
+          <div class="ui-metric">
+            <div>
+              <p>Update source</p>
+              <strong class="break-all">{@current_branch}</strong>
+            </div>
+            <.icon name="hero-code-bracket" class="size-5 text-gray-400" />
+          </div>
+          <div class="ui-metric">
+            <div>
+              <p>Installation</p>
+              <strong>Manual</strong>
+            </div>
+            <.icon name="hero-hand-raised" class="size-5 text-gray-400" />
+          </div>
+        </div>
+        <div
+          :if={assigns[:update_status]}
+          id="background-update-status"
+          class="rounded-xl border border-gray-200 bg-white p-4 text-sm dark:border-gray-800 dark:bg-gray-900"
+        >
+          <p>Background checks run every 6 hours. Updates are installed only when requested.</p>
+          <p class="mt-1 text-xs text-gray-500">
+            Last successful background check: {if @update_status.last_success_at,
+              do: Calendar.strftime(@update_status.last_success_at, "%Y-%m-%d %H:%M UTC"),
+              else: "Not yet checked"}
+          </p>
+          <p :if={@update_status.status == :error} class="mt-2 text-amber-700 dark:text-amber-300">
+            The background check failed. Any update badge is based on the last known result.
+          </p>
         </div>
 
         <%!-- Status card --%>
@@ -497,6 +541,17 @@ defmodule HostctlWeb.UpdatesLive do
   end
 
   @impl true
+  def handle_event(
+        "run_update",
+        _params,
+        %{assigns: %{current_scope: %{user: %{role: role}}}} = socket
+      )
+      when role != "admin",
+      do: {:noreply, put_flash(socket, :error, "Only administrators can install updates.")}
+
+  def handle_event("run_update", _params, %{assigns: %{update_state: :running}} = socket),
+    do: {:noreply, socket}
+
   def handle_event("run_update", _params, socket) do
     port =
       Port.open(
@@ -523,6 +578,7 @@ defmodule HostctlWeb.UpdatesLive do
       |> assign(:update_output, [])
 
     send(self(), :check_updates)
+    if socket.assigns.current_scope.user.role == "admin", do: Hostctl.UpdateMonitor.check()
 
     {:noreply, socket}
   end

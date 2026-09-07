@@ -7,7 +7,7 @@ defmodule HostctlWeb.SetupLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope}>
+    <Layouts.app update_status={assigns[:update_status]} flash={@flash} current_scope={@current_scope}>
       <div class="min-h-screen flex items-center justify-center">
         <div class="w-full max-w-md space-y-8">
           <div class="text-center">

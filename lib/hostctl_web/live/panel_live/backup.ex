@@ -506,7 +506,12 @@ defmodule HostctlWeb.PanelLive.Backup do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="max-w-4xl mx-auto px-4 py-8 space-y-8">
         <%!-- Page header --%>
         <div class="flex items-center justify-between">

@@ -256,7 +256,12 @@ defmodule HostctlWeb.PanelLive.Settings do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={@active_tab}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={@active_tab}
+    >
       <div class="space-y-6">
         <%!-- Header --%>
         <div class="flex items-center justify-between">
@@ -295,7 +300,7 @@ defmodule HostctlWeb.PanelLive.Settings do
         </div>
 
         <%!-- IP Settings table --%>
-        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-x-auto">
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
             <div class="flex items-center gap-3">
               <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-100 dark:bg-indigo-900/30">
@@ -466,7 +471,7 @@ defmodule HostctlWeb.PanelLive.Settings do
         </div>
 
         <%!-- DNS Provider Settings --%>
-        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-x-auto">
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
             <div class="flex items-center gap-3">
               <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-orange-100 dark:bg-orange-900/30">
@@ -614,7 +619,7 @@ defmodule HostctlWeb.PanelLive.Settings do
         </div>
 
         <%!-- DNS Record Templates --%>
-        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-x-auto">
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
             <div class="flex items-center gap-3">
               <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-100 dark:bg-emerald-900/30">

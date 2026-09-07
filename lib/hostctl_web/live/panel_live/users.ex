@@ -10,7 +10,12 @@ defmodule HostctlWeb.PanelLive.Users do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active_tab={:panel_users}>
+    <Layouts.app
+      update_status={assigns[:update_status]}
+      flash={@flash}
+      current_scope={@current_scope}
+      active_tab={:panel_users}
+    >
       <div class="max-w-4xl mx-auto space-y-6">
         <%!-- Header --%>
         <div class="flex items-center justify-between">
