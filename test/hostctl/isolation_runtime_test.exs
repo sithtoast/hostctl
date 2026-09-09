@@ -20,6 +20,57 @@ defmodule Hostctl.IsolationRuntimeTest do
     %{scope: unconfirmed_user_fixture() |> Scope.for_user()}
   end
 
+  test "Plesk owners are enrolled before receiving hosting resources" do
+    assert {:ok, user} =
+             Hostctl.Accounts.create_import_user(%{name: "Imported", email: unique_user_email()})
+
+    scope = Scope.for_user(user)
+    assert %{state: :ready} = Isolation.get_identity(scope)
+
+    assert {:ok, domain} =
+             Hosting.create_domain(scope, %{
+               name: "imported.example.com",
+               apply_dns_template: false
+             })
+
+    assert {:ok, destination} = Runtime.import_destination(domain.document_root)
+    assert destination.username == "hc_#{user.id}"
+    assert :ok = Runtime.import_tree(destination, "/tmp/hostctl-import-test")
+    assert_receive {:isolation_helper, "import-tree", %{username: name}}
+    assert name == destination.username
+  end
+
+  test "failed Plesk enrollment retains a blocked account and can be retried" do
+    email = unique_user_email()
+    Process.put(:isolation_fail, "enroll")
+
+    assert {:error, changeset} =
+             Hostctl.Accounts.create_import_user(%{name: "Imported", email: email})
+
+    assert errors_on(changeset).base != []
+    user = Hostctl.Accounts.get_user_by_email(email)
+    assert {:error, :account_isolation_not_ready} = Runtime.identity(user.id)
+    Process.delete(:isolation_fail)
+    assert {:ok, %{state: :ready}} = Runtime.provision_identity(Scope.for_user(user))
+  end
+
+  test "import destinations fail closed for unavailable identities and unsafe paths", %{
+    scope: scope
+  } do
+    {:ok, identity} = Runtime.provision_identity(scope)
+    Repo.insert!(%Domain{user_id: scope.user.id, name: "import-target.example.com"})
+
+    assert {:error, _} =
+             Runtime.import_destination("/var/www/import-target.example.com/../escape")
+
+    assert {:error, _} = Runtime.import_destination("/var/www")
+    assert {:ok, nil} = Runtime.import_destination("/tmp/mail-stage")
+    Repo.update!(change(identity, state: :failed))
+
+    assert {:error, :account_isolation_not_ready} =
+             Runtime.import_destination("/var/www/import-target.example.com/httpdocs")
+  end
+
   test "enrollment activates an empty account and subsequent calls verify its identity", %{
     scope: scope
   } do

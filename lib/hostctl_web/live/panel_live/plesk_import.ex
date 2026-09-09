@@ -421,7 +421,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         {:noreply, put_flash(socket, :error, "Name and email are required to create an account.")}
 
       true ->
-        case Accounts.create_panel_user(%{name: name, email: email}) do
+        case Accounts.create_import_user(%{name: name, email: email}) do
           {:ok, _user} ->
             {:noreply,
              socket
@@ -466,9 +466,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       end)
       |> Map.delete(nil)
 
-    {created, skipped, pw_updated, configs} =
-      Enum.reduce(owner_groups, {0, 0, 0, socket.assigns.domain_configs}, fn
-        {_key, subs}, {created, skipped, pw_updated, configs} ->
+    {created, skipped, pw_updated, failed, configs} =
+      Enum.reduce(owner_groups, {0, 0, 0, 0, socket.assigns.domain_configs}, fn
+        {_key, subs}, {created, skipped, pw_updated, failed, configs} ->
           sample = hd(subs)
           email = Map.get(sample, :owner_email)
           name = Map.get(sample, :owner_name) || Map.get(sample, :owner_login) || "User"
@@ -518,7 +518,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                 0
               end
 
-            {created, skipped + 1, pw_updated + pw_bump, configs}
+            {created, skipped + 1, pw_updated + pw_bump, failed, configs}
           else
             Logger.info(
               "[PleskImport] Auto-create account #{email}: " <>
@@ -548,7 +548,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                   user_attrs
               end
 
-            case Accounts.create_panel_user(user_attrs) do
+            case Accounts.create_import_user(user_attrs) do
               {:ok, _user} ->
                 configs =
                   Enum.reduce(subs, configs, fn sub, acc ->
@@ -556,15 +556,22 @@ defmodule HostctlWeb.PanelLive.PleskImport do
                     Map.put(acc, sub.domain, Map.put(config, :account_email, email))
                   end)
 
-                {created + 1, skipped, pw_updated, configs}
+                {created + 1, skipped, pw_updated, failed, configs}
 
-              {:error, _changeset} ->
-                {created, skipped, pw_updated, configs}
+              {:error, changeset} ->
+                Logger.error(
+                  "[PleskImport] Account enrollment failed: #{changeset_error_summary(changeset)}"
+                )
+
+                {created, skipped, pw_updated, failed + 1, configs}
             end
           end
       end)
 
-    flash_parts = []
+    flash_parts =
+      if failed > 0,
+        do: ["#{failed} account enrollment(s) failed; retry isolation before importing"],
+        else: []
 
     flash_parts =
       if created > 0, do: flash_parts ++ ["created #{created}"], else: flash_parts
@@ -1522,7 +1529,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           }
           data-confirm="Start this import using the reviewed owners, categories, and destinations?"
           class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-        >Start import</button>
+        >
+          Start import
+        </button>
       </div>
     </div>
     """
@@ -3170,8 +3179,25 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   defp resolve_scope(email) when is_binary(email) do
     case Accounts.get_user_by_email(email) do
-      nil -> {:error, "User not found: #{email}"}
-      user -> {:ok, Scope.for_user(user)}
+      nil ->
+        {:error, "User not found: #{email}"}
+
+      user ->
+        scope = Scope.for_user(user)
+
+        case Hostctl.Isolation.get_identity(scope) do
+          %{state: state} when state in [:provisioning, :failed] ->
+            case Hostctl.Isolation.Runtime.provision_identity(scope) do
+              {:ok, _} ->
+                {:ok, scope}
+
+              {:error, _} ->
+                {:error, "Account isolation is not ready. Retry enrollment before importing."}
+            end
+
+          _ ->
+            {:ok, scope}
+        end
     end
   end
 

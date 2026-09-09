@@ -388,6 +388,82 @@ def legacy_chown(data):
     return {"path": path}
 
 
+def open_directory(path):
+    require(path.startswith("/") and all(p not in ("", ".", "..") for p in path.split("/")[1:]), "invalid directory")
+    fd = os.open("/", DIRECTORY)
+    try:
+        for part in path.split("/")[1:]:
+            child = os.open(part, DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def import_tree(data):
+    _, _, user = checked_identity(data)
+    webroot(dict(data, index=False))
+    source = data["source"]
+    require(re.fullmatch(r"/(?:tmp|var/tmp)/hostctl-import-[A-Za-z0-9_-]+", source), "invalid staging directory")
+    src = open_directory(source)
+    dst = open_directory(data["path"])
+    try:
+        copy_import_directory(src, dst, user)
+    finally:
+        os.close(src)
+        os.close(dst)
+    return {"path": data["path"]}
+
+
+def copy_import_directory(src, dst, user):
+    require(os.fstat(dst).st_uid == user.pw_uid, "destination ownership changed")
+    for name in os.listdir(src):
+        info = os.stat(name, dir_fd=src, follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            child_src = os.open(name, DIRECTORY, dir_fd=src)
+            try:
+                try:
+                    os.mkdir(name, 0o750, dir_fd=dst)
+                    created = True
+                except FileExistsError:
+                    created = False
+                child_dst = os.open(name, DIRECTORY, dir_fd=dst)
+                try:
+                    if created:
+                        os.fchown(child_dst, user.pw_uid, user.pw_gid)
+                        acl(child_dst, f"u:{WEB}:r-x,u:hostctl:rwx,d:u::rwx,d:u:{WEB}:r-x,d:u:hostctl:rwx,d:g::---,d:m::rwx,d:o::---")
+                    copy_import_directory(child_src, child_dst, user)
+                finally:
+                    os.close(child_dst)
+            finally:
+                os.close(child_src)
+        else:
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "import contains a link or special file")
+            reader = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=src)
+            temp = ".hostctl-import-" + secrets.token_hex(16)
+            try:
+                current = os.fstat(reader)
+                require(stat.S_ISREG(current.st_mode) and current.st_nlink == 1, "source changed")
+                writer = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640, dir_fd=dst)
+                try:
+                    os.fchown(writer, user.pw_uid, user.pw_gid)
+                    acl(writer, f"u:{WEB}:r--,u:hostctl:rw-,m::rw-,o::---")
+                    with os.fdopen(os.dup(reader), "rb") as source_file, os.fdopen(os.dup(writer), "wb") as target_file:
+                        shutil.copyfileobj(source_file, target_file)
+                finally:
+                    os.close(writer)
+                # Replaces the directory entry, never follows an existing link.
+                os.rename(temp, name, src_dir_fd=dst, dst_dir_fd=dst)
+            finally:
+                os.close(reader)
+                try:
+                    os.unlink(temp, dir_fd=dst)
+                except FileNotFoundError:
+                    pass
+
+
 def main(operation, data):
     require(os.geteuid() == 0 and sys.platform == "linux", "Linux root privileges required")
     trusted_directory(STATE)
@@ -409,6 +485,8 @@ def main(operation, data):
             return ftp_home(data)
         if operation == "php":
             return php(data)
+        if operation == "import-tree":
+            return import_tree(data)
         if operation == "legacy-chown":
             return legacy_chown(data)
         raise ValueError("unknown operation")

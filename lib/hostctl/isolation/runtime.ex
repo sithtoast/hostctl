@@ -208,6 +208,48 @@ defmodule Hostctl.Isolation.Runtime do
       else: :ok
   end
 
+  @doc "Resolves and verifies an import destination without permitting legacy fallback."
+  def import_destination(path) do
+    if is_binary(path) and Path.expand(path) == path do
+      resolve_import_destination(path)
+    else
+      {:error, :invalid_import_path}
+    end
+  end
+
+  defp resolve_import_destination(path) do
+    domain = Repo.all(Domain) |> Enum.find(&canonical_root?(path, &1))
+
+    if domain do
+      with {:ok, identity} <- identity(domain.user_id) do
+        if identity do
+          with {:ok, _} <- verify_identity(identity),
+               {:ok, _} <-
+                 helper(
+                   "webroot",
+                   Map.merge(payload(identity), %{domain: domain.name, path: path, index: false})
+                 ) do
+            {:ok, Map.merge(payload(identity), %{domain: domain.name, path: path})}
+          end
+        else
+          with :ok <- legacy_write_allowed(path), do: {:ok, nil}
+        end
+      end
+    else
+      with :ok <- legacy_write_allowed(path), do: {:ok, nil}
+    end
+  end
+
+  def import_tree(destination, source) do
+    case helper("import-tree", Map.put(destination, :source, source)) do
+      {:ok, _} ->
+        :ok
+
+      {:error, _} ->
+        {:error, "Isolated file import failed; check source files and destination ownership."}
+    end
+  end
+
   def enrolled? do
     Repo.exists?(from i in SystemIdentity, where: i.state != :pending)
   end

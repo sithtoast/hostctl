@@ -234,3 +234,41 @@ Check ordinary HTTP/HTTPS, subdomains, and proxy routes remain functional.
 Run focused unit/integration tests and `mix precommit`. Local macOS tests cannot
 prove Linux UID isolation, vsftpd identity switching, FUSE enforcement, or live
 PHP/Nginx behavior. Validate those on the test VM before production rollout.
+
+### Fresh-install Plesk imports
+
+The Plesk import page now automatically enrolls owners created by either **Create
+account** or **Auto-create accounts** before assigning domains. Each owner gets
+one Linux identity shared by that owner's domains, private PHP pools, and isolated
+single-directory FTP accounts. Existing accounts retain their current runtime.
+Failed enrollment retains a blocked account; retrying the domain import retries
+its enrollment before creating resources. The provisioning CLI also supports retry.
+
+Local web-file imports use temporary staging followed by a guarded copy into the
+owner's tree. Files receive the owner UID/GID and Nginx read ACLs. Existing files
+are replaced without following destination symlinks. Source symlinks, hardlinks,
+and special files are rejected; the import reports failure and can be retried
+(files already copied are retained). Staging needs enough local disk space for
+the selected source directory and is removed after the attempt.
+
+For a fresh-install trial, install from `codex/account-isolation`, select local
+web storage, auto-create owners, then import domains and web files. Verify two
+owners receive different `hc_*` UIDs, PHP pools and FTP guest mappings, and that
+one owner's PHP cannot read the other's files. Subscription FTP logins spanning
+multiple domain roots still report unsupported bind mounts. S3 FTP mounts and
+existing-account conversion remain unsupported; S3 HTTP proxy uploads are separate
+from this local-files path. Cron import is still unavailable.
+
+On a fresh supported Linux VM, fetch this branch and run its installer:
+
+```bash
+git clone --branch codex/account-isolation https://github.com/sithtoast/hostctl.git
+cd hostctl
+sudo bash priv/deploy/install.sh --interactive \
+  --repo=https://github.com/sithtoast/hostctl.git \
+  --branch=codex/account-isolation
+```
+
+Keep the branch argument: the installer's default is `main`. The disposable Linux
+smoke test covers import-file ownership and service access, but does not substitute
+for a complete fresh installation and a transfer from your Plesk server.

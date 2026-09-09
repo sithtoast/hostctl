@@ -87,6 +87,39 @@ defmodule Hostctl.Accounts do
     |> Repo.insert()
   end
 
+  @doc "Creates a Plesk owner with a durable isolation reservation before enrollment."
+  def create_import_user(attrs) do
+    result =
+      Repo.transaction(fn ->
+        with {:ok, user} <- create_panel_user(attrs) do
+          user
+          |> Hostctl.Isolation.SystemIdentity.reservation_changeset()
+          |> Ecto.Changeset.put_change(:state, :provisioning)
+          |> Repo.insert!()
+
+          user
+        else
+          {:error, changeset} -> Repo.rollback(changeset)
+        end
+      end)
+
+    with {:ok, user} <- result do
+      case Hostctl.Isolation.Runtime.provision_identity(Hostctl.Accounts.Scope.for_user(user)) do
+        {:ok, _identity} ->
+          {:ok, user}
+
+        {:error, _reason} ->
+          {:error,
+           user
+           |> Ecto.Changeset.change()
+           |> Ecto.Changeset.add_error(
+             :base,
+             "Account created but isolation failed. Retry enrollment before importing domains."
+           )}
+      end
+    end
+  end
+
   @doc """
   Sets a password on an existing panel user who has no password yet (unconfirmed).
   Returns `{:ok, user}` on success, `:already_confirmed` if the user already

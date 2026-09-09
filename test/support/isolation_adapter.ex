@@ -18,7 +18,7 @@ defmodule Hostctl.IsolationTestAdapter do
         "verify" ->
           {:ok, %{"username" => payload.username, "uid" => payload.uid, "gid" => payload.gid}}
 
-        action when action in ["webroot", "ftp-home"] ->
+        action when action in ["webroot", "ftp-home", "import-tree"] ->
           {:ok, %{"path" => payload.path}}
 
         "php" ->

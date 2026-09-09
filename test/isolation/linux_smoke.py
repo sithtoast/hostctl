@@ -184,6 +184,29 @@ try:
     for payload, _, _ in identities:
         private_socket = f"/run/php/hostctl-{payload['username']}-8.3.sock"
         assert subprocess.run(["runuser", "-u", "www-data", "--", "test", "-w", private_socket]).returncode != 0
+    # Imported files inherit the tenant identity and remain readable by Nginx.
+    stage = Path("/tmp/hostctl-import-smoke")
+    stage.mkdir(mode=0o700)
+    (stage / "assets").mkdir()
+    (stage / "assets" / "imported.txt").write_text("isolated-import")
+    destination = dict(a[0], domain=a[1], path=a[2], source=str(stage))
+    helper("import-tree", destination)
+    imported = a[2] + "/assets/imported.txt"
+    assert os.stat(imported).st_uid == a[0]["uid"]
+    assert get(a[1], "/assets/imported.txt") == "isolated-import"
+    for forbidden in [b[0]["username"], "www-data"]:
+        assert subprocess.run(["runuser", "-u", forbidden, "--", "cat", imported], capture_output=True).returncode != 0
+    # Reimports replace files without following destination links.
+    os.unlink(imported)
+    os.symlink("/etc/passwd", imported)
+    helper("import-tree", destination)
+    assert not os.path.islink(imported)
+    assert Path(imported).read_text() == "isolated-import"
+    (stage / "source-link").symlink_to("/etc/passwd")
+    helper("import-tree", destination, success=False)
+    (stage / "source-link").unlink()
+    helper("import-tree", dict(destination, **b[0]), success=False)
+    print("PASS: isolated import ownership, Nginx reads, cross-account denial, reimport, source-link rejection")
     # Invalid or already-owned paths and colliding OS accounts fail closed.
     helper("webroot", dict(a[0], domain=a[1], path=a[2] + "/../escape"), success=False)
     helper("webroot", dict(b[0], domain=a[1], path=a[2]), success=False)

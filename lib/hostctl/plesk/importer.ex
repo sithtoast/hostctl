@@ -1408,8 +1408,10 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp ensure_local_directory(path) do
-    with :ok <- Hostctl.Isolation.Runtime.legacy_write_allowed(path) do
-      do_ensure_local_directory(path)
+    case Hostctl.Isolation.Runtime.import_destination(path) do
+      {:ok, nil} -> do_ensure_local_directory(path)
+      {:ok, _destination} -> :ok
+      {:error, reason} -> {:error, inspect(reason)}
     end
   end
 
@@ -1448,8 +1450,67 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp do_rsync(ssh_opts, remote_path, local_path, opts) do
-    with :ok <- Hostctl.Isolation.Runtime.legacy_write_allowed(local_path) do
-      do_unisolated_rsync(ssh_opts, remote_path, local_path, opts)
+    case Hostctl.Isolation.Runtime.import_destination(local_path) do
+      {:ok, nil} ->
+        do_unisolated_rsync(ssh_opts, remote_path, local_path, opts)
+
+      {:ok, destination} ->
+        with {:ok, stage} <- create_import_stage() do
+          try do
+            with :ok <-
+                   do_unisolated_rsync(ssh_opts, remote_path, stage, Keyword.delete(opts, :chown)),
+                 :ok <- Hostctl.Isolation.Runtime.import_tree(destination, stage) do
+              :ok
+            end
+          after
+            System.cmd(
+              "sudo",
+              [
+                "systemd-run",
+                "--pipe",
+                "--wait",
+                "--collect",
+                "--quiet",
+                "/bin/rm",
+                "-rf",
+                "--",
+                stage
+              ],
+              stderr_to_stdout: true
+            )
+          end
+        end
+
+      {:error, reason} ->
+        {:error, inspect(reason)}
+    end
+  end
+
+  # Create staging in the same host namespace used by rsync and the helper,
+  # outside the panel service's PrivateTmp namespace.
+  defp create_import_stage do
+    args = [
+      "-n",
+      "systemd-run",
+      "--pipe",
+      "--wait",
+      "--collect",
+      "--quiet",
+      "/usr/bin/mktemp",
+      "-d",
+      "/tmp/hostctl-import-XXXXXXXXXXXXXXXXXX"
+    ]
+
+    case System.cmd("sudo", args, stderr_to_stdout: true) do
+      {output, 0} ->
+        path = String.trim(output)
+
+        if Regex.match?(~r|\A/tmp/hostctl-import-[A-Za-z0-9]+\z|, path),
+          do: {:ok, path},
+          else: {:error, "Invalid import staging path"}
+
+      _ ->
+        {:error, "Could not create isolated import staging directory"}
     end
   end
 
