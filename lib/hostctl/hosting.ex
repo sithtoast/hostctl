@@ -74,6 +74,10 @@ defmodule Hostctl.Hosting do
   end
 
   def create_domain(%Scope{} = scope, attrs) do
+    with_owner_lock(scope.user.id, %Domain{}, fn -> do_create_domain(scope, attrs) end)
+  end
+
+  defp do_create_domain(scope, attrs) do
     %Domain{user_id: scope.user.id}
     |> Domain.changeset(attrs)
     |> Repo.insert()
@@ -88,9 +92,7 @@ defmodule Hostctl.Hosting do
           apply_dns_template(zone, domain.name)
         end
 
-        WebServer.sync_domain(domain)
-
-        {:ok, domain}
+        sync_result(WebServer.sync_domain(domain), {:ok, domain})
 
       error ->
         error
@@ -99,14 +101,16 @@ defmodule Hostctl.Hosting do
 
   def update_domain(%Scope{} = scope, %Domain{} = domain, attrs) do
     true = domain.user_id == scope.user.id
+    with_owner_lock(scope.user.id, domain, fn -> do_update_domain(domain, attrs) end)
+  end
 
+  defp do_update_domain(domain, attrs) do
     domain
     |> Domain.changeset(attrs)
     |> Repo.update()
     |> case do
       {:ok, updated_domain} = result ->
-        WebServer.sync_domain(updated_domain)
-        result
+        sync_result(WebServer.sync_domain(updated_domain), result)
 
       error ->
         error
@@ -276,6 +280,12 @@ defmodule Hostctl.Hosting do
   end
 
   def create_subdomain(%Domain{} = domain, attrs, opts \\ []) do
+    with_owner_lock(domain.user_id, %Subdomain{}, fn ->
+      do_create_subdomain(domain, attrs, opts)
+    end)
+  end
+
+  defp do_create_subdomain(domain, attrs, opts) do
     %Subdomain{domain_id: domain.id}
     |> Subdomain.changeset(attrs)
     |> Repo.insert()
@@ -285,8 +295,7 @@ defmodule Hostctl.Hosting do
           maybe_create_subdomain_dns_records(domain, subdomain.name)
         end
 
-        WebServer.sync_domain(domain)
-        result
+        sync_result(WebServer.sync_domain(domain), result)
 
       error ->
         error
@@ -294,14 +303,18 @@ defmodule Hostctl.Hosting do
   end
 
   def update_subdomain(%Subdomain{} = subdomain, attrs) do
+    domain = Repo.get!(Domain, subdomain.domain_id)
+    with_owner_lock(domain.user_id, subdomain, fn -> do_update_subdomain(subdomain, attrs) end)
+  end
+
+  defp do_update_subdomain(subdomain, attrs) do
     subdomain
     |> Subdomain.changeset(attrs)
     |> Repo.update()
     |> case do
       {:ok, _updated} = result ->
         domain = Repo.get!(Domain, subdomain.domain_id)
-        WebServer.sync_domain(domain)
-        result
+        sync_result(WebServer.sync_domain(domain), result)
 
       error ->
         error
@@ -1240,6 +1253,17 @@ defmodule Hostctl.Hosting do
   end
 
   def create_ftp_account(%User{} = user, attrs) do
+    with_owner_lock(user.id, %FtpAccount{}, fn -> do_create_ftp_account(user, attrs) end)
+  end
+
+  # Keep both public overloads together; the owner lock also serializes the
+  # first hosted resource against explicit identity enrollment.
+  def create_ftp_account(%Domain{} = domain, attrs) do
+    user = Repo.get!(User, domain.user_id)
+    create_ftp_account(user, attrs)
+  end
+
+  defp do_create_ftp_account(user, attrs) do
     result =
       %FtpAccount{user_id: user.id}
       |> FtpAccount.changeset(attrs)
@@ -1248,22 +1272,18 @@ defmodule Hostctl.Hosting do
     case result do
       {:ok, account} ->
         raw_password = attrs["password"] || attrs[:password]
-        FtpServer.provision_account(account, raw_password)
-        {:ok, account}
+        sync_result(FtpServer.provision_account(account, raw_password), {:ok, account})
 
       error ->
         error
     end
   end
 
-  # Backward-compatible overload for Plesk importer and other callers that
-  # pass a Domain. Resolves the domain's owner and delegates.
-  def create_ftp_account(%Domain{} = domain, attrs) do
-    user = Repo.get!(User, domain.user_id)
-    create_ftp_account(user, attrs)
+  def update_ftp_account(%FtpAccount{} = account, attrs) do
+    with_owner_lock(account.user_id, account, fn -> do_update_ftp_account(account, attrs) end)
   end
 
-  def update_ftp_account(%FtpAccount{} = account, attrs) do
+  defp do_update_ftp_account(account, attrs) do
     result =
       account
       |> FtpAccount.update_changeset(attrs)
@@ -1277,8 +1297,7 @@ defmodule Hostctl.Hosting do
             val -> val
           end
 
-        FtpServer.provision_account(updated, raw_password)
-        {:ok, updated}
+        sync_result(FtpServer.provision_account(updated, raw_password), {:ok, updated})
 
       error ->
         error
@@ -1298,6 +1317,35 @@ defmodule Hostctl.Hosting do
 
   def change_ftp_account(%FtpAccount{} = account, attrs \\ %{}) do
     FtpAccount.changeset(account, attrs)
+  end
+
+  defp with_owner_lock(user_id, record, fun) do
+    Repo.transaction(fn ->
+      Repo.one!(from u in User, where: u.id == ^user_id, lock: "FOR UPDATE", select: u.id)
+
+      result =
+        case Hostctl.Isolation.Runtime.identity(user_id) do
+          {:ok, _} -> fun.()
+          {:error, _} = error -> sync_result(error, {:ok, record})
+        end
+
+      case result do
+        {:ok, value} -> value
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
+
+  defp sync_result(:ok, result), do: result
+
+  defp sync_result({:error, _reason}, {:ok, record}) do
+    {:error,
+     record
+     |> Ecto.Changeset.change()
+     |> Ecto.Changeset.add_error(
+       :base,
+       "Hosting service provisioning failed. Check account isolation and server configuration before retrying."
+     )}
   end
 
   def change_ftp_account_for_update(%FtpAccount{} = account, attrs \\ %{}) do
@@ -1465,6 +1513,7 @@ defmodule Hostctl.Hosting do
     result =
       %DomainS3Backend{domain_id: domain.id}
       |> DomainS3Backend.changeset(attrs)
+      |> validate_isolated_mount(domain)
       |> Repo.insert()
 
     case result do
@@ -1473,8 +1522,7 @@ defmodule Hostctl.Hosting do
           maybe_create_subdomain_dns_records(domain, backend.subdomain)
         end
 
-        WebServer.sync_domain(domain)
-        {:ok, backend}
+        sync_result(WebServer.sync_domain(domain), {:ok, backend})
 
       error ->
         error
@@ -1483,10 +1531,12 @@ defmodule Hostctl.Hosting do
 
   def update_s3_backend(%DomainS3Backend{} = backend, attrs) do
     old_subdomain = backend.subdomain
+    domain = Repo.get!(Domain, backend.domain_id)
 
     result =
       backend
       |> DomainS3Backend.changeset(attrs)
+      |> validate_isolated_mount(domain)
       |> Repo.update()
 
     case result do
@@ -1498,8 +1548,7 @@ defmodule Hostctl.Hosting do
           maybe_create_subdomain_dns_records(domain, updated.subdomain)
         end
 
-        WebServer.sync_domain(domain)
-        {:ok, updated}
+        sync_result(WebServer.sync_domain(domain), {:ok, updated})
 
       error ->
         error
@@ -1522,6 +1571,19 @@ defmodule Hostctl.Hosting do
 
   def change_s3_backend(%DomainS3Backend{} = backend, attrs \\ %{}) do
     DomainS3Backend.changeset(backend, attrs)
+  end
+
+  defp validate_isolated_mount(changeset, domain) do
+    if Ecto.Changeset.get_field(changeset, :ftp_mount_enabled) and
+         Hostctl.Isolation.Runtime.identity(domain.user_id) != {:ok, nil} do
+      Ecto.Changeset.add_error(
+        changeset,
+        :ftp_mount_enabled,
+        "S3 FTP mounts require the isolated mount migration workflow."
+      )
+    else
+      changeset
+    end
   end
 
   # ---------------------------------------------------------------------------

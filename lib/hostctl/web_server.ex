@@ -44,54 +44,79 @@ defmodule Hostctl.WebServer do
   """
   def sync_domain(%Domain{} = domain) do
     if enabled?() do
-      # Re-fetch domain to ensure ssl_enabled and other fields are current
       domain = Repo.get!(Domain, domain.id)
 
-      subdomains = Repo.all(from s in Subdomain, where: s.domain_id == ^domain.id)
+      with {:ok, runtime} <- Hostctl.Isolation.Runtime.prepare_domain(domain) do
+        do_sync_domain(domain, runtime)
+      end
+    else
+      :ok
+    end
+  end
 
-      proxies =
-        Repo.all(
-          from p in DomainProxy,
-            where: p.domain_id == ^domain.id and p.enabled == true,
-            order_by: [asc: p.path]
-        )
+  defp do_sync_domain(domain, runtime) do
+    subdomains = Repo.all(from s in Subdomain, where: s.domain_id == ^domain.id)
 
-      ssl_cert = Repo.get_by(SslCertificate, domain_id: domain.id)
-      s3_backends = Repo.all(from b in DomainS3Backend, where: b.domain_id == ^domain.id)
+    proxies =
+      Repo.all(
+        from p in DomainProxy,
+          where: p.domain_id == ^domain.id and p.enabled == true,
+          order_by: [asc: p.path]
+      )
 
-      if ssl_cert && ssl_cert.cert_type == "custom" && ssl_cert.status == "active" do
-        write_ssl_cert(domain.name, ssl_cert)
+    ssl_cert = Repo.get_by(SslCertificate, domain_id: domain.id)
+    s3_backends = Repo.all(from b in DomainS3Backend, where: b.domain_id == ^domain.id)
+
+    if ssl_cert && ssl_cert.cert_type == "custom" && ssl_cert.status == "active" do
+      write_ssl_cert(domain.name, ssl_cert)
+    end
+
+    # Ensure the document root exists before nginx tries to serve from it.
+    # Skip subdomains whose root is managed by an ftp_mount_enabled S3 backend —
+    # the mount point is the S3 bucket itself, so writing a placeholder index.html
+    # would either land on the local filesystem (confusing) or get written into S3
+    # via the FUSE mount (potentially overwriting real content).
+    s3_mounted_subdomain_names =
+      s3_backends
+      |> Enum.filter(&(&1.ftp_mount_enabled && &1.url_path == ""))
+      |> Enum.map(& &1.subdomain)
+      |> MapSet.new()
+
+    root_result =
+      if runtime[:isolated] do
+        :ok
+      else
+        roots =
+          [domain.document_root || "/var/www/#{domain.name}/httpdocs"] ++
+            (subdomains
+             |> Enum.reject(&MapSet.member?(s3_mounted_subdomain_names, &1.name))
+             |> Enum.map(
+               &(&1.document_root || "/var/www/#{domain.name}/#{&1.name}.#{domain.name}")
+             ))
+
+        Enum.reduce_while(roots, :ok, fn root, :ok ->
+          case provision_webroot(root) do
+            {:error, _} = error -> {:halt, error}
+            _ -> {:cont, :ok}
+          end
+        end)
       end
 
-      # Ensure the document root exists before nginx tries to serve from it.
-      # Skip subdomains whose root is managed by an ftp_mount_enabled S3 backend —
-      # the mount point is the S3 bucket itself, so writing a placeholder index.html
-      # would either land on the local filesystem (confusing) or get written into S3
-      # via the FUSE mount (potentially overwriting real content).
-      s3_mounted_subdomain_names =
-        s3_backends
-        |> Enum.filter(&(&1.ftp_mount_enabled && &1.url_path == ""))
-        |> Enum.map(& &1.subdomain)
-        |> MapSet.new()
-
-      provision_webroot(domain.document_root || "/var/www/#{domain.name}/httpdocs")
-
-      Enum.each(subdomains, fn sub ->
-        sub_root =
-          sub.document_root ||
-            "/var/www/#{domain.name}/#{sub.name}.#{domain.name}"
-
-        unless MapSet.member?(s3_mounted_subdomain_names, sub.name) do
-          provision_webroot(sub_root)
-        end
-      end)
-
-      config = Nginx.generate_config(domain, subdomains, ssl_cert, proxies, s3_backends)
+    with :ok <- root_result do
+      config = Nginx.generate_config(domain, subdomains, ssl_cert, proxies, s3_backends, runtime)
+      previous_config = File.read(sites_available_path(domain))
+      previous_link = File.read_link(sites_enabled_path(domain))
 
       case write_vhost(domain, config) do
         :ok ->
-          reload()
-          RcloneMount.sync_mounts(domain, subdomains, s3_backends)
+          case reload() do
+            :ok ->
+              RcloneMount.sync_mounts(domain, subdomains, s3_backends)
+
+            {:error, _} = error ->
+              if runtime[:isolated], do: restore_vhost(domain, previous_config, previous_link)
+              error
+          end
 
         {:error, reason} ->
           Logger.error(
@@ -100,8 +125,21 @@ defmodule Hostctl.WebServer do
 
           {:error, reason}
       end
-    else
-      :ok
+    end
+  end
+
+  defp restore_vhost(domain, previous_config, previous_link) do
+    case previous_config do
+      {:ok, content} -> File.write(sites_available_path(domain), content)
+      {:error, :enoent} -> File.rm(sites_available_path(domain))
+      _ -> :ok
+    end
+
+    File.rm(sites_enabled_path(domain))
+
+    case previous_link do
+      {:ok, target} -> File.ln_s(target, sites_enabled_path(domain))
+      _ -> :ok
     end
   end
 
@@ -248,6 +286,14 @@ defmodule Hostctl.WebServer do
   # Files are chowned to www-data so FTP virtual users (who run as www-data)
   # can manage them.
   defp provision_webroot(path) do
+    if Hostctl.Isolation.Runtime.enrolled?() do
+      Hostctl.Isolation.Runtime.legacy_chown(path)
+    else
+      provision_legacy_webroot(path)
+    end
+  end
+
+  defp provision_legacy_webroot(path) do
     # Use sudo to create the directory tree — /var/www/<domain> may be
     # owned by root (e.g. after an rsync import) and the app user cannot
     # create nested directories inside it.
@@ -293,6 +339,14 @@ defmodule Hostctl.WebServer do
 
   @doc "Recursively chown the given path to www-data:www-data via sudo."
   def chown_to_www_data(path) do
+    with :ok <- Hostctl.Isolation.Runtime.legacy_write_allowed(path) do
+      if Hostctl.Isolation.Runtime.enrolled?(),
+        do: Hostctl.Isolation.Runtime.legacy_chown(path),
+        else: do_chown_to_www_data(path)
+    end
+  end
+
+  defp do_chown_to_www_data(path) do
     args = [
       "systemd-run",
       "--pipe",

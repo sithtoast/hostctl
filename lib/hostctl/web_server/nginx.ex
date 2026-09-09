@@ -43,22 +43,28 @@ defmodule Hostctl.WebServer.Nginx do
         subdomains \\ [],
         ssl_cert \\ nil,
         proxies \\ [],
-        s3_backends \\ []
+        s3_backends \\ [],
+        runtime \\ []
       ) do
-    if domain.status == "suspended" do
-      suspended_config(domain)
-    else
-      active_config(domain, subdomains, ssl_cert, proxies, s3_backends)
-    end
+    config =
+      if domain.status == "suspended" do
+        suspended_config(domain)
+      else
+        active_config(domain, subdomains, ssl_cert, proxies, s3_backends, runtime)
+      end
+
+    if runtime[:isolated],
+      do: String.replace(config, "server {\n", "server {\n    disable_symlinks on;\n"),
+      else: config
   end
 
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  defp active_config(%Domain{} = domain, subdomains, ssl_cert, proxies, s3_backends) do
+  defp active_config(%Domain{} = domain, subdomains, ssl_cert, proxies, s3_backends, runtime) do
     doc_root = domain.document_root || "/var/www/#{domain.name}/httpdocs"
-    php_socket = php_fpm_socket(domain.php_version)
+    php_socket = runtime[:php_socket] || php_fpm_socket(domain.php_version)
     use_ssl = ssl_active?(domain, ssl_cert, domain.name)
     use_subdomain_ssl = use_ssl and wildcard_subdomains_enabled?(ssl_cert)
     allow_http_with_ssl = domain.allow_http_with_ssl == true

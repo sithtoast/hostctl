@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Apply an already-reviewed staged checkout to the disposable Hostctl dev VM.
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo "Run this staged VM helper with sudo." >&2; exit 1; }
+[[ $# -eq 0 ]] || { echo "This helper takes no arguments." >&2; exit 1; }
+
+staged_source="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+active_source=/var/lib/hostctl/dev
+[[ "$staged_source" != "$active_source" ]] || { echo "Run from the staged checkout, not the active source." >&2; exit 1; }
+[[ -f "$staged_source/priv/isolation/runtime.py" && -f "$active_source/mix.exs" && -f /etc/hostctl/env ]]
+
+backup_dir="/var/backups/hostctl/isolation-rollout-$(date -u +%Y%m%dT%H%M%SZ)"
+install -d -m 0700 "$backup_dir"
+tar -czf "$backup_dir/source-before.tar.gz" -C "$active_source" \
+  --exclude='./deps' --exclude='./_build' --exclude='./.git' --exclude='./.env*' \
+  --exclude='./priv/static/assets' --exclude='./tmp' .
+source_owner="$(stat -c %U "$active_source")"
+
+recover() {
+  trap - ERR
+  echo "Rollout failed. Restoring prior source from $backup_dir/source-before.tar.gz" >&2
+  systemctl stop hostctl-dev.service || true
+  tar -xzf "$backup_dir/source-before.tar.gz" -C "$active_source"
+  # The new migration is additive; do not remove identity records on recovery.
+  bash "$active_source/scripts/vm-dev" start || true
+  exit 1
+}
+
+# Install prerequisites before interrupting the development service.
+apt-get install -y --no-install-recommends python3 acl
+echo "Restarting the Hostctl development service to apply the staged isolation code."
+systemctl stop hostctl-dev.service
+trap recover ERR
+rsync -rtog --chown="$source_owner:hostctl" --chmod=Dg+rwx,Fg+rw \
+  --exclude='/.git/' --exclude='/deps/' --exclude='/_build/' \
+  --exclude='/.env*' --exclude='/tmp/' --exclude='/assets/node_modules/' \
+  --exclude='/priv/static/assets/' --exclude='/priv/static/cache_manifest.json' \
+  --exclude='/priv/COMMIT' --exclude='/priv/VERSION' --exclude='__pycache__/' \
+  "$staged_source/" "$active_source/"
+bash "$active_source/scripts/vm-dev" migrate
+bash "$active_source/scripts/vm-dev" start
+systemctl is-active --quiet hostctl-dev.service
+nginx -t
+trap - ERR
+echo "Source applied. No accounts enrolled; Nginx worker identity is unchanged."
+echo "Next: verify the panel, then explicitly enroll an empty account using hostctl.isolation.provision."
+echo "Previous source: $backup_dir/source-before.tar.gz"

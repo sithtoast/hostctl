@@ -1,0 +1,8 @@
+**
+!priv/
+!priv/isolation/
+!priv/isolation/runtime.py
+!test/
+!test/isolation/
+!test/isolation/linux_smoke.py
+!test/isolation/Dockerfile

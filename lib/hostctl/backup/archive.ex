@@ -88,7 +88,8 @@ defmodule Hostctl.Backup.Archive do
       ts = Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
       destination = Path.join(target_root, "restore-#{ts}")
 
-      with :ok <- File.mkdir_p(destination),
+      with :ok <- Hostctl.Isolation.Runtime.legacy_write_allowed(destination),
+           :ok <- File.mkdir_p(destination),
            {_, 0} <- run_extract_cmd(archive_path, destination, safe_members) do
         {:ok, destination}
       else

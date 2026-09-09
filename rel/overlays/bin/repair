@@ -763,6 +763,18 @@ PAMEOF
         local_root="$(grep '^local_root=' "$uconf" 2>/dev/null | cut -d= -f2)"
         [[ -z "$local_root" ]] && continue
 
+        # Isolated boundaries and ACLs are managed by the isolation helper.
+        # Never turn these back into shared www-data trees during repair.
+        isolated_owner="$(grep '^guest_username=hc_[0-9]' "$uconf" 2>/dev/null || true)"
+        protected_parent="$local_root"
+        while [[ "$protected_parent" != / && ! -f "$protected_parent/.hostctl-owner" ]]; do
+          protected_parent="$(dirname "$protected_parent")"
+        done
+        if [[ -n "$isolated_owner" || -f "$protected_parent/.hostctl-owner" || "$local_root" == /var/www ]]; then
+          ok "Preserving isolated FTP ownership for $uname"
+          continue
+        fi
+
         if [[ ! -d "$local_root" ]]; then
           mkdir -p "$local_root"
           fix "created missing FTP home $local_root for user $uname"

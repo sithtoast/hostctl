@@ -103,16 +103,20 @@ defmodule Hostctl.FtpServer do
   end
 
   defp do_provision(%FtpAccount{} = account, raw_password) do
-    with :ok <- write_user_conf(account),
-         :ok <- teardown_all_mounts(account.username),
+    with {:ok, identity} <- Hostctl.Isolation.Runtime.ftp_identity(account),
+         :ok <- write_user_conf(account, identity),
+         :ok <- maybe_teardown_mounts(account, identity),
          :ok <- provision_mounts(account),
-         :ok <- maybe_ensure_home_dir_writable(account),
+         :ok <- maybe_ensure_home_dir_writable(account, identity),
          :ok <- upsert_user_entry(account.username, raw_password),
          :ok <- rebuild_user_db(),
          :ok <- reload() do
       :ok
     end
   end
+
+  defp maybe_teardown_mounts(account, nil), do: teardown_all_mounts(account.username)
+  defp maybe_teardown_mounts(_account, _identity), do: :ok
 
   defp do_remove(%FtpAccount{} = account) do
     with :ok <- remove_user_conf(account),
@@ -248,11 +252,14 @@ defmodule Hostctl.FtpServer do
 
   # Ensures the home directory is set up for single-directory accounts.
   # Skipped when the account uses virtual bind mounts.
-  defp maybe_ensure_home_dir_writable(%FtpAccount{mounts: mounts}) when mounts not in [nil, []] do
+  defp maybe_ensure_home_dir_writable(_account, identity) when not is_nil(identity), do: :ok
+
+  defp maybe_ensure_home_dir_writable(%FtpAccount{mounts: mounts}, nil)
+       when mounts not in [nil, []] do
     :ok
   end
 
-  defp maybe_ensure_home_dir_writable(%FtpAccount{} = account) do
+  defp maybe_ensure_home_dir_writable(%FtpAccount{} = account, nil) do
     ensure_home_dir_writable(account)
   end
 
@@ -261,6 +268,14 @@ defmodule Hostctl.FtpServer do
   defp ensure_home_dir_writable(%FtpAccount{home_dir: nil}), do: :ok
 
   defp ensure_home_dir_writable(%FtpAccount{home_dir: home_dir}) do
+    if Hostctl.Isolation.Runtime.enrolled?() do
+      Hostctl.Isolation.Runtime.legacy_chown(home_dir)
+    else
+      ensure_legacy_home_dir_writable(home_dir)
+    end
+  end
+
+  defp ensure_legacy_home_dir_writable(home_dir) do
     with :ok <- escaped_mkdir_p(home_dir) do
       # Recursively chown so subdirectories (e.g. public/ inside the domain root)
       # are also writable by www-data, not just the top-level chroot directory.
@@ -282,10 +297,18 @@ defmodule Hostctl.FtpServer do
   # so vsftpd chroots the virtual user to their configured root directory.
   # For multi-directory accounts, local_root points to the virtual bind-mount
   # root rather than a single home_dir.
-  defp write_user_conf(%FtpAccount{} = account) do
+  defp write_user_conf(%FtpAccount{} = account, identity) do
     dir = user_conf_dir()
     path = Path.join(dir, account.username)
 
+    with :ok <- escaped_mkdir_p(dir),
+         :ok <- escaped_write(path, user_config(account, identity)) do
+      :ok
+    end
+  end
+
+  @doc false
+  def user_config(%FtpAccount{} = account, identity) do
     local_root =
       if account.mounts && account.mounts != [] do
         ftp_virtual_root(account.username)
@@ -299,9 +322,11 @@ defmodule Hostctl.FtpServer do
     virtual_use_local_privs=YES
     """
 
-    with :ok <- escaped_mkdir_p(dir),
-         :ok <- escaped_write(path, content) do
-      :ok
+    if identity do
+      content <>
+        "guest_username=#{identity.username}\nlocal_umask=027\nfile_open_mode=0660\nchmod_enable=NO\n"
+    else
+      content
     end
   end
 

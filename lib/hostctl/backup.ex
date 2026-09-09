@@ -647,6 +647,12 @@ defmodule Hostctl.Backup do
   """
   def restore_raw_s3_domain(domain_name, target_dir)
       when is_binary(domain_name) and is_binary(target_dir) do
+    with :ok <- Hostctl.Isolation.Runtime.legacy_write_allowed(target_dir) do
+      do_restore_raw_s3_domain(domain_name, target_dir)
+    end
+  end
+
+  defp do_restore_raw_s3_domain(domain_name, target_dir) do
     settings = get_or_create_settings()
 
     case list_raw_s3_domain_files(domain_name) do
@@ -778,6 +784,12 @@ defmodule Hostctl.Backup do
   end
 
   defp restore_s3_prefix_to_dir(prefix, target_dir, list_fn) do
+    with :ok <- Hostctl.Isolation.Runtime.legacy_write_allowed(target_dir) do
+      do_restore_s3_prefix_to_dir(prefix, target_dir, list_fn)
+    end
+  end
+
+  defp do_restore_s3_prefix_to_dir(prefix, target_dir, list_fn) do
     settings = get_or_create_settings()
 
     case list_fn.(prefix) do

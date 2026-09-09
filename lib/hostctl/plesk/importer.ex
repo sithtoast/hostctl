@@ -1408,6 +1408,12 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp ensure_local_directory(path) do
+    with :ok <- Hostctl.Isolation.Runtime.legacy_write_allowed(path) do
+      do_ensure_local_directory(path)
+    end
+  end
+
+  defp do_ensure_local_directory(path) do
     args = ["mkdir", "-p", path]
 
     case System.cmd("sudo", ["systemd-run", "--pipe", "--wait", "--collect", "--quiet" | args],
@@ -1442,6 +1448,12 @@ defmodule Hostctl.Plesk.Importer do
   end
 
   defp do_rsync(ssh_opts, remote_path, local_path, opts) do
+    with :ok <- Hostctl.Isolation.Runtime.legacy_write_allowed(local_path) do
+      do_unisolated_rsync(ssh_opts, remote_path, local_path, opts)
+    end
+  end
+
+  defp do_unisolated_rsync(ssh_opts, remote_path, local_path, opts) do
     host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
     port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
     username = normalize_string(Map.get(ssh_opts, :username) || Map.get(ssh_opts, "username"))

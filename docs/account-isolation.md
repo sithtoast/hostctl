@@ -1,8 +1,8 @@
 # Per-account system identities
 
-Design and implementation roadmap, September 9, 2026. Identity reservations and
-database preflight are implemented. The application still uses shared website
-ownership and PHP sockets; runtime isolation is not yet implemented.
+Design and implementation roadmap, September 9, 2026. Identity reservations,
+database preflight, and opt-in Linux enrollment for empty accounts are implemented.
+Existing accounts retain their legacy runtime until a separate migration.
 
 ## First implementation milestone
 
@@ -41,10 +41,94 @@ inspect the Linux filesystem, lock out writers, detect live backup/restore work,
 or establish that migration is safe. `apply_supported` is always false. Even a
 report with no findings requires the listed live checks; there is no apply mode.
 
-The next milestone is the Linux identity provisioner and service configuration
-integration, followed by resumable ownership migration and two-account Linux
-acceptance checks. Reserving an identity is not an activation gate yet: existing
-provisioning continues to behave as before until those service changes land.
+Reservations alone do not activate isolation. Use the enrollment command below
+before adding hosting resources. Resumable conversion of existing accounts is
+the next milestone.
+
+## Linux enrollment and runtime
+
+On the Linux host, with the intended environment configured and the database
+migrated, enroll an empty panel account:
+
+```sh
+mix hostctl.isolation.provision --user-id 123
+```
+
+The command requires the normal Hostctl `sudo systemd-run` capability, Python 3,
+`acl`, Nginx, and the desired PHP-FPM versions. The installer includes Python and
+ACL tools. The command starts only the repository. No new routes or LiveViews
+are added; normal authenticated domain and FTP management remains in place.
+
+Enrollment does the following:
+
+- Creates a locked `hc_<owner_id>` Linux user and private group, verifies their
+  login policy and numeric IDs, and records readiness. Existing unrelated users
+  or groups are rejected. Root-owned records under `/var/lib/hostctl-isolation`
+  contain random ownership markers so retries can recognize partial provisioning.
+- Separates Nginx into the locked `hostctl-web` identity. Its supplementary
+  `www-data` group preserves access to legacy PHP sockets. New account ACLs and
+  sockets grant access to the named web identity, not to legacy PHP's `www-data`
+  identity. Nginx config is validated before reload; the initial config is saved
+  at `/var/lib/hostctl-isolation/nginx-before-isolation.conf`.
+- Applies an HTTP-wide `disable_symlinks if_not_owner` policy to stop legacy
+  vhosts from exposing other accounts through symlinks. Isolated vhosts use the
+  stricter `disable_symlinks on`. Existing symlink-dependent sites and custom
+  Nginx worker configurations need review before enrollment.
+- Creates canonical `/var/www/<domain>` boundaries owned by root with the
+  tenant's private group, then account-owned document roots and inherited web
+  reader ACLs. Directory operations use no-follow file descriptors. Existing
+  unclaimed trees are rejected instead of recursively converted.
+- Generates one PHP pool per account/version, with an account UID/GID and a
+  socket accessible only to `hostctl-web`. Sessions and temporary files live
+  under `/var/lib/hostctl-accounts/<username>` in private account-owned directories.
+- Maps single-directory FTP accounts to the owner's Linux identity, with upload
+  modes that preserve inherited read access and `SITE CHMOD` disabled. Normal
+  FTP credentials remain virtual credentials; SSH/SFTP is not enabled.
+
+Enrollment is serialized against the account's first domain/FTP creation. Failed
+enrollment persists a failed state and blocks shared-runtime fallback. Retry the
+same enrollment command after correcting the underlying issue. New domain/FTP
+creation rolls back its database changes when service provisioning fails;
+root-side identity/path claims remain available for retries. Nginx reload failure
+restores an isolated vhost's previous on-disk configuration.
+
+Once isolation is in use, legacy ownership maintenance uses a descriptor-based
+helper that rejects symlinks, hard links, foreign owners and isolated boundaries.
+The repair script preserves isolated FTP roots. Local imports and restores into
+known isolated boundaries are rejected pending their dedicated migration work.
+
+The supported initial flow is an empty owner, canonical new domain trees,
+installed PHP versions and single-directory FTP. Existing hosted accounts,
+custom document roots, and isolated FTP bind/FUSE mounts are rejected. S3 HTTP
+proxy serving remains available without FTP mounts. Cron execution, container
+identity integration, account-wide suspension, SSH/SFTP and ownership conversion
+are not implemented by this milestone. Broad control-plane sudo access remains
+a separate hardening task.
+
+## Validation and VM rollout
+
+Run `mix precommit` for Elixir checks. The disposable Linux test exercises actual
+Nginx, PHP-FPM and vsftpd with two accounts, including PHP UIDs, static access,
+sessions, FTP upload/rename/delete ownership, cross-account and legacy-PHP denial,
+symlink denial, enrollment retries, OS collisions and protected legacy chown:
+
+```sh
+docker build -f test/isolation/Dockerfile -t hostctl-isolation-test:local .
+docker run --rm hostctl-isolation-test:local
+```
+
+The Docker build context is restricted to the helper and smoke test. These tests
+do not prove the VM's systemd reload behavior or its existing-site compatibility.
+The smoke test refuses to run outside a disposable Docker container.
+
+`scripts/vm-isolation-apply` applies a staged source checkout to the test VM,
+backs up the previous source, installs Python/ACL prerequisites, migrates and
+restarts `hostctl-dev`. It does not enroll any accounts or change Nginx's worker
+identity. Enrollment is a subsequent explicit operator action. Run the apply
+script from the staged checkout as root; it refuses to run from the active one.
+
+Linux validation passed on Ubuntu 24.04 with PHP 8.3. VM deployment and live
+enrollment remain unverified until the staged root command is run.
 
 ## Ownership boundary
 
