@@ -47,9 +47,14 @@ defmodule Hostctl.Hosting.Domain do
   end
 
   @valid_statuses ~w(active suspended pending)
-  @valid_php_versions ~w(7.4 8.0 8.1 8.2 8.3 8.4)
+  @valid_php_versions ~w(7.4 8.0 8.1 8.2 8.3 8.4 8.5)
 
   def changeset(domain, attrs) do
+    domain =
+      if is_nil(domain.id),
+        do: %{domain | php_version: Application.get_env(:hostctl, :default_php_version, "8.3")},
+        else: domain
+
     domain
     |> cast(attrs, [
       :name,

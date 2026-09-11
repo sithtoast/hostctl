@@ -20,6 +20,25 @@ defmodule Hostctl.IsolationRuntimeTest do
     %{scope: unconfirmed_user_fixture() |> Scope.for_user()}
   end
 
+  test "Ubuntu 26.04 default selects PHP 8.5 without changing existing domains" do
+    previous = Application.get_env(:hostctl, :default_php_version)
+    Application.put_env(:hostctl, :default_php_version, "8.5")
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:hostctl, :default_php_version, previous),
+        else: Application.delete_env(:hostctl, :default_php_version)
+    end)
+
+    assert get_field(Domain.changeset(%Domain{}, %{name: "new.example.com"}), :php_version) ==
+             "8.5"
+
+    assert get_field(Domain.changeset(%Domain{id: 1, php_version: "8.3"}, %{}), :php_version) ==
+             "8.3"
+
+    assert get_field(Domain.changeset(%Domain{}, %{php_version: "8.2"}), :php_version) == "8.2"
+  end
+
   test "Plesk owners are enrolled before receiving hosting resources" do
     assert {:ok, user} =
              Hostctl.Accounts.create_import_user(%{name: "Imported", email: unique_user_email()})

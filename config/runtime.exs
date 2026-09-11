@@ -1,5 +1,7 @@
 import Config
 
+config :hostctl, :default_php_version, System.get_env("HOSTCTL_DEFAULT_PHP_VERSION", "8.3")
+
 vm_dev? = config_env() == :dev and System.get_env("HOSTCTL_VM_DEV") in ~w(1 true)
 
 # config/runtime.exs is executed for all environments, including

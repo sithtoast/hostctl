@@ -22,7 +22,7 @@ import tempfile
 STATE = "/var/lib/hostctl-isolation"
 HOMES = "/var/lib/hostctl-accounts"
 WEB = "hostctl-web"
-VERSIONS = {"7.4", "8.0", "8.1", "8.2", "8.3", "8.4"}
+VERSIONS = {"7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"}
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 

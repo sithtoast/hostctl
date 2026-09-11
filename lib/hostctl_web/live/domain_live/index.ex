@@ -302,6 +302,7 @@ defmodule HostctlWeb.DomainLive.Index do
                   type="select"
                   label="PHP Version"
                   options={[
+                    {"PHP 8.5", "8.5"},
                     {"PHP 8.4", "8.4"},
                     {"PHP 8.3", "8.3"},
                     {"PHP 8.2", "8.2"},

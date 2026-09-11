@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Hostctl installer for Ubuntu 22.04/24.04 and Debian 12.
+# Hostctl installer for Ubuntu 22.04/24.04/26.04 and Debian 12.
 #
 # Usage:
 #   curl -fsSL https://your-domain.com/install.sh | sudo bash
@@ -167,7 +167,7 @@ cached_download() {
 usage() {
   echo -e ""
   echo -e "${BOLD}Hostctl Installer${NC}"
-  echo -e "Supported OS: Ubuntu 22.04/24.04, Debian 12"
+  echo -e "Supported OS: Ubuntu 22.04/24.04, Debian 12; Ubuntu 26.04 experimental"
   echo -e ""
   echo -e "${BOLD}USAGE${NC}"
   echo -e "  sudo bash install.sh [OPTIONS]"
@@ -419,10 +419,11 @@ OS_CODENAME="${VERSION_CODENAME:-}"
 case "$OS_ID-$OS_VERSION" in
   ubuntu-22.04) OS_CODENAME="jammy"    ;;
   ubuntu-24.04) OS_CODENAME="noble"    ;;
+  ubuntu-26.04) OS_CODENAME="resolute"; PHP_VERSIONS="8.5" ;;
   debian-12)    OS_CODENAME="bookworm" ;;
   *)
     warn "Untested OS: ${PRETTY_NAME:-$OS_ID $OS_VERSION}"
-    warn "Only Ubuntu 22.04/24.04 and Debian 12 are officially supported."
+    warn "Supported: Ubuntu 22.04/24.04, Debian 12; Ubuntu 26.04 experimental."
     confirm "Continue anyway? [y/N] " "N" || exit 1
     ;;
 esac
@@ -500,7 +501,7 @@ fi
 
 echo ""
 echo -e "${BOLD}Installation plan:${NC}"
-echo -e "  Erlang/OTP    : $OTP_MAJOR  (rabbitmq/rabbitmq-erlang PPA)"
+echo -e "  Erlang/OTP    : $OTP_MAJOR  (Ubuntu 26.04 native packages; PPA on older releases)"
 echo -e "  Elixir        : $ELIXIR_VERSION  (github.com/elixir-lang/elixir)"
 echo -e "  PostgreSQL    : $POSTGRES_MAJOR  (postgresql.org apt repo)"
 echo -e "  Database      : $DB_FLAVOR_LABEL  ($DB_PACKAGES)"
@@ -536,10 +537,14 @@ apt-get install -y --no-install-recommends \
 mkdir -p "$DOWNLOAD_DIR"
 
 # 1a. Erlang + Elixir: rabbitmq/rabbitmq-erlang PPA ----------------------------
-info "Adding rabbitmq/rabbitmq-erlang PPA (may take a minute)..."
-add-apt-repository -y ppa:rabbitmq/rabbitmq-erlang \
-  || error "Failed to add rabbitmq PPA. Check network connectivity to Launchpad."
-apt-get update -q
+if [[ "$OS_ID-$OS_VERSION" == ubuntu-26.04 ]]; then
+  info "Using Ubuntu 26.04's native Erlang 27 packages"
+else
+  info "Adding rabbitmq/rabbitmq-erlang PPA..."
+  add-apt-repository -y ppa:rabbitmq/rabbitmq-erlang \
+    || error "Failed to add rabbitmq PPA."
+  apt-get update -q
+fi
 
 info "Pre-downloading Erlang (large, this may take several minutes)..."
 apt-get install -y --no-install-recommends --download-only erlang \
@@ -591,8 +596,10 @@ fi
 if [[ "$SKIP_PHP" == false ]]; then
   info "Pre-downloading PHP-FPM packages..."
   # ondrej/php PPA provides all PHP versions on Ubuntu/Debian
-  add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 \
-    || error "Failed to add ondrej/php PPA. Check network connectivity."
+  if [[ "$OS_ID-$OS_VERSION" != ubuntu-26.04 ]]; then
+    add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 \
+      || error "Failed to add ondrej/php PPA. Check network connectivity."
+  fi
   apt-get update -qq
   for _ver in $PHP_VERSIONS; do
     apt-get install -y --no-install-recommends --download-only \
@@ -1082,6 +1089,7 @@ SECRET_KEY_BASE=$SECRET_KEY_BASE
 INITIAL_SETUP_TOKEN=$INITIAL_SETUP_TOKEN
 POOL_SIZE=10
 HOSTCTL_BRANCH=$REPO_BRANCH
+HOSTCTL_DEFAULT_PHP_VERSION=${PHP_VERSIONS%% *}
 ENVEOF
 
   chmod 640 "$ENV_FILE"
