@@ -41,6 +41,21 @@ See [Domain statistics](domain-statistics.md) for operation, limits and VM accep
 The investigation below records the original findings and design inputs; its
 references to missing behavior describe the pre-change baseline.
 
+## Native summary follow-up
+
+Replaced the embedded GoAccess window with a new-tab **Open full report** link.
+Hostctl displays headline totals and ranked top-five page/referring-site lists
+from the existing private `report.json`. No additional GoAccess service/API,
+collection change, database migration or route was needed. Existing authenticated
+owner/admin access and isolated report-response CSP remain in place.
+
+`mix precommit`: **302 passed**. Tests cover selected live/history snapshots,
+bounded ranking, malformed JSON/rows, symlink rejection, private report links and
+native lists without an iframe. An isolated browser with real GoAccess output
+from 80 synthetic requests verified the summary, empty history switching, and
+opening a functioning full GoAccess report in another tab. This UI follow-up is
+local only and is not included in the earlier staged `3b42d65` Solid bundle.
+
 ## Default-on follow-up and Solid staging
 
 The user changed collection to opt-out. The additive

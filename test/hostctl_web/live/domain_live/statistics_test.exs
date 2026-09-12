@@ -18,6 +18,14 @@ defmodule HostctlWeb.DomainLive.StatisticsTest do
     File.write!(Path.join(folder, "report.html"), "<h1>Traffic report</h1>")
 
     File.write!(
+      Path.join(folder, "report.json"),
+      Jason.encode!(%{
+        requests: %{data: [%{data: "/articles", method: "GET", hits: %{count: 12}}]},
+        referring_sites: %{data: [%{data: "search.example", hits: %{count: 8}}]}
+      })
+    )
+
+    File.write!(
       Path.join(folder, "archive/" <> archive),
       "<h1>Old report</h1><script>alert(1)</script><img src=x onerror=alert(1)>"
     )
@@ -50,7 +58,15 @@ defmodule HostctlWeb.DomainLive.StatisticsTest do
     archive: archive
   } do
     {:ok, view, _} = live(conn, ~p"/domains/#{domain.id}/statistics")
-    assert has_element?(view, "#statistics-report[sandbox='allow-scripts']")
+
+    assert has_element?(
+             view,
+             "#statistics-report-link[target='_blank'][rel='noopener noreferrer']"
+           )
+
+    refute has_element?(view, "iframe")
+    assert has_element?(view, "#statistics-top-pages", "GET /articles")
+    assert has_element?(view, "#statistics-top-sources", "search.example")
     assert has_element?(view, "#statistics-updated")
     view |> element("#statistics-history") |> render_click()
     assert has_element?(view, "#statistics-history-reports a", "awstats.html")
@@ -80,7 +96,7 @@ defmodule HostctlWeb.DomainLive.StatisticsTest do
     view |> element("#toggle-statistics") |> render_click()
     assert has_element?(view, "#statistics-collection", "Automatic collection is off")
     assert has_element?(view, "#refresh-statistics[disabled]")
-    assert has_element?(view, "#statistics-report")
+    assert has_element?(view, "#statistics-report-link")
     refute Hostctl.Repo.reload!(domain).statistics_enabled
     view |> element("#toggle-statistics") |> render_click()
     assert Hostctl.Repo.reload!(domain).statistics_enabled

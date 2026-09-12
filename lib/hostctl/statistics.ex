@@ -12,13 +12,16 @@ defmodule Hostctl.Statistics do
   def domain!(%Scope{user: %{role: "admin"}}, id), do: Hosting.get_domain_for_admin!(id)
   def domain!(%Scope{} = scope, id), do: Hosting.get_domain!(scope, id)
 
-  def snapshot(scope, id) do
+  def snapshot(scope, id, kind \\ "live") when kind in ["live", "history"] do
     domain = domain!(scope, id)
+    live = manifest(domain.id, "live")
+    history = manifest(domain.id, "history")
 
     %{
       domain: domain,
-      live: manifest(domain.id, "live"),
-      history: manifest(domain.id, "history"),
+      live: live,
+      history: history,
+      overview: overview(domain.id, if(kind == "history", do: history, else: live)),
       available?: available?()
     }
   end
@@ -115,6 +118,54 @@ defmodule Hostctl.Statistics do
     else
       _ -> nil
     end
+  end
+
+  defp overview(id, %{"generation" => generation}) do
+    path = Path.join([root(), to_string(id), generation, "report.json"])
+
+    with :ok <- regular_path(path),
+         {:ok, stat} <- File.stat(path),
+         true <- stat.size <= 32 * 1024 * 1024,
+         {:ok, body} <- File.read(path),
+         {:ok, report} when is_map(report) <- Jason.decode(body) do
+      %{pages: top_rows(report, "requests"), sources: top_rows(report, "referring_sites")}
+    else
+      _ -> nil
+    end
+  end
+
+  defp overview(_id, _manifest), do: nil
+
+  defp top_rows(report, key) do
+    rows =
+      case report[key] do
+        %{"data" => rows} when is_list(rows) -> rows
+        _ -> []
+      end
+
+    rows =
+      rows
+      |> Enum.flat_map(fn
+        %{"data" => label, "hits" => %{"count" => hits}} = row
+        when is_binary(label) and is_integer(hits) and hits >= 0 ->
+          method =
+            if key == "requests" and is_binary(row["method"]), do: row["method"] <> " ", else: ""
+
+          [%{label: String.slice(method <> label, 0, 512), hits: hits}]
+
+        _ ->
+          []
+      end)
+      |> Enum.sort_by(& &1.hits, :desc)
+      |> Enum.take(5)
+
+    maximum = Enum.reduce(rows, 1, &max(&1.hits, &2))
+
+    rows
+    |> Enum.with_index(1)
+    |> Enum.map(fn {row, rank} ->
+      Map.merge(row, %{id: rank, width: round(row.hits / maximum * 100)})
+    end)
   end
 
   defp regular_path(path) do

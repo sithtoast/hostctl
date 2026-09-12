@@ -53,6 +53,45 @@ defmodule Hostctl.StatisticsTest do
     assert {:error, :not_found} = Statistics.read_report(scope, domain.id, "live")
   end
 
+  test "overview reads only the selected private snapshot and bounds ranked rows", %{
+    scope: scope,
+    domain: domain,
+    root: root
+  } do
+    base = Path.join(root, to_string(domain.id))
+    live_gen = "g-" <> String.duplicate("d", 32)
+    history_gen = "g-" <> String.duplicate("e", 32)
+
+    for {kind, generation} <- [{"live", live_gen}, {"history", history_gen}] do
+      File.mkdir_p!(Path.join(base, generation))
+      File.write!(Path.join(base, kind <> ".json"), Jason.encode!(%{generation: generation}))
+    end
+
+    rows = for n <- 1..8, do: %{data: "/page#{n}", hits: %{count: n}}
+    live_path = Path.join([base, live_gen, "report.json"])
+
+    File.write!(
+      live_path,
+      Jason.encode!(%{requests: %{data: rows ++ [%{data: "bad", hits: nil}]}})
+    )
+
+    File.write!(
+      Path.join([base, history_gen, "report.json"]),
+      Jason.encode!(%{requests: %{data: [%{data: "/old", hits: %{count: 42}}]}})
+    )
+
+    overview = Statistics.snapshot(scope, domain.id).overview
+    assert length(overview.pages) == 5
+    assert hd(overview.pages).label == "/page8"
+    assert overview.sources == []
+    assert hd(Statistics.snapshot(scope, domain.id, "history").overview.pages).label == "/old"
+    File.write!(live_path, "invalid JSON")
+    assert Statistics.snapshot(scope, domain.id).overview == nil
+    File.rm!(live_path)
+    File.ln_s!("/etc/passwd", live_path)
+    assert Statistics.snapshot(scope, domain.id).overview == nil
+  end
+
   test "existing and new domains collect without a report, with a persistent owner opt-out", %{
     scope: scope,
     domain: domain

@@ -11,7 +11,13 @@ are retained and an already-running collection may finish. **Enable collection**
 resumes future hourly collection.
 The domain and its configured local/S3 subdomains are included.
 
-Reports show requested pages, downloads, referrers, HTTP errors, traffic and
+The Hostctl page shows request/visitor/transfer totals and ranked top-five pages
+and referring sites, read from the same private GoAccess JSON snapshot. **Open
+full report** opens the complete GoAccess HTML report in a separate tab. There is
+no embedded frame or additional API service. Historical GoAccess snapshots use
+the same summary; missing/unreadable JSON leaves the full-report link available.
+
+Full reports show requested pages, downloads, referrers, HTTP errors, traffic and
 estimated visitors. They are server-log statistics: bots are included, referrers
 can be absent, and CDN cache hits that never reach the server are absent.
 Countries require a service-readable GeoIP MMDB file configured with
@@ -99,7 +105,7 @@ the `:browser` and `:require_authenticated_user` pipelines. The controller repor
 route uses the same authenticated scope. Both check domain ownership or explicit
 administrator access; report URLs do not bypass login.
 
-GoAccess HTML runs in an opaque-origin sandbox allowing scripts, without
+The standalone GoAccess HTML response runs in an opaque-origin sandbox allowing scripts, without
 `allow-same-origin`. Its bundled template compiler requires `unsafe-eval` only
 on this isolated report response. Network connections, forms and external assets
 are blocked. Preserved Plesk HTML has scripts disabled and is additionally

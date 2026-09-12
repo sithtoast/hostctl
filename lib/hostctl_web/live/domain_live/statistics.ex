@@ -64,11 +64,17 @@ defmodule HostctlWeb.DomainLive.Statistics do
   end
 
   defp load_snapshot(socket, id) do
-    snapshot = Statistics.snapshot(socket.assigns.current_scope, id)
+    snapshot = Statistics.snapshot(socket.assigns.current_scope, id, socket.assigns.kind)
     reports = if snapshot.history, do: snapshot.history["reports"] || [], else: []
 
     socket
     |> assign(:snapshot, snapshot)
+    |> stream(:top_pages, if(snapshot.overview, do: snapshot.overview.pages, else: []),
+      reset: true
+    )
+    |> stream(:top_sources, if(snapshot.overview, do: snapshot.overview.sources, else: []),
+      reset: true
+    )
     |> stream(:history_reports, Enum.map(reports, &Map.put(&1, :id, &1["id"])), reset: true)
   end
 
@@ -242,17 +248,49 @@ defmodule HostctlWeb.DomainLive.Statistics do
                 </p>
               </div>
             </div>
-            <iframe
-              id="statistics-report"
-              title="GoAccess traffic report"
-              sandbox="allow-scripts"
-              referrerpolicy="no-referrer"
-              src={
-                ~p"/domains/#{@snapshot.domain.id}/statistics/report/#{@kind}?v=#{@data["updated_at"]}"
-              }
-              class="h-[850px] w-full rounded-xl border border-gray-200 bg-white dark:border-gray-800"
-            >
-            </iframe>
+            <div class="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-indigo-100 bg-indigo-50/50 p-5 dark:border-indigo-900/50 dark:bg-indigo-950/20">
+              <div>
+                <p class="font-medium">Explore the full traffic report</p>
+                <p class="mt-1 text-sm text-gray-500">
+                  Daily trends, downloads, browsers, visitor locations, and HTTP errors.
+                </p>
+              </div>
+              <.link
+                id="statistics-report-link"
+                href={
+                  ~p"/domains/#{@snapshot.domain.id}/statistics/report/#{@kind}?v=#{@data["updated_at"]}"
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+                referrerpolicy="no-referrer"
+                class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
+              >
+                Open full report <.icon name="hero-arrow-top-right-on-square" class="h-4 w-4" />
+                <span class="sr-only">in a new tab</span>
+              </.link>
+            </div>
+            <%= if @snapshot.overview do %>
+              <div class="grid gap-5 lg:grid-cols-2">
+                <.traffic_list
+                  id="statistics-top-pages"
+                  title="Top pages"
+                  subtitle="Most requested pages · top 5"
+                  rows={@streams.top_pages}
+                  empty="No requested pages recorded."
+                />
+                <.traffic_list
+                  id="statistics-top-sources"
+                  title="Referring sites"
+                  subtitle="Where recorded referrals came from · top 5"
+                  rows={@streams.top_sources}
+                  empty="No referring sites recorded. Direct visits and missing referrers are not listed."
+                />
+              </div>
+            <% else %>
+              <p id="statistics-overview-unavailable" class="text-sm text-gray-500">
+                The quick summary is unavailable for this snapshot. You can still open the full report.
+              </p>
+            <% end %>
           <% end %>
         <% else %>
           <div
@@ -300,6 +338,38 @@ defmodule HostctlWeb.DomainLive.Statistics do
         </p>
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :title, :string, required: true
+  attr :subtitle, :string, required: true
+  attr :rows, :any, required: true
+  attr :empty, :string, required: true
+
+  defp traffic_list(assigns) do
+    ~H"""
+    <section class="min-w-0 rounded-xl border border-gray-200 p-5 dark:border-gray-800">
+      <h2 class="font-semibold">{@title}</h2>
+      <p class="mt-1 text-xs text-gray-500">{@subtitle}</p>
+      <div id={@id} phx-update="stream" class="mt-5 space-y-4">
+        <p id={@id <> "-empty"} class="hidden only:block py-4 text-sm text-gray-500">{@empty}</p>
+        <div :for={{id, row} <- @rows} id={id}>
+          <div class="flex items-start justify-between gap-4 text-sm">
+            <span class="min-w-0 break-all" title={row.label}>{row.label}</span>
+            <span class="shrink-0 tabular-nums text-gray-500">
+              {row.hits} <span class="text-xs">requests</span>
+            </span>
+          </div>
+          <div
+            class="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800"
+            aria-hidden="true"
+          >
+            <div class="h-full rounded-full bg-indigo-500/70" style={"width: #{row.width}%"}></div>
+          </div>
+        </div>
+      </div>
+    </section>
     """
   end
 end
