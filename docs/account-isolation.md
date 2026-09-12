@@ -371,6 +371,8 @@ Plesk import. Post-reboot FTP verification output for this final clean install h
 not been supplied; only the earlier repaired trial has an explicit reboot pass.
 
 Cloudflare was enabled manually after import. Live logs showed SRV payloads missing
-`weight` and a duplicate NS record rejection. DNS synchronization fixes and the
-question of user-friendly system identity names are deferred to a separate task;
-see `docs/development-memory.md` for the handoff.
+`weight` and a duplicate NS record rejection. DNS synchronization fixes are now locally regression-tested in the separate
+follow-up, with deployment pending. The system-identity question is about rapid
+resource/process attribution for administrators; the choice between a resource
+view with shell lookup and recognizable Linux names remains pending. See
+`docs/cloudflare-sync-follow-up.md` for the assessment and deployment handoff.

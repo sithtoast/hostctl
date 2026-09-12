@@ -21,15 +21,20 @@
   per the operator's directory listing. Cloudflare was enabled manually after import.
 - Read-only live logs identified three rejected SRV records (`_imaps._tcp`,
   `_pop3s._tcp`, `_smtps._tcp`): "weight is a required data field." An apex NS
-  push failed with "An identical record already exists." These remain unresolved.
-  Start with `lib/hostctl/dns/cloudflare.ex` payload construction and the upsert
-  matching logic in `lib/hostctl/hosting.ex`. Verify current Cloudflare API contracts
-  and add regression coverage. Do not change public DNS merely to investigate.
+  push failed with "An identical record already exists." The separate follow-up
+  fixes structured SRV payloads and conservative full-value matching locally;
+  see [Cloudflare follow-up](cloudflare-sync-follow-up.md) for behavior, official
+  sources, validation limits and proposed deployment/test steps. It is not deployed.
+  The follow-up independently rechecked source `338aa16` and all four active
+  services over the explicit SSH key. No public DNS was changed.
 - System username changes are a separate design question. The helper enforces
   `hc_<owner_id>`; names also appear in reservations, boundary markers, PHP pools,
   sockets, private directories and FTP configuration. A friendly label is simpler;
   actual renaming requires a managed migration preserving numeric UID/GID. Neither
-  approach has been selected or implemented. Do not manually rename live accounts.
+  approach has been selected or implemented. The user clarified the goal is rapid
+  process/resource attribution for administrators. A resource view plus shell
+  PID/UID/username lookup versus recognizable names directly in ps/top is now the
+  pending decision. Do not manually rename live accounts.
 - The user requested merging the isolation work into the default branch (called
   `main` in this repository, not `master`) and continuing these issues in another task.
 - No GitHub push has occurred in this task. Use the locally prepared bundle for
@@ -171,3 +176,12 @@ See [vm-development.md](vm-development.md) for the reusable setup guide.
   recovered mappings leave both off. Enable those separately if desired.
 - Verify the root command, mappings, resumed jobs and live bucket controls after
   the user runs it. Do not claim the patch is installed before then.
+
+## Cloudflare follow-up local validation (September 12, 2026)
+
+- `mix precommit`: 277 tests passed, including Cloudflare HTTP stubs and matching
+  regressions; warnings-as-errors compilation and formatting passed. The historical
+  compiler-warning blocker above did not reproduce in this worktree.
+- The suite logged a background orphan-upload cleanup SQL sandbox disconnect
+  during startup; no tests failed. No deployment or live DNS acceptance occurred.
+- Prepared rollout and recovery steps are in `docs/cloudflare-sync-follow-up.md`.

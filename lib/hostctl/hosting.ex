@@ -379,17 +379,7 @@ defmodule Hostctl.Hosting do
          {:ok, cf_records} <- Cloudflare.list_records(token, cloudflare_zone_id) do
       records = Repo.all(from r in DnsRecord, where: r.dns_zone_id == ^linked_zone.id)
 
-      Enum.each(records, fn record ->
-        case cf_upsert(token, cloudflare_zone_id, cf_records, record, domain.name) do
-          {:ok, cf_id} ->
-            Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_id))
-
-          {:error, reason} ->
-            Logger.warning(
-              "[Cloudflare] Failed to push #{record.type} #{record.name}: #{inspect(reason)}"
-            )
-        end
-      end)
+      sync_cf_records(token, cloudflare_zone_id, cf_records, records, domain.name)
 
       {:ok, linked_zone}
     else
@@ -400,9 +390,9 @@ defmodule Hostctl.Hosting do
   end
 
   @doc """
-  Pushes all local DNS records for the given zone to Cloudflare. Records that
-  already have a `cloudflare_record_id` are updated; others are created and the
-  ID is stored locally.
+  Pushes local DNS records, adopting exact remote values without changing them.
+  Changed values update only a uniquely linked remote ID with the same name/type;
+  unlinked values are created without overwriting other members of a DNS set.
 
   Returns `{:ok, %{synced: n, failed: n}}` or `{:error, :not_linked | :cloudflare_not_configured}`.
   """
@@ -416,23 +406,11 @@ defmodule Hostctl.Hosting do
       local_records = Repo.all(from r in DnsRecord, where: r.dns_zone_id == ^zone.id)
 
       {synced, failed} =
-        Enum.reduce(local_records, {0, 0}, fn record, {ok_count, err_count} ->
-          case cf_upsert(token, cf_zone_id, cf_records, record, domain_name) do
-            {:ok, cf_id} ->
-              if record.cloudflare_record_id != cf_id do
-                Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: cf_id))
-              end
-
-              {ok_count + 1, err_count}
-
-            {:error, reason} ->
-              Logger.warning("[Cloudflare] Sync failed for #{record.name}: #{inspect(reason)}")
-              {ok_count, err_count + 1}
-          end
-        end)
+        sync_cf_records(token, cf_zone_id, cf_records, local_records, domain_name)
 
       {:ok, %{synced: synced, failed: failed}}
     else
+      {:error, reason} -> {:error, reason}
       _ -> {:error, :cloudflare_not_configured}
     end
   end
@@ -581,14 +559,16 @@ defmodule Hostctl.Hosting do
        )
        when is_binary(id) and is_binary(type) and is_binary(name) and is_binary(content) do
     if type in DnsRecord.valid_types() do
+      {value, priority} = Hostctl.DNS.Record.local_value(record)
+
       {:ok,
        %{
          cloudflare_record_id: id,
          type: type,
          name: name,
-         value: content,
+         value: value,
          ttl: normalize_cloudflare_ttl(record["ttl"]),
-         priority: record["priority"]
+         priority: priority
        }}
     else
       :skip
@@ -636,15 +616,26 @@ defmodule Hostctl.Hosting do
   end
 
   defp find_existing_cloudflare_record(%DnsZone{} = zone, attrs) do
-    Repo.one(
+    linked =
+      Repo.one(
+        from r in DnsRecord,
+          where:
+            r.dns_zone_id == ^zone.id and r.cloudflare_record_id == ^attrs.cloudflare_record_id,
+          order_by: r.id,
+          limit: 1
+      )
+
+    candidates =
       from r in DnsRecord,
         where:
-          r.dns_zone_id == ^zone.id and
-            (r.cloudflare_record_id == ^attrs.cloudflare_record_id or
-               (r.type == ^attrs.type and r.name == ^attrs.name and r.value == ^attrs.value)),
-        order_by: [asc: r.id],
-        limit: 1
-    )
+          r.dns_zone_id == ^zone.id and is_nil(r.cloudflare_record_id) and
+            r.type == ^attrs.type and r.name == ^attrs.name and r.value == ^attrs.value,
+        order_by: r.id
+
+    linked ||
+      Enum.find(Repo.all(candidates), fn record ->
+        record.type not in ["MX", "SRV"] or record.priority == attrs.priority
+      end)
   end
 
   defp record_matches_cloudflare?(%DnsRecord{} = record, changes) do
@@ -1460,37 +1451,92 @@ defmodule Hostctl.Hosting do
     end
   end
 
-  # Upserts a record in Cloudflare by matching on name+type against the live CF
-  # record list. Never relies on stored cloudflare_record_id. Updates the
-  # existing CF record if found, otherwise creates a new one.
-  # Returns {:ok, cf_record_id} or {:error, reason}.
-  defp cf_upsert(token, cf_zone_id, cf_records, record, domain_name) do
-    fqdn = to_cf_fqdn(record.name, domain_name)
+  # Carry successful writes forward so duplicate local rows cannot create twice.
+  # Never select a remote record for replacement by name/type alone.
+  defp sync_cf_records(token, zone_id, remote, records, domain) do
+    id_counts = Enum.frequencies_by(records, & &1.cloudflare_record_id)
 
-    match =
-      Enum.find(cf_records, fn cf ->
-        cf_name = String.trim_trailing(cf["name"] || "", ".")
-        cf["type"] == record.type and (cf_name == fqdn or cf_name == record.name)
+    desired =
+      Enum.flat_map(records, fn record ->
+        record = %{record | name: Hostctl.DNS.Record.fqdn(record.name, domain)}
+
+        case Hostctl.DNS.Record.body(record) do
+          {:ok, body} -> [body]
+          {:error, _} -> []
+        end
       end)
 
-    case match do
-      %{"id" => cf_id} ->
-        case Cloudflare.update_record(token, cf_zone_id, cf_id, record) do
-          :ok -> {:ok, cf_id}
-          {:error, _} = err -> err
-        end
+    {synced, failed, _remote} =
+      Enum.reduce(records, {0, 0, remote}, fn record, {synced, failed, current} ->
+        result =
+          with {:ok, id, updated_remote} <-
+                 cf_upsert(token, zone_id, current, record, domain, id_counts, desired),
+               {:ok, _} <- Repo.update(Ecto.Changeset.change(record, cloudflare_record_id: id)) do
+            {:ok, updated_remote}
+          end
 
-      nil ->
-        Cloudflare.create_record(token, cf_zone_id, record)
-    end
+        case result do
+          {:ok, updated_remote} ->
+            {synced + 1, failed, updated_remote}
+
+          {:error, reason} ->
+            Logger.warning(
+              "[Cloudflare] Sync failed for #{record.type} #{record.name}: #{inspect(reason)}"
+            )
+
+            {synced, failed + 1, current}
+        end
+      end)
+
+    {synced, failed}
   end
 
-  defp to_cf_fqdn("@", domain_name), do: domain_name
+  defp cf_upsert(token, zone_id, remote, record, domain, id_counts, desired) do
+    alias Hostctl.DNS.Record
+    record = %{record | name: Record.fqdn(record.name, domain)}
 
-  defp to_cf_fqdn(name, domain_name) do
-    if name == domain_name or String.ends_with?(name, ".#{domain_name}"),
-      do: name,
-      else: "#{name}.#{domain_name}"
+    with {:ok, body} <- Record.body(record) do
+      exact = Enum.find(remote, &Record.same_data?(body, &1))
+
+      linked =
+        Enum.find(
+          remote,
+          &(is_binary(record.cloudflare_record_id) and &1["id"] == record.cloudflare_record_id)
+        )
+
+      cond do
+        exact ->
+          # Adoption preserves provider-owned TTL, proxy status, comments and tags.
+          {:ok, exact["id"], remote}
+
+        linked &&
+            (linked["type"] != record.type || Record.hostname(linked["name"]) != record.name) ->
+          {:error, "Linked Cloudflare record changed name/type; review before synchronizing"}
+
+        linked && Map.get(id_counts, record.cloudflare_record_id) != 1 ->
+          {:error, "Multiple local records share this Cloudflare ID; review before synchronizing"}
+
+        linked && Enum.any?(desired, &Record.same_data?(&1, linked)) ->
+          {:error,
+           "Linked Cloudflare value is required by another local record; review before synchronizing"}
+
+        linked ->
+          # PATCH retains remote fields not represented by Hostctl.
+          record = if linked["proxied"] == true, do: %{record | ttl: 1}, else: record
+
+          with :ok <- Cloudflare.update_record(token, zone_id, linked["id"], record) do
+            updated = Map.merge(linked, Map.put(body, "ttl", record.ttl))
+
+            {:ok, linked["id"],
+             Enum.map(remote, fn cf -> if cf["id"] == linked["id"], do: updated, else: cf end)}
+          end
+
+        true ->
+          with {:ok, id} <- Cloudflare.create_record(token, zone_id, record) do
+            {:ok, id, [Map.put(body, "id", id) | remote]}
+          end
+      end
+    end
   end
 
   # ---------------------------------------------------------------------------

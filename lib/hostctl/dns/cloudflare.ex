@@ -6,6 +6,8 @@ defmodule Hostctl.DNS.Cloudflare do
   Uses the Cloudflare v4 API: https://api.cloudflare.com/client/v4
   """
 
+  alias Hostctl.DNS.Record
+
   @base_url "https://api.cloudflare.com/client/v4"
 
   # ---------------------------------------------------------------------------
@@ -65,11 +67,10 @@ defmodule Hostctl.DNS.Cloudflare do
   Returns `{:ok, cloudflare_record_id}` or `{:error, reason}`.
   """
   def create_record(api_token, cloudflare_zone_id, record) do
-    body = build_record_body(record)
-
-    case post(api_token, "/zones/#{cloudflare_zone_id}/dns_records", body) do
-      {:ok, %{"result" => %{"id" => record_id}}} -> {:ok, record_id}
-      {:error, reason} -> {:error, reason}
+    with {:ok, body} <- Record.body(record),
+         {:ok, %{"result" => %{"id" => record_id}}} <-
+           post(api_token, "/zones/#{cloudflare_zone_id}/dns_records", body) do
+      {:ok, record_id}
     end
   end
 
@@ -79,11 +80,13 @@ defmodule Hostctl.DNS.Cloudflare do
   Returns `:ok` or `{:error, reason}`.
   """
   def update_record(api_token, cloudflare_zone_id, cloudflare_record_id, record) do
-    body = build_record_body(record)
-
-    case put(api_token, "/zones/#{cloudflare_zone_id}/dns_records/#{cloudflare_record_id}", body) do
-      {:ok, _} -> :ok
-      {:error, reason} -> {:error, reason}
+    with {:ok, body} <- Record.body(record),
+         {:ok, _} <-
+           request(
+             api_token,
+             :patch,
+             "/zones/#{cloudflare_zone_id}/dns_records/#{cloudflare_record_id}", json: body) do
+      :ok
     end
   end
 
@@ -116,59 +119,24 @@ defmodule Hostctl.DNS.Cloudflare do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  defp build_record_body(record) do
-    body = %{
-      "type" => Map.get(record, :type),
-      "name" => Map.get(record, :name),
-      "content" => Map.get(record, :value),
-      "ttl" => Map.get(record, :ttl) || 3600
-    }
+  defp get(api_token, path, opts \\ []), do: request(api_token, :get, path, opts)
+  defp post(api_token, path, body), do: request(api_token, :post, path, json: body)
+  defp delete(api_token, path), do: request(api_token, :delete, path, [])
 
-    body =
-      if Map.has_key?(record, :proxied), do: Map.put(body, "proxied", record.proxied), else: body
-
-    if Map.get(record, :priority) do
-      Map.put(body, "priority", Map.get(record, :priority))
-    else
-      body
-    end
-  end
-
-  defp auth_headers(api_token) do
-    [{"Authorization", "Bearer #{api_token}"}, {"Content-Type", "application/json"}]
-  end
-
-  defp get(api_token, path, opts \\ []) do
-    params = Keyword.get(opts, :params, [])
-
-    Req.get(@base_url <> path,
-      params: params,
-      headers: auth_headers(api_token)
+  defp request(api_token, method, path, opts) do
+    Application.get_env(:hostctl, :cloudflare_request_options, [])
+    |> Keyword.merge(opts)
+    |> Keyword.merge(
+      method: method,
+      url: @base_url <> path,
+      headers: [{"Authorization", "Bearer #{api_token}"}, {"Content-Type", "application/json"}]
     )
+    |> Req.request()
     |> handle_response()
   end
 
-  defp post(api_token, path, body) do
-    Req.post(@base_url <> path,
-      json: body,
-      headers: auth_headers(api_token)
-    )
-    |> handle_response()
-  end
-
-  defp put(api_token, path, body) do
-    Req.put(@base_url <> path,
-      json: body,
-      headers: auth_headers(api_token)
-    )
-    |> handle_response()
-  end
-
-  defp delete(api_token, path) do
-    Req.delete(@base_url <> path,
-      headers: auth_headers(api_token)
-    )
-    |> handle_response()
+  defp handle_response({:ok, %Req.Response{body: %{"success" => false} = body}}) do
+    {:error, get_in(body, ["errors", Access.at(0), "message"]) || "Cloudflare request failed"}
   end
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}})
