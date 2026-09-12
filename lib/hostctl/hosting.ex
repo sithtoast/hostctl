@@ -1344,7 +1344,7 @@ defmodule Hostctl.Hosting do
      |> Ecto.Changeset.change()
      |> Ecto.Changeset.add_error(
        :base,
-       "Hosting service provisioning failed. Check account isolation and server configuration before retrying."
+       "Hosting service provisioning failed. Check web server, filesystem permissions, and account provisioning before retrying."
      )}
   end
 

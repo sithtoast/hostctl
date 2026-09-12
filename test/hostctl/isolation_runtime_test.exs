@@ -20,6 +20,44 @@ defmodule Hostctl.IsolationRuntimeTest do
     %{scope: unconfirmed_user_fixture() |> Scope.for_user()}
   end
 
+  test "matching empty admin owner enrolls without changing panel privileges", %{scope: scope} do
+    user = Repo.update!(change(scope.user, role: "admin"))
+
+    assert {:ok, %{state: :ready, user_id: owner_id}} =
+             Runtime.prepare_import_owner(Scope.for_user(user))
+
+    assert owner_id == user.id
+    assert Repo.get!(Hostctl.Accounts.User, user.id).role == "admin"
+    assert {:ok, %{state: :ready}} = Runtime.prepare_import_owner(Scope.for_user(user))
+  end
+
+  test "matching owner with domains preserves legacy hosting", %{scope: scope} do
+    Repo.insert!(%Domain{user_id: scope.user.id, name: "existing-import.example.com"})
+    assert {:ok, nil} = Runtime.prepare_import_owner(scope)
+    assert Isolation.get_identity(scope) == nil
+    refute_receive {:isolation_helper, _, _}
+  end
+
+  test "matching owner with FTP resources preserves legacy hosting", %{scope: scope} do
+    Repo.insert!(%FtpAccount{
+      user_id: scope.user.id,
+      username: "existingimport",
+      hashed_password: "unused-test-fixture",
+      home_dir: "/var/www/existing.example.com"
+    })
+
+    assert {:ok, nil} = Runtime.prepare_import_owner(scope)
+    refute_receive {:isolation_helper, _, _}
+  end
+
+  test "matching empty owner enrollment failure blocks hosting and retries", %{scope: scope} do
+    Process.put(:isolation_fail, "enroll")
+    assert {:error, :test_helper_failure} = Runtime.prepare_import_owner(scope)
+    assert {:error, :account_isolation_not_ready} = Runtime.identity(scope.user.id)
+    Process.delete(:isolation_fail)
+    assert {:ok, %{state: :ready}} = Runtime.prepare_import_owner(scope)
+  end
+
   test "Ubuntu 26.04 default selects PHP 8.5 without changing existing domains" do
     previous = Application.get_env(:hostctl, :default_php_version)
     Application.put_env(:hostctl, :default_php_version, "8.5")

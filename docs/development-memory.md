@@ -1,6 +1,32 @@
 # Development environment memory
 
-Last verified: 2026-09-05 (America/New_York).
+## Current Ubuntu 26.04 isolation trial (September 12, 2026)
+
+- Remote server: `william@192.211.55.181`, hostname `hostctl-dev`, Ubuntu 26.04
+  x86_64. This is a different machine from the historical local VM below.
+- Dedicated SSH key: `/Users/wmh/.ssh/hostctl_ubuntu26_agent`. Use this explicit
+  key with `IdentitiesOnly=yes`; the old `hostctl-dev` SSH alias targets the old VM.
+- SSH and active `hostctl`, Nginx, vsftpd and PHP 8.5 services were rechecked today.
+  Sudo still requires interactive authentication.
+- Panel: `https://solid.toastedlabs.com`. Installed release `/opt/hostctl`, source
+  `/usr/local/src/hostctl`, environment `/etc/hostctl/env`. Never print the env file
+  or FTP test credential state. Source is `ada6c8b` plus applied repair patches;
+  the local branch contains those fixes for the next installer revision.
+- `crohnies.org` imported into the matching admin owner's isolated `hc_1`
+  identity. Its Plesk default page was expected; origin HTTP serving was verified.
+- Operator-supplied output confirms the PHP/filesystem isolation check and FTP
+  protocol checks passed. FTP credentials, files, identities and PHP behavior also
+  survived a reboot; the script verified a changed boot ID and cleaned test sites.
+- A pre-install snapshot was taken after the dedicated SSH key was installed.
+  Restore that snapshot for final clean-install acceptance, retaining the corrected
+  installer/source bundle on the Mac so it survives the rollback. The current
+  working install must not be called a clean-install pass because it used repairs.
+- No GitHub push has occurred in this task. Use the locally prepared bundle for
+  the fresh trial unless a push is explicitly authorized.
+
+## Historical local VM notes
+
+Last verified for the older local VM: 2026-09-05 (America/New_York).
 
 ## Working VM and access
 

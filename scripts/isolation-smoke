@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Run on the installed Hostctl server. No public DNS is required.
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Run with sudo.' >&2; exit 1; }
+[[ $# -eq 0 ]] || { echo 'This script takes no arguments.' >&2; exit 1; }
+exec 9>/run/lock/hostctl-isolation-smoke.lock
+flock -n 9 || { echo 'Another isolation check is running.' >&2; exit 1; }
+source_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/isolation-smoke.exs"
+[[ -f "$source_script" && -x /opt/hostctl/bin/hostctl ]]
+stage=$(mktemp -d /var/lib/hostctl/isolation-check-XXXXXXXX)
+trap 'rm -f -- "$stage/check.exs"; rmdir -- "$stage"' EXIT
+chmod 0755 "$stage"
+install -m 0644 "$source_script" "$stage/check.exs"
+# Use the running service and its existing database/configuration. Never print env.
+set -a
+source /etc/hostctl/env
+set +a
+/opt/hostctl/bin/hostctl rpc "case Code.eval_file(\"$stage/check.exs\") do {:ok, _} -> :ok; _ -> raise \"Isolation check failed; see output\" end"

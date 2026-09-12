@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Repair a fresh install that has the stock vsftpd system-login configuration.
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Run with sudo.' >&2; exit 1; }
+[[ $# -eq 0 ]] || exit 1
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+install -d -m 0750 /var/backups/hostctl
+backup=$(mktemp -d /var/backups/hostctl/ftp-setup-XXXXXXXX)
+chmod 0700 "$backup"
+cp -a /etc/vsftpd.conf "$backup/vsftpd.conf"
+if [[ -f /etc/pam.d/vsftpd.virtual ]]; then
+  cp -a /etc/pam.d/vsftpd.virtual "$backup/vsftpd.virtual"
+fi
+recover() {
+  trap - ERR
+  cp -a "$backup/vsftpd.conf" /etc/vsftpd.conf
+  if [[ -f "$backup/vsftpd.virtual" ]]; then
+    cp -a "$backup/vsftpd.virtual" /etc/pam.d/vsftpd.virtual
+  else
+    rm -f /etc/pam.d/vsftpd.virtual
+  fi
+  systemctl restart vsftpd || true
+  echo "FTP setup failed; previous configuration restored from $backup" >&2
+  exit 1
+}
+trap recover ERR
+set -a
+source /etc/hostctl/env
+set +a
+echo 'Applying Hostctl virtual-user authentication and restarting vsftpd.'
+/opt/hostctl/bin/hostctl rpc 'case Hostctl.FeatureSetup.setup_vsftpd("ftp") do :ok -> :ok; _ -> raise("FTP configuration failed") end'
+# Older installed releases do not restart vsftpd inside setup_vsftpd/1.
+systemctl restart vsftpd
+systemctl is-active --quiet vsftpd
+trap - ERR
+echo "FTP configured. Previous configuration: $backup"
+bash "$script_dir/ftp-isolation-smoke" retry

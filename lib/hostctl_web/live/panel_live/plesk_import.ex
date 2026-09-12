@@ -686,13 +686,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
           categories = config |> Map.get(:categories, MapSet.new()) |> MapSet.to_list()
 
           case resolve_scope(account_email) do
-            {:error, _reason} ->
+            {:error, reason} ->
               results =
                 Map.put(sock.assigns.restore_results, sub.domain, {
                   :error,
                   %{
                     domain: sub.domain,
-                    domain_status: {:failed, "No account selected"},
+                    domain_status: {:failed, reason},
                     categories: %{}
                   }
                 })
@@ -1537,6 +1537,21 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     """
   end
 
+  defp import_progress_label(%{} = result) do
+    summary =
+      "#{Map.get(result, :created, 0)} created, #{Map.get(result, :skipped, 0)} skipped, #{Map.get(result, :failed, 0)} failed"
+
+    case Map.get(result, :note) do
+      note when is_binary(note) -> summary <> ". " <> note
+      _ -> summary
+    end
+  end
+
+  defp import_progress_label(:starting), do: "Starting"
+  defp import_progress_label(:in_progress), do: "Working"
+  defp import_progress_label(status) when is_binary(status), do: status
+  defp import_progress_label(_), do: "Working"
+
   defp render_import_progress(assigns) do
     ~H"""
     <div id="plesk-progress" class="space-y-5">
@@ -1563,7 +1578,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         end}</span>
         </div>
         <p :if={progress} class="mt-2 text-xs text-gray-500">
-          {Map.get(progress, :status, "Working")}
+          {import_progress_label(Map.get(progress, :status))}
         </p>
         <p class="mt-3 text-sm text-gray-500">
           Verification: not recorded. Check the destination website, data, and mail delivery.
@@ -3185,18 +3200,13 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       user ->
         scope = Scope.for_user(user)
 
-        case Hostctl.Isolation.get_identity(scope) do
-          %{state: state} when state in [:provisioning, :failed] ->
-            case Hostctl.Isolation.Runtime.provision_identity(scope) do
-              {:ok, _} ->
-                {:ok, scope}
-
-              {:error, _} ->
-                {:error, "Account isolation is not ready. Retry enrollment before importing."}
-            end
-
-          _ ->
+        case Hostctl.Isolation.Runtime.prepare_import_owner(scope) do
+          {:ok, _identity} ->
             {:ok, scope}
+
+          {:error, _} ->
+            {:error,
+             "Account isolation could not be prepared. No import was started; check account provisioning before retrying."}
         end
     end
   end

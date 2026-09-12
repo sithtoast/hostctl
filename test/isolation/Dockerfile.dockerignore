@@ -6,3 +6,5 @@
 !test/isolation/
 !test/isolation/linux_smoke.py
 !test/isolation/Dockerfile
+!scripts/
+!scripts/ftp-isolation-probe.py

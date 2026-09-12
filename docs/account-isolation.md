@@ -1,8 +1,10 @@
 # Per-account system identities
 
-Design and implementation roadmap, September 9, 2026. Identity reservations,
-database preflight, and opt-in Linux enrollment for empty accounts are implemented.
-Existing accounts retain their legacy runtime until a separate migration.
+Implementation and roadmap, updated September 12, 2026. Identity reservations,
+database preflight, and Linux enrollment for empty owners are implemented. Plesk
+imports automatically enroll new or matching empty owners, including an admin
+account. Owners with existing hosting resources retain their legacy runtime until
+a separate migration.
 
 ## First implementation milestone
 
@@ -94,8 +96,9 @@ restores an isolated vhost's previous on-disk configuration.
 
 Once isolation is in use, legacy ownership maintenance uses a descriptor-based
 helper that rejects symlinks, hard links, foreign owners and isolated boundaries.
-The repair script preserves isolated FTP roots. Local imports and restores into
-known isolated boundaries are rejected pending their dedicated migration work.
+The repair script preserves isolated FTP roots. Plesk local-file imports use
+isolation-aware staging and copying. Other restore paths into known isolated
+boundaries remain blocked pending dedicated migration work.
 
 The supported initial flow is an empty owner, canonical new domain trees,
 installed PHP versions and single-directory FTP. Existing hosted accounts,
@@ -124,11 +127,13 @@ The smoke test refuses to run outside a disposable Docker container.
 `scripts/vm-isolation-apply` applies a staged source checkout to the test VM,
 backs up the previous source, installs Python/ACL prerequisites, migrates and
 restarts `hostctl-dev`. It does not enroll any accounts or change Nginx's worker
-identity. Enrollment is a subsequent explicit operator action. Run the apply
+identity. Enrollment occurs later through the operator CLI or an eligible Plesk import. Run the apply
 script from the staged checkout as root; it refuses to run from the active one.
 
-Linux validation passed on Ubuntu 24.04 with PHP 8.3. VM deployment and live
-enrollment remain unverified until the staged root command is run.
+Container validation passed on Ubuntu 24.04 with PHP 8.3. The subsequent live
+Ubuntu 26.04/PHP 8.5 trial passed enrollment, Plesk file import, PHP/FTP isolation,
+and reboot persistence after the fixes described below. A clean installation
+including all fixes still needs to be verified.
 
 ## Ownership boundary
 
@@ -148,9 +153,11 @@ Disable password and interactive shell login by default. FTP credentials remain
 separate virtual credentials. SSH/SFTP enablement is a separate feature with
 explicit key management and a root-owned chroot where applicable.
 
-## Changes required together
+## Original migration scope
 
-| Area | Current code | Intended behavior |
+This table records the starting point; implemented portions are described above.
+
+| Area | Original behavior | Target behavior |
 | --- | --- | --- |
 | Website files | `WebServer.provision_webroot/1` recursively assigns domain trees to `www-data` | Account-owned files; private account boundaries; narrowly scoped Nginx read/traverse access |
 | PHP | `WebServer.Nginx` selects a shared PHP-version socket | Managed pool per account and PHP version, running as the account UID/GID; Nginx uses its socket |
@@ -240,7 +247,9 @@ PHP/Nginx behavior. Validate those on the test VM before production rollout.
 The Plesk import page now automatically enrolls owners created by either **Create
 account** or **Auto-create accounts** before assigning domains. Each owner gets
 one Linux identity shared by that owner's domains, private PHP pools, and isolated
-single-directory FTP accounts. Existing accounts retain their current runtime.
+single-directory FTP accounts. When starting an import with an existing email
+match, an empty account is enrolled too; its panel role and login remain unchanged.
+Existing owners with domains or FTP accounts retain their current runtime.
 Failed enrollment retains a blocked account; retrying the domain import retries
 its enrollment before creating resources. The provisioning CLI also supports retry.
 
@@ -272,3 +281,88 @@ sudo bash priv/deploy/install.sh --interactive \
 Keep the branch argument: the installer's default is `main`. The disposable Linux
 smoke test covers import-file ownership and service access, but does not substitute
 for a complete fresh installation and a transfer from your Plesk server.
+
+### Live isolation smoke check without public DNS
+
+Run `sudo bash scripts/isolation-smoke` from a checkout containing both
+`scripts/isolation-smoke` and `scripts/isolation-smoke.exs` on an installed server.
+The wrapper assumes the standard `/opt/hostctl` release and `/etc/hostctl/env`.
+It runs against the live application over release RPC; it does not restart the
+panel. Domain provisioning briefly reloads Nginx and PHP-FPM using the normal
+Hostctl path.
+
+The check creates two new panel owners and random `hc-check-*.test` domains with
+DNS templates disabled. Requests go to `127.0.0.1` with the test Host header. It
+checks distinct PHP UIDs, static serving, same-owner reads/writes, cross-owner
+read/write/create/list denial, private PHP session configuration, symlink denial
+through Nginx, legacy `www-data` read denial, and peer PHP socket access denial.
+No public DNS, Cloudflare access, real domain, or FTP password is required.
+
+A `finally` cleanup removes the test domains, their files, and panel users. The
+locked Linux identities, identity tombstones, private homes and PHP pool
+configurations remain reserved under Hostctl's identity-retention policy. Each
+run creates two such reservations. If cleanup fails, the script reports failure
+and identifies the test domain/user needing attention. A killed server/process
+can also require manual cleanup. The check never targets existing websites.
+
+This exercises the installed provisioning and HTTP/PHP services; it does not
+prove FTP protocol behavior, import fidelity, HTTPS, or reboot persistence.
+
+### FTP protocol and reboot persistence check
+
+The companion `scripts/ftp-isolation-smoke` uses the same loopback-only `.test`
+strategy. Keep its `.exs` file and `ftp-isolation-probe.py` alongside the wrapper.
+Run `sudo bash scripts/ftp-isolation-smoke prepare` on the installed server. It
+creates two isolated owners, domains and FTP logins, and tests both directions:
+FTP upload/overwrite/rename/delete, directory creation/removal, upload UID,
+Nginx serving, PHP execution, chroot confinement and cross-owner path/symlink
+read/write denial. It checks the installed FTP service on loopback port 21.
+FTPS is used when AUTH TLS is supported; local certificate trust is outside the
+scope of this test. No external FTP client or firewall traversal is tested.
+
+Preparation preserves marker files and saves random test credentials in
+`/var/lib/hostctl/ftp-isolation-check/state.json` (directory 0700, file 0600).
+After a successful preparation, reboot at a convenient time. Run
+`sudo bash scripts/ftp-isolation-smoke verify` after SSH returns. Verification
+requires a changed kernel boot ID, checks the original database/UID mappings,
+then authenticates with the original credentials and retrieves the original
+files before testing operations again. It does not re-provision resources or
+recreate missing marker files before verification. Success removes the test
+FTP logins, files, domains, panel users and credential state; locked Linux
+identities, private homes and pool definitions remain reserved as above.
+
+The script never reboots automatically. Failed checks retain fixtures for
+inspection. Use `sudo bash scripts/ftp-isolation-smoke cleanup` to cancel or
+clean a failed run. Another `prepare` refuses to replace an existing run.
+
+If FTP preparation fails after both fixtures were created, `retry` reruns the
+protocol checks with the saved accounts once the cause is fixed. It refuses a
+run that already passed preparation. On the Ubuntu 26.04 trial, vsftpd had been
+started with stock system-user PAM authentication even though Hostctl virtual
+users existed. `scripts/repair-ftp-setup` backs up the FTP configuration, applies
+the running release's Hostctl FTP setup, restarts vsftpd, and calls `retry` using
+the sibling wrapper. The installer now explicitly configures FTP after the
+application starts; feature readiness also checks virtual-user configuration.
+
+
+### Verified live trial and remaining acceptance check
+
+On September 12, 2026, the Ubuntu 26.04/PHP 8.5 server passed both live scripts.
+The initial isolation check passed distinct PHP UIDs, own-file access,
+cross-owner file denial, private sessions, Nginx reads and symlink denial.
+The FTP check passed actual login, upload/overwrite/rename/delete, ownership,
+chroot and cross-owner denial. After a confirmed boot-ID change, the same test
+identities, credentials, PHP pools and marker files still worked, and cleanup
+removed the test domains, files, FTP logins and panel users. Identity reservations
+and pool definitions remain by design. These results are from the live script
+output supplied by the operator, not just local unit tests.
+
+The trial exposed and fixed four fresh-install issues: legacy placeholder-file
+permissions, enrollment of a matching empty admin owner, rendering category
+result maps on the import progress page, and missing vsftpd virtual-user setup.
+The FTP test wrapper's Elixir invocation was also corrected and regression-tested.
+
+The remaining acceptance step is to restore the pre-install snapshot and install
+this completed branch without the incremental repair scripts. Repeat the Plesk
+import and both live scripts. Do not count the repaired server's success as proof
+that this final installer succeeds from a clean snapshot.

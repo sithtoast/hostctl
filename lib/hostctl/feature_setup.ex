@@ -213,7 +213,7 @@ defmodule Hostctl.FeatureSetup do
         end)
 
       if setting.status == "not_installed" and services_active?(feature.services) and
-           not conflict_installed? do
+           not conflict_installed? and feature_configured?(feature) do
         Settings.save_feature_setting(feature.key, %{
           enabled: true,
           status: "installed",
@@ -223,6 +223,53 @@ defmodule Hostctl.FeatureSetup do
     end
 
     :ok
+  end
+
+  defp feature_configured?(%{key: "ftp"}) do
+    with {:ok, config} <- File.read("/etc/vsftpd.conf"),
+         {:ok, pam} <- File.read("/etc/pam.d/vsftpd.virtual") do
+      ftp_configuration_valid?(config, pam)
+    else
+      _ -> false
+    end
+  end
+
+  defp feature_configured?(_), do: true
+
+  @doc false
+  def ftp_configuration_valid?(config, pam) do
+    options =
+      config
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&String.starts_with?(&1, "#"))
+      |> Enum.flat_map(fn line ->
+        case String.split(line, "=", parts: 2) do
+          [key, value] -> [{String.trim(key), String.trim(value)}]
+          _ -> []
+        end
+      end)
+      |> Map.new()
+
+    required = %{
+      "pam_service_name" => "vsftpd.virtual",
+      "guest_enable" => "YES",
+      "user_config_dir" => "/etc/vsftpd/vsftpd_user_conf",
+      "local_enable" => "YES",
+      "write_enable" => "YES",
+      "chroot_local_user" => "YES",
+      "anonymous_enable" => "NO"
+    }
+
+    Enum.all?(required, fn {key, value} -> options[key] == value end) and
+      Regex.match?(
+        ~r/^auth\s+required\s+pam_userdb\.so\s+db=\/etc\/vsftpd\/virtual_users\s+crypt=crypt\s*$/m,
+        pam
+      ) and
+      Regex.match?(
+        ~r/^account\s+required\s+pam_userdb\.so\s+db=\/etc\/vsftpd\/virtual_users\s*$/m,
+        pam
+      )
   end
 
   defp packages_installed?(packages) do
@@ -282,7 +329,7 @@ defmodule Hostctl.FeatureSetup do
           ready =
             Enum.all?(feature.packages, &packages_installed?([&1])) and
               services_active?(feature.services) and setting.enabled and
-              setting.status == "installed"
+              setting.status == "installed" and feature_configured?(feature)
 
           cond do
             ready ->
@@ -669,7 +716,8 @@ defmodule Hostctl.FeatureSetup do
          :ok <- run_cmd(key, "touch", [users_file]),
          :ok <- run_cmd(key, "chmod", ["600", users_file]),
          :ok <- write_vsftpd_pam(key),
-         :ok <- write_vsftpd_conf(key) do
+         :ok <- write_vsftpd_conf(key),
+         :ok <- run_cmd(key, "systemctl", ["restart", "vsftpd"]) do
       broadcast(key, :log, "vsftpd configuration complete.")
       :ok
     end

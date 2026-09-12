@@ -383,6 +383,17 @@ def legacy_chown(data):
             os.close(fd)
             fd = child
         walk(fd)
+        if data.get("index", False) and not any(name in os.listdir(fd) for name in ("index.html", "index.php")):
+            try:
+                index = os.open("index.html", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+            except FileExistsError:
+                pass
+            else:
+                try:
+                    os.fchown(index, legacy.pw_uid, legacy.pw_gid)
+                    os.write(index, b"<!doctype html><title>Site coming soon</title><h1>Site coming soon</h1><p>Upload your files to get started.</p>\n")
+                finally:
+                    os.close(index)
     finally:
         os.close(fd)
     return {"path": path}

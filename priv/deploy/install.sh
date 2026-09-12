@@ -1160,6 +1160,26 @@ systemctl restart "$APP_NAME" || {
 }
 success "Service enabled and started"
 
+# The distro service being active does not mean virtual-user auth is configured.
+step "Configuring FTP virtual-user authentication"
+(
+  set -a
+  . "$ENV_FILE"
+  set +a
+  ftp_rpc_ready=false
+  for ftp_rpc_attempt in {1..30}; do
+    if "$APP_DIR/bin/$APP_NAME" rpc 'unless List.keymember?(Application.started_applications(), :hostctl, 0), do: raise("Hostctl is starting")' >/dev/null 2>&1; then
+      ftp_rpc_ready=true
+      break
+    fi
+    sleep 1
+  done
+  [[ "$ftp_rpc_ready" == true ]] || error "Hostctl did not become ready for FTP configuration. Retry with --resume."
+  "$APP_DIR/bin/$APP_NAME" rpc 'case Hostctl.FeatureSetup.setup_vsftpd("ftp") do :ok -> :ok; _ -> raise("FTP configuration failed") end'
+)
+systemctl is-active --quiet vsftpd || error "FTP service is not active after configuration."
+success "FTP virtual-user authentication configured"
+
 # 3h. Nginx config -------------------------------------------------------------
 if [[ "$SKIP_NGINX" == false ]]; then
   step "Configuring Nginx for $DOMAIN"

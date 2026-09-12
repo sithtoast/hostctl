@@ -286,55 +286,7 @@ defmodule Hostctl.WebServer do
   # Files are chowned to www-data so FTP virtual users (who run as www-data)
   # can manage them.
   defp provision_webroot(path) do
-    if Hostctl.Isolation.Runtime.enrolled?() do
-      Hostctl.Isolation.Runtime.legacy_chown(path)
-    else
-      provision_legacy_webroot(path)
-    end
-  end
-
-  defp provision_legacy_webroot(path) do
-    # Use sudo to create the directory tree — /var/www/<domain> may be
-    # owned by root (e.g. after an rsync import) and the app user cannot
-    # create nested directories inside it.
-    case System.cmd(
-           "sudo",
-           ["systemd-run", "--pipe", "--wait", "--collect", "--quiet", "mkdir", "-p", path],
-           stderr_to_stdout: true
-         ) do
-      {_, 0} ->
-        # Chown the entire domain directory tree to www-data so FTP users
-        # (mapped to www-data via vsftpd guest_username) can read/write/delete.
-        # Walk up to /var/www/<domain> so the chown covers all content.
-        domain_root = domain_root_from_webroot(path)
-        chown_to_www_data(domain_root)
-
-        # Write a default index after chown so the app user can write
-        index = Path.join(path, "index.html")
-
-        unless File.exists?(index) do
-          File.write(index, default_index_html())
-        end
-
-      {output, code} ->
-        Logger.warning(
-          "[WebServer] Could not create webroot #{path} (exit #{code}): #{String.trim(output)}"
-        )
-    end
-  end
-
-  # Given a webroot like /var/www/example.com/public or
-  # /var/www/example.com/subdomains/sub/public, returns /var/www/example.com.
-  defp domain_root_from_webroot(path) do
-    parts = Path.split(path)
-
-    case parts do
-      ["/" | ["var", "www", _domain | _rest]] ->
-        Path.join(["/", "var", "www", Enum.at(parts, 3)])
-
-      _ ->
-        path
-    end
+    Hostctl.Isolation.Runtime.legacy_webroot(path)
   end
 
   @doc "Recursively chown the given path to www-data:www-data via sudo."
@@ -368,34 +320,6 @@ defmodule Hostctl.WebServer do
           "[WebServer] Could not chown #{path} to www-data (exit #{code}): #{output}"
         )
     end
-  end
-
-  defp default_index_html do
-    """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Site coming soon</title>
-      <style>
-        body { font-family: system-ui, sans-serif; display: flex; align-items: center;
-               justify-content: center; min-height: 100vh; margin: 0;
-               background: #f9fafb; color: #374151; }
-        .card { text-align: center; padding: 2rem 3rem; background: white;
-                border-radius: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
-        h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
-        p  { margin: 0; color: #6b7280; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h1>Site coming soon</h1>
-        <p>Upload your files to get started.</p>
-      </div>
-    </body>
-    </html>
-    """
   end
 
   # Runs `nginx -t` to verify the full config before a reload.

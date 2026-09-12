@@ -35,6 +35,38 @@ defmodule HostctlWeb.PanelLive.PleskImportTest do
     {:ok, conn: log_in_user(conn, admin), scope: scope, migration: migration}
   end
 
+  test "progress renders category result maps and continues receiving updates", %{
+    conn: conn,
+    migration: migration
+  } do
+    {:ok, view, _} = live(conn, ~p"/panel/plesk-import")
+    view |> element("#toggle-saved-btn") |> render_click()
+
+    view
+    |> element("button[phx-click=load_migration][phx-value-id='#{migration.id}']")
+    |> render_click()
+
+    render_click(view, "import_step", %{"step" => "progress"})
+
+    send(
+      view.pid,
+      {:restore_progress, "import.test", "cron_jobs", 1, 4,
+       %{created: 0, skipped: 0, failed: 0, errors: [], note: "Cron import unavailable"}}
+    )
+
+    assert has_element?(view, "#import-progress-import\\.test", "Cron import unavailable")
+    send(view.pid, {:restore_progress, "import.test", "web_files", 2, 4, :in_progress})
+    assert has_element?(view, "#import-progress-import\\.test", "Working")
+
+    send(
+      view.pid,
+      {:restore_progress, "import.test", "web_files", 2, 4,
+       %{created: 1, skipped: 0, failed: 0, errors: []}}
+    )
+
+    assert has_element?(view, "#import-progress-import\\.test", "1 created")
+  end
+
   test "save and reuse a connection without losing destination choices", %{
     conn: conn,
     scope: scope,

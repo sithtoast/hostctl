@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Run with sudo.' >&2; exit 1; }
+case "${1:-}" in prepare|retry|verify|cleanup) mode=$1 ;; *) echo "Usage: sudo bash $0 prepare|retry|verify|cleanup" >&2; exit 1 ;; esac
+[[ $# -eq 1 ]] || exit 1
+exec 9>/run/lock/hostctl-isolation-smoke.lock
+flock -n 9 || { echo 'Another isolation check is running.' >&2; exit 1; }
+source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+state_dir=/var/lib/hostctl/ftp-isolation-check
+[[ ! -L "$state_dir" ]] || { echo 'State directory is a symlink.' >&2; exit 1; }
+install -d -o hostctl -g hostctl -m 0700 "$state_dir"
+install -o root -g hostctl -m 0640 "$source_dir/ftp-isolation-smoke.exs" "$state_dir/check.exs"
+install -o root -g hostctl -m 0640 "$source_dir/ftp-isolation-probe.py" "$state_dir/probe.py"
+set -a
+source /etc/hostctl/env
+set +a
+/opt/hostctl/bin/hostctl rpc "case Code.eval_string(File.read!(\"$state_dir/check.exs\"), [mode: :$mode, directory: \"$state_dir\"], file: \"$state_dir/check.exs\") do {:ok, _} -> :ok; _ -> raise \"FTP isolation check failed; see output\" end"

@@ -207,6 +207,37 @@ try:
     (stage / "source-link").unlink()
     helper("import-tree", dict(destination, **b[0]), success=False)
     print("PASS: isolated import ownership, Nginx reads, cross-account denial, reimport, source-link rejection")
+    # Exercise the same FTP protocol probe shipped for live-server checks.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ftp_probe", "/ftp-isolation-probe.py")
+    ftp_probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ftp_probe)
+    ftp_probe.FTP_PORT = 2121
+    ftp_probe.HTTP_PORT = 8080
+    probe_state = {"tag": "fixture", "token": "fixture-token", "owners": []}
+    for payload, domain, root in identities:
+        login = "ftp" + str(payload["owner_id"])
+        conf = Path("/etc/vsftpd-test-users/" + login)
+        conf.write_text(conf.read_text().replace("local_root=/var/www/" + domain, "local_root=" + root))
+        probe_state["owners"].append({"domain": domain, "root": root, "uid": payload["uid"],
+                                      "login": login, "password": password})
+        php_probe = Path(root + "/ftp-probe.php")
+        php_probe.write_text("<?php echo json_encode(['uid'=>posix_geteuid(),'proof'=>file_get_contents(__DIR__.'/boot-proof.txt')]);")
+        os.chown(php_probe, payload["uid"], payload["gid"])
+    for source, peer in [(a, b), (b, a)]:
+        link = source[2] + "/peer-link.txt"
+        os.symlink(peer[2] + "/boot-proof.txt", link)
+        os.lchown(link, source[0]["uid"], source[0]["gid"])
+    ftp_probe.run(probe_state, "prepare")
+    ftp_probe.run(probe_state, "verify")
+    # Verification must detect lost persisted content, not recreate it.
+    os.unlink(a[2] + "/boot-proof.txt")
+    try:
+        ftp_probe.run(probe_state, "verify")
+        raise AssertionError("verification recreated a missing reboot marker")
+    except ftplib.error_perm as error:
+        assert str(error).startswith("550")
+    print("PASS: live FTP probe preparation, retained-marker verification and missing-marker failure")
     # Invalid or already-owned paths and colliding OS accounts fail closed.
     helper("webroot", dict(a[0], domain=a[1], path=a[2] + "/../escape"), success=False)
     helper("webroot", dict(b[0], domain=a[1], path=a[2]), success=False)
@@ -215,6 +246,16 @@ try:
     Path("/var/www/legacy-owned/file.txt").write_text("legacy")
     helper("legacy-chown", {"path": "/var/www/legacy-owned"})
     assert os.stat("/var/www/legacy-owned/file.txt").st_uid == pwd.getpwnam("www-data").pw_uid
+    # Fresh legacy provisioning must not rely on hostctl writing www-data directories.
+    legacy_root = "/var/www/fresh-legacy.test/httpdocs"
+    helper("legacy-chown", {"path": legacy_root, "index": True})
+    index = Path(legacy_root) / "index.html"
+    assert index.stat().st_uid == pwd.getpwnam("www-data").pw_uid
+    assert "Site coming soon" in index.read_text()
+    index.write_text("existing website")
+    helper("legacy-chown", {"path": legacy_root, "index": True})
+    assert index.read_text() == "existing website"
+    helper("legacy-chown", {"path": a[2], "index": True}, success=False)
     run("useradd", "--system", "hc_99999")
     helper("enroll", {"owner_id": 99999, "reload": False}, success=False)
     print("PASS: distinct PHP UIDs, FTP upload ownership, static reads, sessions, cross-account and legacy denial, symlink denial, retry safety, collision rejection")

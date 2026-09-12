@@ -12,7 +12,12 @@ defmodule Hostctl.Isolation.Runtime do
   alias Hostctl.Isolation.SystemIdentity
   alias Hostctl.Repo
 
-  def provision_identity(%Scope{user: %User{id: id}}) do
+  @doc "Enrolls an empty imported owner, including an existing panel administrator."
+  def prepare_import_owner(%Scope{} = scope), do: provision(scope, true)
+
+  def provision_identity(%Scope{} = scope), do: provision(scope, false)
+
+  defp provision(%Scope{user: %User{id: id}}, preserve_existing?) do
     Repo.transaction(fn ->
       user =
         Repo.one(from u in User, where: u.id == ^id, lock: "FOR UPDATE", select: struct(u, [:id]))
@@ -21,10 +26,20 @@ defmodule Hostctl.Isolation.Runtime do
         identity = Repo.get_by(SystemIdentity, original_user_id: id)
 
         cond do
-          identity && identity.user_id != id -> {:error, :identity_retained}
-          identity && identity.state == :ready -> verify_identity(identity)
-          resources?(id) -> {:error, :existing_account_requires_migration}
-          true -> enroll(user, identity)
+          identity && identity.user_id != id ->
+            {:error, :identity_retained}
+
+          identity && identity.state == :ready ->
+            verify_identity(identity)
+
+          preserve_existing? && (is_nil(identity) || identity.state == :pending) && resources?(id) ->
+            {:ok, nil}
+
+          resources?(id) ->
+            {:error, :existing_account_requires_migration}
+
+          true ->
+            enroll(user, identity)
         end
       else
         {:error, :account_not_found}
@@ -252,6 +267,13 @@ defmodule Hostctl.Isolation.Runtime do
 
   def enrolled? do
     Repo.exists?(from i in SystemIdentity, where: i.state != :pending)
+  end
+
+  def legacy_webroot(path) do
+    with :ok <- legacy_write_allowed(path),
+         {:ok, _} <- helper("legacy-chown", %{path: path, index: true}) do
+      :ok
+    end
   end
 
   def legacy_chown(path) do
