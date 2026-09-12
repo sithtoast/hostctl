@@ -1,5 +1,9 @@
 import Config
 
+if geoip = System.get_env("HOSTCTL_GEOIP_DATABASE") do
+  config :hostctl, Hostctl.Statistics, geoip_database: geoip
+end
+
 config :hostctl, :default_php_version, System.get_env("HOSTCTL_DEFAULT_PHP_VERSION", "8.3")
 
 vm_dev? = config_env() == :dev and System.get_env("HOSTCTL_VM_DEV") in ~w(1 true)

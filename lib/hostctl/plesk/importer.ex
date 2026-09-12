@@ -272,6 +272,7 @@ defmodule Hostctl.Plesk.Importer do
 
   @restore_categories [
     "web_files",
+    "statistics",
     "subdomains",
     "dns",
     "mail_accounts",
@@ -319,6 +320,7 @@ defmodule Hostctl.Plesk.Importer do
     domain_name = subscription.domain
 
     restore_opts = %{
+      scope: scope,
       ssh_opts: ssh_opts,
       web_files_path: web_files_path,
       progress_pid: progress_pid,
@@ -560,6 +562,22 @@ defmodule Hostctl.Plesk.Importer do
             else: :ok
 
         {status, %{result | categories: category_results}}
+    end
+  end
+
+  defp restore_category("statistics", domain, _subscription, _inventory, opts) do
+    case restore_statistics_history(domain, opts) do
+      {:ok, data} ->
+        %{
+          created: length(data["reports"] || []) + (data["log_files"] || 0),
+          skipped: 0,
+          failed: 0,
+          errors: [],
+          note: data["warning"] || "Plesk history preserved separately from new traffic"
+        }
+
+      {:error, reason} ->
+        %{created: 0, skipped: 0, failed: 1, errors: [reason]}
     end
   end
 
@@ -997,7 +1015,7 @@ defmodule Hostctl.Plesk.Importer do
       System.tmp_dir!()
       |> Path.join("hostctl_s3_import_#{domain_name}_#{System.unique_integer([:positive])}")
 
-    errors = []
+    errors = %{errors: [], job_ids: []}
 
     # Main domain
     errors =
@@ -1041,10 +1059,11 @@ defmodule Hostctl.Plesk.Importer do
     # `cleanup_source: true` and will rm_rf its own subdir after uploading.
     # The empty tmp_base parent dir is harmless in the system temp directory.
 
-    errors = Enum.reverse(errors)
+    job_ids = Enum.reverse(errors.job_ids)
+    errors = Enum.reverse(errors.errors)
     total = 1 + length(subdomains)
     failed = length(errors)
-    %{created: total - failed, skipped: 0, failed: failed, errors: errors}
+    %{created: total - failed, skipped: 0, failed: failed, errors: errors, job_ids: job_ids}
   end
 
   # Handles one web-files target: for S3 targets, creates a background
@@ -1108,19 +1127,24 @@ defmodule Hostctl.Plesk.Importer do
       }
 
       case Hostctl.UploadWorker.start_upload(job_attrs) do
-        {:ok, _job} ->
+        {:ok, job} ->
           Logger.info(
             "[Importer] web_files→S3 #{label}: background streaming upload job started for #{s3_prefix}"
           )
 
-          errors
+          %{errors | job_ids: [job.id | errors.job_ids]}
 
         {:error, reason} ->
           Logger.warning(
             "[Importer] web_files→S3 #{label}: failed to start upload job - #{inspect(reason)}"
           )
 
-          ["#{label}: failed to start upload job - #{inspect(reason)}" | errors]
+          %{
+            errors
+            | errors: [
+                "#{label}: failed to start upload job - #{inspect(reason)}" | errors.errors
+              ]
+          }
       end
     else
       if is_binary(local_base) and local_base != "" do
@@ -1138,14 +1162,14 @@ defmodule Hostctl.Plesk.Importer do
                 errors
 
               {:error, reason} ->
-                ["#{label}: rsync failed - #{reason}" | errors]
+                %{errors | errors: ["#{label}: rsync failed - #{reason}" | errors.errors]}
             end
 
           {:error, reason} ->
-            ["#{label}: #{reason}" | errors]
+            %{errors | errors: ["#{label}: #{reason}" | errors.errors]}
         end
       else
-        ["#{label}: no destination path configured" | errors]
+        %{errors | errors: ["#{label}: no destination path configured" | errors.errors]}
       end
     end
   end
@@ -1514,6 +1538,50 @@ defmodule Hostctl.Plesk.Importer do
     end
   end
 
+  defp restore_statistics_history(domain, %{ssh_opts: ssh_opts} = opts) when is_map(ssh_opts) do
+    if String.match?(domain.name, ~r/\A[a-z0-9][a-z0-9.-]*[a-z0-9]\z/) and
+         not String.contains?(domain.name, "..") do
+      stage = Path.join(Hostctl.Statistics.root(), "import-" <> Ecto.UUID.generate())
+      File.mkdir_p!(stage)
+      File.chmod!(stage, 0o700)
+      {uid, 0} = System.cmd("id", ["-u"])
+      {gid, 0} = System.cmd("id", ["-g"])
+
+      try do
+        sources = [
+          {"reports", "/var/www/vhosts/system/#{domain.name}/statistics"},
+          {"reports-legacy", "/var/www/vhosts/#{domain.name}/statistics"},
+          {"logs", "/var/www/vhosts/system/#{domain.name}/logs"}
+        ]
+
+        found =
+          Enum.count(sources, fn {target, source} ->
+            destination = Path.join(stage, target)
+            File.mkdir_p!(destination)
+
+            do_unisolated_rsync(ssh_opts, source, destination,
+              timeout: 300,
+              private: true,
+              chown: String.trim(uid) <> ":" <> String.trim(gid)
+            ) == :ok
+          end)
+
+        if found > 0,
+          do: Hostctl.Statistics.import_history(opts.scope, domain.id, stage),
+          else: {:error, "No readable Plesk statistics or access-log directory found"}
+      after
+        File.rm_rf(stage)
+      end
+    else
+      {:error, "Invalid statistics domain name"}
+    end
+  end
+
+  defp restore_statistics_history(_domain, _opts),
+    do:
+      {:error,
+       "Statistics transfer requires SSH; use the statistics shell command for an extracted backup directory"}
+
   defp do_unisolated_rsync(ssh_opts, remote_path, local_path, opts) do
     host = normalize_string(Map.get(ssh_opts, :host) || Map.get(ssh_opts, "host"))
     port = normalize_string(Map.get(ssh_opts, :port) || Map.get(ssh_opts, "port"))
@@ -1547,17 +1615,25 @@ defmodule Hostctl.Plesk.Importer do
       exclude_args = Enum.map(excludes, fn pattern -> "--exclude=#{pattern}" end)
       chown_args = if chown, do: ["--chown=#{chown}"], else: []
 
+      private_args =
+        if Keyword.get(opts, :private, false),
+          do: ["--no-devices", "--no-specials", "--no-links"],
+          else: []
+
+      mode = if Keyword.get(opts, :private, false), do: "D700,F600", else: "D755,F644"
+
       args =
         ["systemd-run", "--pipe", "--wait", "--collect", "--quiet"] ++
           env_args ++
           [
             rsync,
             "-rltzD",
-            "--chmod=D755,F644",
+            "--chmod=#{mode}",
             "--timeout=#{timeout}",
             "--rsync-path=#{rsync_path}"
           ] ++
           chown_args ++
+          private_args ++
           exclude_args ++
           [
             "-e",

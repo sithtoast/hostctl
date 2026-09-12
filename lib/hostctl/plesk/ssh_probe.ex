@@ -10,6 +10,7 @@ defmodule Hostctl.Plesk.SSHProbe do
     "dns",
     "dns_records",
     "web_files",
+    "statistics",
     "mail_accounts",
     "mail_content",
     "databases",
@@ -376,6 +377,10 @@ defmodule Hostctl.Plesk.SSHProbe do
   defp subscription_loop_steps(data_types) do
     []
     |> maybe_append_step(
+      "statistics" in data_types,
+      ~S(      if [ -d "/var/www/vhosts/system/$d/statistics" ] || [ -d "/var/www/vhosts/$d/statistics" ] || [ -d "/var/www/vhosts/system/$d/logs" ]; then printf 'STATS\t%s\n' "$d"; fi)
+    )
+    |> maybe_append_step(
       "web_files" in data_types,
       "      if [ -n \"$docroot\" ]; then printf 'WEB\\t%s\\t%s\\t%s\\n' \"$d\" \"$sys\" \"$docroot\"; fi"
     )
@@ -677,6 +682,12 @@ defmodule Hostctl.Plesk.SSHProbe do
     else
       :ignore
     end
+  end
+
+  defp parse_probe_line("STATS\t" <> domain) do
+    if present_string?(domain),
+      do: {:ok, &put_inventory_item(&1, "statistics", %{domain: String.trim(domain)})},
+      else: :ignore
   end
 
   defp parse_probe_line("WEB\t" <> rest) do

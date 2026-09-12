@@ -1022,6 +1022,15 @@ defmodule HostctlWeb.DomainLive.Show do
                   </span>
                   <span aria-hidden="true">→</span>
                 </button>
+                <.link
+                  id="domain-statistics-link"
+                  navigate={~p"/domains/#{@domain.id}/statistics"}
+                  class="ui-service"
+                >
+                  <.icon name="hero-chart-bar" class="size-5" />
+                  <span>Traffic statistics<small>Visitors, pages &amp; Plesk history</small></span>
+                  <span aria-hidden="true">→</span>
+                </.link>
                 <.link navigate={~p"/email?#{%{domain_id: @domain.id}}"} class="ui-service">
                   <.icon name="hero-envelope" class="size-5" />
                   <span>

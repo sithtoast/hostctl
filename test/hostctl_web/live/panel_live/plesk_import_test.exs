@@ -54,9 +54,9 @@ defmodule HostctlWeb.PanelLive.PleskImportTest do
        %{created: 0, skipped: 0, failed: 0, errors: [], note: "Cron import unavailable"}}
     )
 
-    assert has_element?(view, "#import-progress-import\\.test", "Cron import unavailable")
+    assert has_element?(view, "#import_progress_rows-import\\.test", "Cron import unavailable")
     send(view.pid, {:restore_progress, "import.test", "web_files", 2, 4, :in_progress})
-    assert has_element?(view, "#import-progress-import\\.test", "Working")
+    assert has_element?(view, "#import_progress_rows-import\\.test", "Working")
 
     send(
       view.pid,
@@ -64,7 +64,7 @@ defmodule HostctlWeb.PanelLive.PleskImportTest do
        %{created: 1, skipped: 0, failed: 0, errors: []}}
     )
 
-    assert has_element?(view, "#import-progress-import\\.test", "1 created")
+    assert has_element?(view, "#import_progress_rows-import\\.test", "1 created")
   end
 
   test "save and reuse a connection without losing destination choices", %{
@@ -114,5 +114,134 @@ defmodule HostctlWeb.PanelLive.PleskImportTest do
   test "regular users cannot access the importer", %{conn: conn} do
     conn = log_in_user(conn, user_fixture())
     assert {:error, {:redirect, _}} = live(conn, ~p"/panel/plesk-import")
+  end
+
+  test "customer-owned transfers update the final page and retain failures", %{
+    conn: conn,
+    migration: migration
+  } do
+    owner = user_fixture()
+    domain = Hostctl.Repo.insert!(%Hostctl.Hosting.Domain{name: "import.test", user_id: owner.id})
+
+    jobs =
+      for _ <- 1..21 do
+        Hostctl.Repo.insert!(%Hostctl.Hosting.UploadJob{
+          domain_id: domain.id,
+          user_id: owner.id,
+          job_type: "plesk_import",
+          status: "completed",
+          total_files: 1,
+          uploaded_files: 1,
+          source_path: "/tmp/unused",
+          s3_endpoint: "https://s3.example.test",
+          s3_access_key_id: "unused",
+          s3_secret_access_key: "unused",
+          s3_bucket: "customer-files",
+          s3_prefix: "site"
+        })
+      end
+
+    last = List.last(jobs)
+
+    Hostctl.Repo.update!(
+      Ecto.Changeset.change(Hostctl.Repo.reload!(last), status: "running", uploaded_files: 0)
+    )
+
+    result = %{
+      "status" => "ok",
+      "domain_status" => "created",
+      "categories" => %{
+        "web_files" => %{"created" => 21, "failed" => 0, "job_ids" => Enum.map(jobs, & &1.id)}
+      }
+    }
+
+    {:ok, _} =
+      Hostctl.Plesk.update_migration(migration, %{restore_results: %{"import.test" => result}})
+
+    {:ok, view, _} = live(conn, ~p"/panel/plesk-import")
+    render_click(view, "load_migration", %{"id" => migration.id})
+    render_click(view, "import_step", %{"step" => "progress"})
+
+    assert has_element?(
+             view,
+             "#import_progress_rows-import\\.test[data-state=running]",
+             "Transferring files"
+           )
+
+    assert has_element?(view, "#import_upload_jobs-#{last.id}")
+
+    Hostctl.Repo.update!(Ecto.Changeset.change(Hostctl.Repo.reload!(last), status: "completed"))
+    send(view.pid, {:upload_progress, last})
+
+    assert has_element?(
+             view,
+             "#import_progress_rows-import\\.test[data-state=completed]",
+             "Import complete"
+           )
+
+    Hostctl.Repo.update!(
+      Ecto.Changeset.change(Hostctl.Repo.reload!(last),
+        status: "failed",
+        error_message: "Transfer interrupted"
+      )
+    )
+
+    send(view.pid, {:upload_progress, last})
+
+    assert has_element?(
+             view,
+             "#import_progress_rows-import\\.test[data-state=failed]",
+             "Transfers need attention"
+           )
+
+    assert has_element?(view, "#import_upload_jobs-#{last.id}", "Transfer interrupted")
+  end
+
+  test "local completion and category errors are shown on the final step", %{
+    conn: conn,
+    migration: migration
+  } do
+    success = %{
+      "status" => "ok",
+      "domain_status" => "created",
+      "categories" => %{"web_files" => %{"created" => 1, "failed" => 0, "job_ids" => []}}
+    }
+
+    {:ok, migration} =
+      Hostctl.Plesk.update_migration(migration, %{restore_results: %{"import.test" => success}})
+
+    {:ok, view, _} = live(conn, ~p"/panel/plesk-import")
+    render_click(view, "load_migration", %{"id" => migration.id})
+    render_click(view, "import_step", %{"step" => "progress"})
+
+    assert has_element?(
+             view,
+             "#import_progress_rows-import\\.test[data-state=completed]",
+             "Import complete"
+           )
+
+    # A stale completion from a previous attempt must not replace the saved result.
+    send(view.pid, {make_ref(), {:restore_result, "import.test", {:error, %{}}}})
+    assert has_element?(view, "#import_progress_rows-import\\.test[data-state=completed]")
+
+    failure = %{
+      success
+      | "status" => "error",
+        "categories" => %{
+          "web_files" => %{"created" => 0, "failed" => 1, "errors" => ["Destination unavailable"]}
+        }
+    }
+
+    {:ok, _} =
+      Hostctl.Plesk.update_migration(migration, %{restore_results: %{"import.test" => failure}})
+
+    render_click(view, "load_migration", %{"id" => migration.id})
+    render_click(view, "import_step", %{"step" => "progress"})
+
+    assert has_element?(
+             view,
+             "#import_progress_rows-import\\.test[data-state=failed]",
+             "Destination unavailable"
+           )
   end
 end

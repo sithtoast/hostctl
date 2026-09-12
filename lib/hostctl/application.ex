@@ -36,6 +36,10 @@ defmodule Hostctl.Application do
       ] ++
         metrics_children ++
         backup_children ++
+        if(Application.get_env(:hostctl, Hostctl.Statistics.Collector, [])[:enabled] == false,
+          do: [],
+          else: [Hostctl.Statistics.Collector]
+        ) ++
         [
           # Start to serve requests, typically the last entry
           HostctlWeb.Endpoint

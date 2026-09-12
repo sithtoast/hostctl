@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Run with sudo to load the installed database configuration.' >&2; exit 1; }
+[[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || { echo 'Usage: statistics collect DOMAIN_ID | history DOMAIN_ID SOURCE_DIRECTORY' >&2; exit 1; }
+case "$1" in
+  collect) [[ $# -eq 2 ]] || exit 1 ;;
+  history) [[ $# -eq 3 && "$3" == /* && -d "$3" ]] || exit 1 ;;
+  *) exit 1 ;;
+esac
+stats_action=$1
+stats_id=$2
+stats_source=${3:-}
+release_bin=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+set -a
+source /etc/hostctl/env
+set +a
+export HOSTCTL_STATS_ACTION="$stats_action" HOSTCTL_STATS_ID="$stats_id" HOSTCTL_STATS_SOURCE="$stats_source"
+cd /
+# Keep generated reports owned by the service so hourly collection can update them.
+exec runuser -u hostctl -- "$release_bin/hostctl" eval 'Hostctl.Statistics.CLI.run(System.fetch_env!("HOSTCTL_STATS_ACTION"), System.fetch_env!("HOSTCTL_STATS_ID"), System.get_env("HOSTCTL_STATS_SOURCE"))'

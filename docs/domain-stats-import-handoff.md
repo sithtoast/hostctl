@@ -1,7 +1,45 @@
 # Domain statistics and Plesk completion follow-up
 
-September 12, 2026. Implement this work in the new task; this handoff records
-approved scope and investigation, not completed features.
+September 12, 2026. Implemented and locally validated on
+`codex/domain-stats-import-progress`. No push, deployment or real Plesk import.
+See [Domain statistics](domain-statistics.md) for operation, limits and VM acceptance.
+
+## Completed implementation and checks
+
+- Added private GoAccess reports with opt-in hourly collection, domain/subdomain
+  inputs, persistent state, atomic publication and bounded collection resources.
+- Added Plesk SSH statistics inventory/import plus an extracted-history shell
+  command. Preserved AWStats HTML/data is separate from rebuilt GoAccess history
+  and live traffic. Duplicate copies are excluded; ambiguous overlapping logs
+  retain files with a warning instead of presenting inflated totals.
+- Fixed final import progress by retaining exact background job IDs in category
+  results, querying those jobs across customer owners through admin scope, and
+  streaming state changes without the previous 20-job truncation. Failed/paused
+  transfers, category failures and missing legacy job correlation do not claim
+  completion. Restore task exceptions no longer kill the LiveView through a link;
+  stale task results cannot replace a newer run's result.
+- Saved migrations retain job IDs and recompute current transfer status when
+  loaded. Saving/updating records the combined status. Saving is still explicit:
+  this change does not introduce a durable import coordinator, automatic saves or
+  recovery of unsaved configuration-task results after navigation/restart. Jobs
+  themselves remain persisted by the existing upload system. Website/mail checks
+  remain separate from completed configuration and recorded transfers.
+- `mix precommit`: **299 passed**, including owner/admin report authorization,
+  isolated historical HTML, 21 customer-owned transfers, completion/failure events,
+  local-only success, stale results, missing legacy IDs and paused/partial failure.
+- Real Linux GoAccess integration suite: **5 passed**, including repeated refresh,
+  same-timestamp append, rename/create rotation, atomic failure, archived data,
+  repeated history replacement, byte-identical copies and partial overlap.
+- `mix hex.audit`: no retired/advisory packages. Shell syntax checks passed.
+  `MIX_ENV=test mix assets.deploy` completed the minified CSS/JS build.
+- Isolated localhost browser: synthetic 80-request report visibly rendered charts,
+  pages/downloads and referrers. Historical report navigation and sanitized legacy
+  HTML rendered. A customer-owned 12/20 transfer advanced to 20/20 and **Import
+  complete** without refreshing the page. GoAccess's sandbox CSP was corrected
+  for its embedded template compiler and data-URL icon font during this check.
+
+The investigation below records the original findings and design inputs; its
+references to missing behavior describe the pre-change baseline.
 
 ## User requests and decisions
 
@@ -18,9 +56,8 @@ approved scope and investigation, not completed features.
 - Fix the last Plesk import page: the user says it never updates to completion
   and just directs them to logs.
 - The user approved moving this work to a new chat and/or branch. Branch
-  `codex/domain-stats-import-progress` was created from `68eb2c4`. No feature code
-  has been modified yet. Continue implementation, validation and local commits;
-  do not stop at another plan or repeat the design question.
+  `codex/domain-stats-import-progress` was created from `68eb2c4`. Feature implementation and local checks are now
+  complete as recorded above. The new feature remains on its own branch.
 
 ## Required starting context
 

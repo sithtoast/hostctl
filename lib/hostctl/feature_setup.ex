@@ -20,6 +20,15 @@ defmodule Hostctl.FeatureSetup do
 
   @features [
     %{
+      key: "goaccess",
+      label: "Domain Statistics",
+      description: "Private GoAccess traffic reports and imported Plesk statistics history.",
+      icon: "hero-chart-bar",
+      packages: ["goaccess"],
+      services: [],
+      setup_fn: :setup_goaccess
+    },
+    %{
       key: "postgresql",
       label: "PostgreSQL Server",
       description: "PostgreSQL databases for hosted applications.",
@@ -847,6 +856,20 @@ defmodule Hostctl.FeatureSetup do
       broadcast(key, :log, "Root password has been written to the hostctl env file.")
       :ok
     end
+  end
+
+  @doc false
+  def setup_goaccess(key) do
+    run_cmd(key, "install", [
+      "-d",
+      "-m",
+      "0700",
+      "-o",
+      "hostctl",
+      "-g",
+      "hostctl",
+      "/var/lib/hostctl/statistics"
+    ])
   end
 
   @doc false

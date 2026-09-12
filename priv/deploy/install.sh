@@ -1049,6 +1049,7 @@ visudo -cf "$FEATURES_SUDOERS" >/dev/null \
 success "$SERVICE_USER can manage optional features from the web UI"
 
 # 3d-5. Certbot letsencrypt directory (owned by service user, no sudo needed) -
+install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_USER" /var/lib/hostctl/statistics
 LE_DIR="/var/lib/hostctl/letsencrypt"
 mkdir -p "$LE_DIR" "$LE_DIR/work" "$LE_DIR/logs"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$LE_DIR"

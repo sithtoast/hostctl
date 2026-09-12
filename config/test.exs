@@ -108,3 +108,5 @@ config :phoenix,
   sort_verified_routes_query_params: true
 
 config :hostctl, Hostctl.UpdateMonitor, enabled: false
+
+config :hostctl, Hostctl.Statistics.Collector, enabled: false

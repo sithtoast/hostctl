@@ -7,6 +7,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   alias Hostctl.Accounts.Scope
   alias Hostctl.Hosting
   alias Hostctl.Plesk
+  alias Hostctl.Plesk.ImportStatus
   alias Hostctl.Plesk.Importer
   alias Hostctl.Plesk.SSHProbe
   alias Hostctl.Repo
@@ -15,6 +16,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     {"domains", "Domains and subscriptions"},
     {"dns", "DNS zones and records"},
     {"web_files", "Web files and document roots"},
+    {"statistics", "Statistics history and access logs"},
     {"mail_accounts", "Mail accounts and aliases"},
     {"mail_content", "Mailboxes and stored mail"},
     {"databases", "Databases"},
@@ -29,6 +31,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
 
   @restore_categories [
     {"web_files", "Web Files", "hero-document-duplicate"},
+    {"statistics", "Statistics History", "hero-chart-bar"},
     {"subdomains", "Subdomains", "hero-rectangle-group"},
     {"dns", "DNS Records", "hero-globe-alt"},
     {"mail_accounts", "Mail Accounts", "hero-envelope"},
@@ -112,6 +115,8 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:show_saved, false)
      |> assign(:ssh_needs_password, false)
      |> assign(:upload_jobs, [])
+     |> stream(:import_progress_rows, [])
+     |> stream(:import_upload_jobs, [])
      |> load_saved_migrations()
      |> load_upload_jobs()}
   end
@@ -621,7 +626,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   def handle_event("import_step", %{"step" => step}, socket)
       when step in ["source", "mapping", "review", "progress"] do
     allowed = socket.assigns.phase != :discovery or step == "source"
-    {:noreply, if(allowed, do: assign(socket, :import_step, step), else: socket)}
+
+    {:noreply,
+     if(allowed, do: socket |> assign(:import_step, step) |> load_upload_jobs(), else: socket)}
   end
 
   def handle_event("review_domain", %{"domain" => domain}, socket) do
@@ -705,7 +712,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         end
       end)
 
-    {:noreply, socket}
+    {:noreply, load_upload_jobs(socket)}
   end
 
   # ── Save / Load migrations ────────────────────────────────────────────
@@ -725,7 +732,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       attrs = %{
         name: name,
         source: socket.assigns.form_params["source"],
-        status: migration_status(socket.assigns.restore_results, socket.assigns.subscriptions),
+        status: migration_status(socket),
         source_params: sanitize_source_params(socket.assigns.form_params),
         subscriptions: serialize_subscriptions(socket.assigns.subscriptions),
         inventory: serialize_inventory(socket.assigns.ssh_discovery),
@@ -789,6 +796,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
      |> assign(:domain_configs, domain_configs)
      |> assign(:domain_s3_backends, load_domain_s3_backends(subscriptions))
      |> assign(:restore_results, restore_results)
+     |> load_upload_jobs()
      |> assign(:server_credentials, server_credentials)
      |> assign(
        :ssh_needs_password,
@@ -818,7 +826,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     migration = Plesk.get_migration!(socket.assigns.current_scope, id)
 
     attrs = %{
-      status: migration_status(socket.assigns.restore_results, socket.assigns.subscriptions),
+      status: migration_status(socket),
       domain_configs: serialize_domain_configs(socket.assigns.domain_configs),
       restore_results: serialize_restore_results(socket.assigns.restore_results),
       server_credentials: serialize_server_credentials(socket.assigns.server_credentials)
@@ -970,33 +978,9 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   # Restore task completed
   @impl true
   def handle_info({ref, {:restore_result, domain, result}}, socket) do
-    Process.demonitor(ref, [:flush])
-
-    task_refs = Map.delete(socket.assigns.restore_task_refs, domain)
-    progress = Map.delete(socket.assigns.restore_progress, domain)
-
-    {status, flash_type, flash_msg} =
-      case result do
-        {:ok, r} ->
-          {{:ok, r}, :info,
-           "Import configuration finished for #{domain}. Check the transfer jobs below for file upload status."}
-
-        {:error, r} ->
-          {{:error, r}, :error, "Failed to restore #{domain}."}
-      end
-
-    results = Map.put(socket.assigns.restore_results, domain, status)
-
-    # The importer persists mappings before transfers; reload them even after partial failures.
-    socket =
-      assign(socket, :domain_s3_backends, load_domain_s3_backends(socket.assigns.subscriptions))
-
-    {:noreply,
-     socket
-     |> assign(:restore_task_refs, task_refs)
-     |> assign(:restore_progress, progress)
-     |> assign(:restore_results, results)
-     |> put_flash(flash_type, flash_msg)}
+    if Map.get(socket.assigns.restore_task_refs, domain) == ref,
+      do: finish_restore(ref, domain, result, socket),
+      else: {:noreply, socket}
   end
 
   # Restore progress update from importer
@@ -1020,7 +1004,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
         completed: completed
       })
 
-    {:noreply, assign(socket, :restore_progress, progress)}
+    {:noreply, socket |> assign(:restore_progress, progress) |> refresh_import_progress()}
   end
 
   # Restore task crashed
@@ -1046,6 +1030,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
          |> assign(:restore_task_refs, task_refs)
          |> assign(:restore_progress, progress)
          |> assign(:restore_results, results)
+         |> load_upload_jobs()
          |> put_flash(:error, "Restore of #{domain} crashed.")}
 
       nil ->
@@ -1056,6 +1041,37 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   # Ignore unknown messages
   @impl true
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  defp finish_restore(ref, domain, result, socket) do
+    Process.demonitor(ref, [:flush])
+
+    task_refs = Map.delete(socket.assigns.restore_task_refs, domain)
+    progress = Map.delete(socket.assigns.restore_progress, domain)
+
+    {status, flash_type, flash_msg} =
+      case result do
+        {:ok, r} ->
+          {{:ok, r}, :info,
+           "Configuration finished for #{domain}. Import and transfer results are shown below."}
+
+        {:error, r} ->
+          {{:error, r}, :error, "Failed to restore #{domain}."}
+      end
+
+    results = Map.put(socket.assigns.restore_results, domain, status)
+
+    # The importer persists mappings before transfers; reload them even after partial failures.
+    socket =
+      assign(socket, :domain_s3_backends, load_domain_s3_backends(socket.assigns.subscriptions))
+
+    {:noreply,
+     socket
+     |> assign(:restore_task_refs, task_refs)
+     |> assign(:restore_progress, progress)
+     |> assign(:restore_results, results)
+     |> load_upload_jobs()
+     |> put_flash(flash_type, flash_msg)}
+  end
 
   # ── Restore task launcher ─────────────────────────────────────────────
 
@@ -1103,7 +1119,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       |> then(fn map -> if map == %{}, do: nil, else: map end)
 
     task =
-      Task.async(fn ->
+      Task.Supervisor.async_nolink(Hostctl.TaskSupervisor, fn ->
         result =
           Importer.restore_domain(scope, subscription, inventory,
             categories: categories,
@@ -1132,6 +1148,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     socket
     |> assign(:restore_progress, progress)
     |> assign(:restore_task_refs, task_refs)
+    |> refresh_import_progress()
   end
 
   # Builds S3 backend opts from inline credentials stored in the domain config
@@ -1558,39 +1575,47 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       <div>
         <h2 class="text-lg font-semibold">Import progress</h2>
         <p class="mt-1 text-sm text-gray-500">
-          Configuration, transfers, and verification are separate stages.
+          Results update as configuration and file transfers finish.
         </p>
       </div>
-      <div
-        :for={sub <- @subscriptions}
-        id={"import-progress-#{sub.domain}"}
-        class="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900"
-      >
-        <% result = Map.get(@restore_results, sub.domain) %>
-        <% progress = Map.get(@restore_progress, sub.domain) %>
-        <h3 class="font-semibold">{sub.domain}</h3>
-        <div class="mt-4 flex justify-between gap-3 text-sm">
-          <span>Configuration</span><span>{cond do
-          Map.has_key?(@restore_task_refs, sub.domain) -> "In progress"
-          match?({:ok, _}, result) -> "Finished — review transfers"
-          match?({:error, _}, result) -> "Failed — review result"
-          true -> "Not started"
-        end}</span>
+      <div id="import-progress-rows" phx-update="stream" class="space-y-4">
+        <div
+          :for={{id, row} <- @streams.import_progress_rows}
+          id={id}
+          data-state={row.state}
+          class="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900"
+        >
+          <h3 class="font-semibold">{row.domain}</h3>
+          <p class={[
+            "mt-3 text-sm font-medium",
+            row.state == :completed && "text-emerald-600",
+            row.state == :failed && "text-red-600"
+          ]}>
+            <.icon :if={row.state == :completed} name="hero-check-circle" class="inline h-5 w-5" />
+            {row.label}
+          </p>
+          <p :if={row.progress} class="mt-2 text-xs text-gray-500">
+            {import_progress_label(Map.get(row.progress, :status))}
+          </p>
+          <p :for={error <- row.errors} class="mt-2 text-sm text-red-600">{error}</p>
+          <div
+            :for={{category, result} <- row.categories}
+            class="mt-3 rounded-lg bg-gray-50 p-3 text-sm dark:bg-gray-800"
+          >
+            <p class="font-medium">{category_display_name(category)}</p>
+            <p class="mt-1 text-xs text-gray-500">{import_progress_label(result)}</p>
+            <p :for={error <- Map.get(result, :errors, [])} class="mt-1 text-xs text-red-600">
+              {error}
+            </p>
+          </div>
+          <p :if={row.state == :completed} class="mt-4 text-xs text-gray-500">
+            Selected configuration and recorded transfers are complete. Website and mail delivery checks are still manual.
+          </p>
         </div>
-        <p :if={progress} class="mt-2 text-xs text-gray-500">
-          {import_progress_label(Map.get(progress, :status))}
-        </p>
-        <p class="mt-3 text-sm text-gray-500">
-          Verification: not recorded. Check the destination website, data, and mail delivery.
-        </p>
       </div>
-      <%= if @upload_jobs != [] do %>
-        {render_upload_jobs(assigns)}
-      <% else %>
-        <p class="text-sm text-gray-500">No background S3 transfer jobs recorded.</p>
-      <% end %>
+      {render_upload_jobs(assigns)}
       <button phx-click="import_step" phx-value-step="mapping" class="app-button">
-        View detailed configuration results
+        View import plan
       </button>
     </div>
     """
@@ -1634,11 +1659,17 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       <h2 class="text-sm font-semibold text-gray-900 dark:text-white mb-3">
         <.icon name="hero-cloud-arrow-up" class="w-4 h-4 inline -mt-0.5" /> Background S3 Uploads
       </h2>
-      <div class="space-y-3">
-        <%= for job <- @upload_jobs do %>
+      <div id="import-upload-jobs" phx-update="stream" class="space-y-3">
+        <p id="import-upload-jobs-empty" class="hidden only:block text-sm text-gray-500">
+          No background transfers recorded for this import.
+        </p>
+        <%= for {job_dom_id, job} <- @streams.import_upload_jobs do %>
           <% pct =
             if(job.total_files > 0, do: round(job.uploaded_files / job.total_files * 100), else: 0) %>
-          <div class="rounded-lg border border-gray-100 dark:border-gray-800 p-3 text-xs">
+          <div
+            id={job_dom_id}
+            class="rounded-lg border border-gray-100 dark:border-gray-800 p-3 text-xs"
+          >
             <div class="flex items-center justify-between gap-2 mb-1.5">
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class={[
@@ -3065,6 +3096,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       "subdomains" => subscription |> Map.get(:subdomains, []) |> length(),
       "dns" => 0,
       "web_files" => 0,
+      "statistics" => 0,
       "mail_accounts" => 0,
       "mail_content" => 0,
       "databases" => 0,
@@ -3084,6 +3116,7 @@ defmodule HostctlWeb.PanelLive.PleskImport do
       "subdomains" => subscription |> Map.get(:subdomains, []) |> length(),
       "dns" => inv |> Map.get("dns_records", []) |> Enum.count(&(&1.domain == domain)),
       "web_files" => inv |> Map.get("web_files", []) |> Enum.count(&(&1.domain == domain)),
+      "statistics" => inv |> Map.get("statistics", []) |> Enum.count(&(&1.domain == domain)),
       "mail_accounts" =>
         inv |> Map.get("mail_accounts", []) |> Enum.count(&(&1.domain == domain)),
       "mail_content" => inv |> Map.get("mail_content", []) |> Enum.count(&(&1.domain == domain)),
@@ -3453,13 +3486,32 @@ defmodule HostctlWeb.PanelLive.PleskImport do
     end)
   end
 
-  defp migration_status(restore_results, subscriptions) do
-    total = length(subscriptions)
+  defp migration_status(socket) do
+    results = socket.assigns.restore_results
+
+    jobs =
+      Plesk.list_import_jobs(
+        socket.assigns.current_scope,
+        results |> Map.values() |> Enum.flat_map(&ImportStatus.job_ids/1)
+      )
+
+    states =
+      Enum.map(socket.assigns.subscriptions, fn sub ->
+        config = Map.get(socket.assigns.domain_configs, sub.domain, %{})
+
+        s3? =
+          Enum.any?(Map.get(config, :s3_targets, %{}), fn {_, target} ->
+            Map.get(target, :s3_import, false)
+          end)
+
+        ImportStatus.summarize(Map.get(results, sub.domain), jobs, s3?).state
+      end)
 
     cond do
-      map_size(restore_results) == 0 -> "discovered"
-      map_size(restore_results) < total -> "partial"
-      Enum.all?(restore_results, fn {_, {s, _}} -> s == :ok end) -> "completed"
+      map_size(socket.assigns.restore_task_refs) > 0 -> "in_progress"
+      map_size(results) == 0 -> "discovered"
+      states != [] and Enum.all?(states, &(&1 == :completed)) -> "completed"
+      Enum.any?(states, &(&1 == :running)) -> "in_progress"
       true -> "partial"
     end
   end
@@ -3545,13 +3597,52 @@ defmodule HostctlWeb.PanelLive.PleskImport do
   defp ensure_atom_keys(other), do: other
 
   defp load_upload_jobs(socket) do
-    # Load active upload jobs (pending, running, or recent failures/completions)
-    jobs =
-      socket.assigns.current_scope.user.id
-      |> Hosting.list_upload_jobs_by_user()
-      |> Enum.take(20)
-      |> Repo.preload(:domain)
+    ids = socket.assigns.restore_results |> Map.values() |> Enum.flat_map(&ImportStatus.job_ids/1)
+    jobs = Plesk.list_import_jobs(socket.assigns.current_scope, ids)
 
-    assign(socket, :upload_jobs, jobs)
+    socket
+    |> assign(:upload_jobs, jobs)
+    |> stream(:import_upload_jobs, jobs, reset: true)
+    |> refresh_import_progress()
+  end
+
+  defp refresh_import_progress(socket) do
+    rows =
+      Enum.map(socket.assigns.subscriptions, fn sub ->
+        result = Map.get(socket.assigns.restore_results, sub.domain)
+        config = Map.get(socket.assigns.domain_configs, sub.domain, %{})
+
+        s3? =
+          Enum.any?(Map.get(config, :s3_targets, %{}), fn {_, target} ->
+            Map.get(target, :s3_import, false)
+          end)
+
+        summary =
+          if Map.has_key?(socket.assigns.restore_task_refs, sub.domain),
+            do: %{state: :running, label: "Importing configuration"},
+            else: ImportStatus.summarize(result, socket.assigns.upload_jobs, s3?)
+
+        categories =
+          case result do
+            {_, data} -> Map.get(data, :categories, %{})
+            _ -> %{}
+          end
+
+        errors =
+          case result do
+            {:error, %{domain_status: {:failed, reason}}} -> [reason]
+            _ -> []
+          end
+
+        Map.merge(summary, %{
+          id: sub.domain,
+          domain: sub.domain,
+          categories: categories,
+          errors: errors,
+          progress: Map.get(socket.assigns.restore_progress, sub.domain)
+        })
+      end)
+
+    stream(socket, :import_progress_rows, rows, reset: true)
   end
 end

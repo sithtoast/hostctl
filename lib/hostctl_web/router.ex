@@ -51,6 +51,7 @@ defmodule HostctlWeb.Router do
       live "/domains", DomainLive.Index, :index
       live "/domains/new", DomainLive.Index, :new
       live "/domains/:id", DomainLive.Show, :show
+      live "/domains/:id/statistics", DomainLive.Statistics, :index
       live "/domains/:domain_id/dns", DnsLive.Index, :index
 
       # Email
@@ -98,6 +99,8 @@ defmodule HostctlWeb.Router do
       live "/panel/plesk-import", PanelLive.PleskImport, :index
       live "/panel/ftp", PanelLive.Ftp, :index
     end
+
+    get "/domains/:id/statistics/report/:kind", StatisticsController, :show
 
     get "/panel/backups/:id/download", BackupDownloadController, :show
 

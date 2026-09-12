@@ -26,6 +26,7 @@ defmodule Hostctl.Plesk.ImportPreflight do
     |> add(mysql?, "mysql")
     |> add(pg?, "postgresql")
     |> add(mount?, "rclone")
+    |> add("statistics" in categories, "goaccess")
   end
 
   def run(categories, inventory, targets, progress, installer \\ &FeatureSetup.ensure_installed/1) do
