@@ -132,8 +132,8 @@ script from the staged checkout as root; it refuses to run from the active one.
 
 Container validation passed on Ubuntu 24.04 with PHP 8.3. The subsequent live
 Ubuntu 26.04/PHP 8.5 trial passed enrollment, Plesk file import, PHP/FTP isolation,
-and reboot persistence after the fixes described below. A clean installation
-including all fixes still needs to be verified.
+and reboot persistence after the fixes described below. The subsequent clean
+installation results and remaining verification boundary are recorded below.
 
 ## Ownership boundary
 
@@ -362,7 +362,15 @@ permissions, enrollment of a matching empty admin owner, rendering category
 result maps on the import progress page, and missing vsftpd virtual-user setup.
 The FTP test wrapper's Elixir invocation was also corrected and regression-tested.
 
-The remaining acceptance step is to restore the pre-install snapshot and install
-this completed branch without the incremental repair scripts. Repeat the Plesk
-import and both live scripts. Do not count the repaired server's success as proof
-that this final installer succeeds from a clean snapshot.
+The operator then restored the pre-install snapshot and installed commit `338aa16`
+from a locally transferred bundle, without incremental repair scripts. SSH checks
+confirmed the pre-install paths were absent before installation, and confirmed the
+installed commit and active Hostctl/Nginx/vsftpd/PHP services afterward. The operator
+reported both the isolation check and FTP preparation passed, followed by a successful
+Plesk import. Post-reboot FTP verification output for this final clean install has
+not been supplied; only the earlier repaired trial has an explicit reboot pass.
+
+Cloudflare was enabled manually after import. Live logs showed SRV payloads missing
+`weight` and a duplicate NS record rejection. DNS synchronization fixes and the
+question of user-friendly system identity names are deferred to a separate task;
+see `docs/development-memory.md` for the handoff.

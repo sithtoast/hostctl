@@ -10,17 +10,28 @@
   Sudo still requires interactive authentication.
 - Panel: `https://solid.toastedlabs.com`. Installed release `/opt/hostctl`, source
   `/usr/local/src/hostctl`, environment `/etc/hostctl/env`. Never print the env file
-  or FTP test credential state. Source is `ada6c8b` plus applied repair patches;
-  the local branch contains those fixes for the next installer revision.
-- `crohnies.org` imported into the matching admin owner's isolated `hc_1`
-  identity. Its Plesk default page was expected; origin HTTP serving was verified.
-- Operator-supplied output confirms the PHP/filesystem isolation check and FTP
-  protocol checks passed. FTP credentials, files, identities and PHP behavior also
-  survived a reboot; the script verified a changed boot ID and cleaned test sites.
-- A pre-install snapshot was taken after the dedicated SSH key was installed.
-  Restore that snapshot for final clean-install acceptance, retaining the corrected
-  installer/source bundle on the Mac so it survives the rollback. The current
-  working install must not be called a clean-install pass because it used repairs.
+  or FTP test credential state. The server was restored to its pre-install snapshot
+  and installed from the local `338aa16` bundle without incremental repairs.
+  Installed HEAD and active services were independently rechecked after installation.
+- Operator reports both the PHP/filesystem smoke test and FTP preparation passed
+  on the clean install, then reports the Plesk import looks good. The final clean
+  install's post-reboot `verify` output was not supplied; the earlier repaired trial
+  did pass that step with an explicitly changed boot ID and successful cleanup.
+- `crohnies.org` now has a root-owned domain boundary with group `hc_5` and ACLs,
+  per the operator's directory listing. Cloudflare was enabled manually after import.
+- Read-only live logs identified three rejected SRV records (`_imaps._tcp`,
+  `_pop3s._tcp`, `_smtps._tcp`): "weight is a required data field." An apex NS
+  push failed with "An identical record already exists." These remain unresolved.
+  Start with `lib/hostctl/dns/cloudflare.ex` payload construction and the upsert
+  matching logic in `lib/hostctl/hosting.ex`. Verify current Cloudflare API contracts
+  and add regression coverage. Do not change public DNS merely to investigate.
+- System username changes are a separate design question. The helper enforces
+  `hc_<owner_id>`; names also appear in reservations, boundary markers, PHP pools,
+  sockets, private directories and FTP configuration. A friendly label is simpler;
+  actual renaming requires a managed migration preserving numeric UID/GID. Neither
+  approach has been selected or implemented. Do not manually rename live accounts.
+- The user requested merging the isolation work into the default branch (called
+  `main` in this repository, not `master`) and continuing these issues in another task.
 - No GitHub push has occurred in this task. Use the locally prepared bundle for
   the fresh trial unless a push is explicitly authorized.
 
