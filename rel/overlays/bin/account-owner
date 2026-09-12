@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Read-only local operator lookup. Does not start the web app or hosting workers.
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Run with sudo to read the installed database configuration.' >&2; exit 1; }
+[[ $# -eq 2 ]] || { echo 'Usage: sudo /opt/hostctl/bin/account-owner --pid PID | --uid UID | --user USERNAME' >&2; exit 1; }
+case "$1" in
+  --pid) lookup_kind=pid; [[ "$2" =~ ^[1-9][0-9]*$ ]] || exit 1 ;;
+  --uid) lookup_kind=uid; [[ "$2" =~ ^[0-9]+$ ]] || exit 1 ;;
+  --user) lookup_kind=username; [[ "$2" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || exit 1 ;;
+  *) echo 'Expected --pid, --uid or --user.' >&2; exit 1 ;;
+esac
+lookup_value=$2
+release_bin=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+set -a
+source /etc/hostctl/env
+set +a
+export HOSTCTL_LOOKUP_KIND="$lookup_kind" HOSTCTL_LOOKUP_VALUE="$lookup_value"
+exec "$release_bin/hostctl" eval 'Hostctl.Resources.CLI.run(System.fetch_env!("HOSTCTL_LOOKUP_KIND"), System.fetch_env!("HOSTCTL_LOOKUP_VALUE"))'

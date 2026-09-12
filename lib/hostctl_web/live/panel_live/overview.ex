@@ -43,6 +43,7 @@ defmodule HostctlWeb.PanelLive.Overview do
       panel_docker: "Manage containers, proxy mappings, images, and Compose stacks.",
       panel_features: "Install and configure optional server capabilities.",
       panel_settings: "Manage server addresses and shared panel configuration.",
+      panel_resources: "Trace CPU and memory usage to hosting accounts and domains.",
       panel_users: "Manage panel accounts, roles, and ownership.",
       panel_databases: "Inspect databases and users across hosted domains.",
       panel_ftp: "Review server-wide FTP access and directory assignments."

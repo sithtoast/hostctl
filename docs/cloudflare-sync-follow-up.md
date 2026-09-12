@@ -141,16 +141,17 @@ installer rerun, account enrollment or ownership repair is needed for this fix.
    the intended records in Cloudflare and through authoritative DNS queries.
    Restoring the application release does not undo public DNS writes.
 
-## Operator identity design (not implemented)
+## Operator identity design
 
 The user clarified that rapid attribution of runaway processes/resource usage
 is the goal, including for future administrators of a commercial Hostctl install.
 A label confined to the panel would not solve SSH triage by itself.
 
-One option is a resource view showing account, domains, Linux name/UID and
-CPU/memory, paired with a shell lookup by username, UID or PID. Stable `hc_*`
-identities remain intact. An actual recognizable name in standard `ps`/`top`
-requires a managed Linux user/group rename instead.
+The user selected a resource view showing account, domains, Linux name/UID and
+CPU/memory, paired with a shell lookup by username, UID or PID. This is now
+implemented locally; see `docs/account-resources.md`. Stable `hc_*` identities
+remain intact. An actual recognizable name in standard `ps`/`top` requires a
+managed Linux user/group rename instead, which can be revisited with SSH access.
 
 The latter must preserve UID/GID and reserve names against collisions and reuse;
 change the database name constraint and privileged helper contract; quiesce the
@@ -158,5 +159,5 @@ account's writers; migrate ownership markers, homes/private paths, PHP pools and
 sockets, Nginx references and FTP mappings; validate isolation; and journal enough
 state for recovery from a partial failure. Changing email/domain/display name
 must not implicitly rename an OS identity. No live `usermod`/`groupmod` operation
-is authorized by this follow-up. The choice between the operational lookup and
-recognizable OS names remains pending.
+is authorized by this follow-up. The operational lookup is the selected approach;
+recognizable OS names are deferred.

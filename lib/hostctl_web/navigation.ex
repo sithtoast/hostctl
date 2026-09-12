@@ -32,6 +32,7 @@ defmodule HostctlWeb.Navigation do
        ]},
       {:admin_system, "System & access", "/panel/system",
        [
+         {:panel_resources, "Account resources", "/panel/resources", "hero-cpu-chip"},
          {:updates, "Updates", "/updates", "hero-arrow-up-circle"},
          {:panel_docker, "Docker", "/panel/docker", "hero-cube"},
          {:panel_features, "Features", "/panel/features", "hero-puzzle-piece"},

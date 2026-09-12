@@ -373,6 +373,7 @@ not been supplied; only the earlier repaired trial has an explicit reboot pass.
 Cloudflare was enabled manually after import. Live logs showed SRV payloads missing
 `weight` and a duplicate NS record rejection. DNS synchronization fixes are now locally regression-tested in the separate
 follow-up, with deployment pending. The system-identity question is about rapid
-resource/process attribution for administrators; the choice between a resource
-view with shell lookup and recognizable Linux names remains pending. See
-`docs/cloudflare-sync-follow-up.md` for the assessment and deployment handoff.
+resource/process attribution for administrators. The user selected the resource
+view and shell lookup, now implemented locally in `docs/account-resources.md`.
+Recognizable Linux names remain deferred. See `docs/cloudflare-sync-follow-up.md`
+for the assessment and deployment handoff.

@@ -30,11 +30,12 @@
 - System username changes are a separate design question. The helper enforces
   `hc_<owner_id>`; names also appear in reservations, boundary markers, PHP pools,
   sockets, private directories and FTP configuration. A friendly label is simpler;
-  actual renaming requires a managed migration preserving numeric UID/GID. Neither
-  approach has been selected or implemented. The user clarified the goal is rapid
-  process/resource attribution for administrators. A resource view plus shell
-  PID/UID/username lookup versus recognizable names directly in ps/top is now the
-  pending decision. Do not manually rename live accounts.
+  actual renaming requires a managed migration preserving numeric UID/GID. No
+  rename has been selected or implemented. The user selected a resource view plus
+  shell PID/UID/username lookup for rapid process attribution. That read-only option
+  is now implemented locally; see [Account resources](account-resources.md).
+  Recognizable names can be revisited with future SSH access. Do not manually
+  rename live accounts.
 - The user requested merging the isolation work into the default branch (called
   `main` in this repository, not `master`) and continuing these issues in another task.
 - No GitHub push has occurred in this task. Use the locally prepared bundle for
@@ -185,3 +186,16 @@ See [vm-development.md](vm-development.md) for the reusable setup guide.
 - The suite logged a background orphan-upload cleanup SQL sandbox disconnect
   during startup; no tests failed. No deployment or live DNS acceptance occurred.
 - Prepared rollout and recovery steps are in `docs/cloudflare-sync-follow-up.md`.
+
+## Account resource follow-up (September 12, 2026)
+
+- User chose the operational resource view plus shell lookup; Linux names remain
+  stable. `/panel/resources` is admin-only, with read-only PID/UID/username lookup
+  through `bin/account-owner` or `mix hostctl.account.owner`.
+- Final `mix precommit`: 289 tests passed. Assets and shell syntax checks passed.
+  Browser verification used an isolated local server and synthetic processes.
+  The actual Mix lookup passed against that disposable database; the Linux parser
+  read 204 real processes from the Ubuntu test server. Installed-service process
+  visibility and attribution still need post-deployment verification.
+- No deployment, public DNS mutation, GitHub push, identity rename or SSH enablement
+  occurred. See `docs/account-resources.md` for metric limits and acceptance steps.

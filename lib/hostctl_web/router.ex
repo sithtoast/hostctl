@@ -84,6 +84,7 @@ defmodule HostctlWeb.Router do
       live "/panel/mail", PanelLive.Overview, :mail
       live "/panel/migration", PanelLive.Overview, :backup
       live "/panel/system", PanelLive.Overview, :system
+      live "/panel/resources", PanelLive.Resources, :index
       live "/panel/settings", PanelLive.Settings, :index
       live "/panel/features", PanelLive.Features, :index
       live "/panel/docker", PanelLive.Docker, :index
