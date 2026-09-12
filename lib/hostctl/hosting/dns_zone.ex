@@ -10,6 +10,8 @@ defmodule Hostctl.Hosting.DnsZone do
     field :cloudflare_zone_id, :string
 
     field :provider, :string, default: "inherit"
+    field :cloudflare_api_token, Hostctl.EncryptedField, redact: true
+    field :clear_cloudflare_token, :boolean, virtual: true, default: false
     field :digitalocean_api_token, Hostctl.EncryptedField, redact: true
     field :digitalocean_zone_name, :string
     field :clear_digitalocean_token, :boolean, virtual: true, default: false
@@ -22,20 +24,27 @@ defmodule Hostctl.Hosting.DnsZone do
 
   def provider_changeset(zone, attrs) do
     zone
-    |> cast(attrs, [:provider, :digitalocean_api_token, :clear_digitalocean_token])
+    |> cast(attrs, [
+      :provider,
+      :cloudflare_api_token,
+      :clear_cloudflare_token,
+      :digitalocean_api_token,
+      :clear_digitalocean_token
+    ])
     |> validate_required([:provider])
     |> validate_inclusion(:provider, ~w(inherit local cloudflare digitalocean))
-    |> preserve_token()
+    |> preserve_token(:cloudflare_api_token, :clear_cloudflare_token)
+    |> preserve_token(:digitalocean_api_token, :clear_digitalocean_token)
   end
 
-  defp preserve_token(cs) do
+  defp preserve_token(cs, token, clear) do
     cs =
-      if get_change(cs, :digitalocean_api_token) in [nil, ""],
-        do: delete_change(cs, :digitalocean_api_token),
+      if get_change(cs, token) in [nil, ""],
+        do: delete_change(cs, token),
         else: cs
 
-    if get_field(cs, :clear_digitalocean_token),
-      do: put_change(cs, :digitalocean_api_token, nil),
+    if get_field(cs, clear),
+      do: put_change(cs, token, nil),
       else: cs
   end
 

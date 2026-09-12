@@ -82,3 +82,18 @@ Port 4421 was not interrupted. No real DNS/nameserver changes, push or deploymen
 Solid's staged-versus-verified state above is unchanged. DigitalOcean wildcard
 DNS-01, automatic panel-hostname DNS and Email Delivery automatic apply remain
 explicitly unsupported; normal HTTP-01 and manual email plans remain available.
+
+### Cloudflare per-domain credentials follow-up
+
+The user's follow-up requested customer/reseller-supplied Cloudflare credentials.
+Domain provider forms now accept encrypted, masked Cloudflare tokens with blank
+preservation, explicit removal, read-only zone access testing and panel fallback.
+DNS operations, Email Delivery and Cloudflare DNS-01 all use the effective domain
+token. Rotation clears affected links/IDs without remote changes; panel rotation
+preserves independently credentialed zones. Existing ownership boundaries remain.
+
+Validation: **331 passed** via mix precommit; assets built; browser checks on
+`http://localhost:4422/domains/2/dns` verified masked credentials, read-only access
+check, linking and remote A/MX listing against stubs. Offline Certbot credential
+selection/cleanup passed without requesting a certificate. Port 4421 remains
+untouched. No push, deployment, real DNS or nameserver changes.

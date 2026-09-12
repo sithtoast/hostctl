@@ -177,7 +177,9 @@ defmodule HostctlWeb.DnsLive.Index do
   # --------------------------------------------------------------------------
 
   def handle_event("link_cloudflare_zone", _, socket) do
-    case Hosting.link_zone_to_cloudflare(socket.assigns.zone) do
+    case Hosting.link_zone_to_cloudflare(
+           Zones.get!(socket.assigns.current_scope, socket.assigns.zone.id)
+         ) do
       {:ok, updated_zone} ->
         zone = %{updated_zone | dns_records: socket.assigns.zone.dns_records}
 
@@ -193,7 +195,12 @@ defmodule HostctlWeb.DnsLive.Index do
         {:noreply, put_flash(socket, :error, "Domain not found in your Cloudflare account.")}
 
       {:error, :cloudflare_not_configured} ->
-        {:noreply, put_flash(socket, :error, "Cloudflare is not configured in Panel Settings.")}
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Configure a Cloudflare token for this domain or in Panel Settings."
+         )}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Cloudflare error: #{reason}")}
@@ -201,7 +208,7 @@ defmodule HostctlWeb.DnsLive.Index do
   end
 
   def handle_event("unlink_cloudflare_zone", _, socket) do
-    case Hosting.update_dns_zone(socket.assigns.zone, %{cloudflare_zone_id: nil}) do
+    case Zones.unlink_cloudflare(socket.assigns.current_scope, socket.assigns.zone.id) do
       {:ok, updated_zone} ->
         zone = %{updated_zone | dns_records: socket.assigns.zone.dns_records}
 
@@ -216,7 +223,9 @@ defmodule HostctlWeb.DnsLive.Index do
   end
 
   def handle_event("sync_to_cloudflare", _, socket) do
-    case Hosting.sync_zone_to_cloudflare(socket.assigns.zone) do
+    case Hosting.sync_zone_to_cloudflare(
+           Zones.get!(socket.assigns.current_scope, socket.assigns.zone.id)
+         ) do
       {:ok, %{synced: count, failed: 0}} ->
         zone = Hosting.get_dns_zone_with_records!(socket.assigns.domain)
 
@@ -247,7 +256,9 @@ defmodule HostctlWeb.DnsLive.Index do
   end
 
   def handle_event("refresh_cloudflare_records", _, socket) do
-    case Hosting.list_cloudflare_zone_records(socket.assigns.zone) do
+    case Hosting.list_cloudflare_zone_records(
+           Zones.get!(socket.assigns.current_scope, socket.assigns.zone.id)
+         ) do
       {:ok, records} ->
         {:noreply,
          socket
@@ -259,7 +270,12 @@ defmodule HostctlWeb.DnsLive.Index do
         {:noreply, put_flash(socket, :error, "Zone is not linked to Cloudflare.")}
 
       {:error, :cloudflare_not_configured} ->
-        {:noreply, put_flash(socket, :error, "Cloudflare is not configured in Panel Settings.")}
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Configure a Cloudflare token for this domain or in Panel Settings."
+         )}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Cloudflare refresh failed: #{inspect(reason)}")}
@@ -286,7 +302,12 @@ defmodule HostctlWeb.DnsLive.Index do
         {:noreply, put_flash(socket, :error, "Zone is not linked to Cloudflare.")}
 
       {:error, :cloudflare_not_configured} ->
-        {:noreply, put_flash(socket, :error, "Cloudflare is not configured in Panel Settings.")}
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Configure a Cloudflare token for this domain or in Panel Settings."
+         )}
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply,
@@ -294,6 +315,21 @@ defmodule HostctlWeb.DnsLive.Index do
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Cloudflare import failed: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("test_domain_cloudflare", _, socket) do
+    case Zones.check_cloudflare(socket.assigns.current_scope, socket.assigns.zone.id) do
+      {:ok, :readable} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :info,
+           "Cloudflare zone read access verified. No records changed; write permissions were not tested."
+         )}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, reason)}
     end
   end
 
@@ -403,11 +439,8 @@ defmodule HostctlWeb.DnsLive.Index do
   end
 
   defp current_or_remote_cloudflare_records(socket) do
-    if socket.assigns.cloudflare_records_loaded do
-      {:ok, socket.assigns.cloudflare_records}
-    else
-      Hosting.list_cloudflare_zone_records(socket.assigns.zone)
-    end
+    zone = Zones.get!(socket.assigns.current_scope, socket.assigns.zone.id)
+    Hosting.list_cloudflare_zone_records(zone)
   end
 
   defp cloudflare_enabled?(dns_setting) do
@@ -513,6 +546,33 @@ defmodule HostctlWeb.DnsLive.Index do
               ]}
             />
             <.input
+              field={@provider_form[:cloudflare_api_token]}
+              value=""
+              type="password"
+              label="Cloudflare API token for this domain (optional)"
+              placeholder="Leave blank to retain the saved token"
+              autocomplete="new-password"
+            />
+            <p id="domain-cloudflare-token-status" class="text-xs text-gray-500">
+              {if @zone.cloudflare_api_token,
+                do: "Cloudflare domain token saved.",
+                else: "Uses the panel token when Cloudflare is selected."} Use a scoped API token with Zone Read and DNS Edit for this domain. Global API keys are not supported.
+            </p>
+            <.input
+              field={@provider_form[:clear_cloudflare_token]}
+              type="checkbox"
+              label="Remove Cloudflare domain token and use panel credentials"
+            />
+            <button
+              :if={@dns_setting.provider == "cloudflare"}
+              id="test-domain-cloudflare-btn"
+              type="button"
+              phx-click="test_domain_cloudflare"
+              class="rounded-lg border border-orange-300 px-3 py-2 text-sm text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-950 transition-colors"
+            >
+              Test saved Cloudflare access
+            </button>
+            <.input
               field={@provider_form[:digitalocean_api_token]}
               value=""
               type="password"
@@ -528,7 +588,7 @@ defmodule HostctlWeb.DnsLive.Index do
             <.input
               field={@provider_form[:clear_digitalocean_token]}
               type="checkbox"
-              label="Remove domain token and use panel credentials"
+              label="Remove DigitalOcean domain token and use panel credentials"
             />
             <button
               id="save-domain-provider-btn"

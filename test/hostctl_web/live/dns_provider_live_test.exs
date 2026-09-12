@@ -106,6 +106,58 @@ defmodule HostctlWeb.DnsProviderLiveTest do
     assert has_element?(view, "#link-digitalocean-btn")
   end
 
+  test "resellers save, retain, test and remove their own Cloudflare token without exposing it",
+       ctx do
+    previous = Application.get_env(:hostctl, :cloudflare_request_options)
+    Application.put_env(:hostctl, :cloudflare_request_options, plug: {Req.Test, :domain_cf_ui})
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:hostctl, :cloudflare_request_options, previous),
+        else: Application.delete_env(:hostctl, :cloudflare_request_options)
+    end)
+
+    Req.Test.stub(:domain_cf_ui, fn conn ->
+      assert conn.method == "GET"
+      assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer reseller-secret"]
+      result = if conn.request_path == "/client/v4/zones", do: [%{"id" => "own-zone"}], else: []
+      Req.Test.json(conn, %{"success" => true, "result" => result})
+    end)
+
+    reseller = ctx.user |> Ecto.Changeset.change(role: "reseller") |> Repo.update!()
+    {:ok, view, _} = live(log_in_user(ctx.conn, reseller), "/domains/#{ctx.domain.id}/dns")
+
+    view
+    |> form("#domain-dns-provider-form",
+      zone_provider: %{provider: "cloudflare", cloudflare_api_token: "reseller-secret"}
+    )
+    |> render_submit()
+
+    assert has_element?(view, "#domain-cloudflare-token-status", "Cloudflare domain token saved.")
+    assert has_element?(view, "#zone_provider_cloudflare_api_token[value='']")
+    refute has_element?(view, "input[value='reseller-secret']")
+
+    view
+    |> form("#domain-dns-provider-form",
+      zone_provider: %{provider: "cloudflare", cloudflare_api_token: ""}
+    )
+    |> render_submit()
+
+    assert Repo.get!(DnsZone, ctx.zone.id).cloudflare_api_token == "reseller-secret"
+    view |> element("#test-domain-cloudflare-btn") |> render_click()
+    assert has_element?(view, "#flash-info", "Cloudflare zone read access verified")
+    view |> element("#link-cf-btn") |> render_click()
+    assert has_element?(view, "#sync-cf-btn")
+
+    view
+    |> form("#domain-dns-provider-form", zone_provider: %{clear_cloudflare_token: true})
+    |> render_submit()
+
+    refute Repo.get!(DnsZone, ctx.zone.id).cloudflare_api_token
+    refute Repo.get!(DnsZone, ctx.zone.id).cloudflare_zone_id
+    refute has_element?(view, "#sync-cf-btn")
+  end
+
   test "non-admins cannot open panel credentials and foreign domain access fails", ctx do
     conn = log_in_user(ctx.conn, ctx.user)
     assert {:error, {:redirect, %{to: "/"}}} = live(conn, "/panel/settings")

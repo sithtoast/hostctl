@@ -79,7 +79,7 @@ defmodule Hostctl.EmailDelivery do
              fresh.snapshot == plan.snapshot && fresh.source == plan.source &&
                fresh.route == plan.route && fresh.rows == plan.rows,
            %{provider: :cloudflare, zone: zone} <- fresh.source do
-        token = Settings.get_dns_provider_setting().cloudflare_api_token
+        token = Settings.dns_setting_for_domain(fresh.setting.domain).cloudflare_api_token
 
         results =
           Enum.reduce_while(plan.rows, [], fn row, results ->

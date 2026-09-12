@@ -369,7 +369,28 @@ defmodule Hostctl.Hosting do
   Attempts to link a DNS zone to a Cloudflare zone by looking up the domain name.
   Requires Cloudflare to be configured in DNS provider settings.
   """
-  def link_zone_to_cloudflare(%DnsZone{} = zone) do
+  def link_zone_to_cloudflare(%DnsZone{id: id}),
+    do: do_link_zone_to_cloudflare(Repo.get!(DnsZone, id))
+
+  @doc """
+  Pushes local DNS records, adopting exact remote values without changing them.
+  Changed values update only a uniquely linked remote ID with the same name/type;
+  unlinked values are created without overwriting other members of a DNS set.
+
+  Returns `{:ok, %{synced: n, failed: n}}` or `{:error, :not_linked | :cloudflare_not_configured}`.
+  """
+  def sync_zone_to_cloudflare(%DnsZone{id: id}),
+    do: do_sync_zone_to_cloudflare(Repo.get!(DnsZone, id))
+
+  @doc """
+  Lists the current DNS records from the linked Cloudflare zone.
+
+  Returns `{:ok, records}` or `{:error, :not_linked | :cloudflare_not_configured | reason}`.
+  """
+  def list_cloudflare_zone_records(%DnsZone{id: id}),
+    do: do_list_cloudflare_zone_records(Repo.get!(DnsZone, id))
+
+  defp do_link_zone_to_cloudflare(%DnsZone{} = zone) do
     with %{provider: "cloudflare", cloudflare_api_token: token}
          when is_binary(token) and token != "" <-
            Settings.dns_setting_for_zone(zone),
@@ -389,15 +410,8 @@ defmodule Hostctl.Hosting do
     end
   end
 
-  @doc """
-  Pushes local DNS records, adopting exact remote values without changing them.
-  Changed values update only a uniquely linked remote ID with the same name/type;
-  unlinked values are created without overwriting other members of a DNS set.
-
-  Returns `{:ok, %{synced: n, failed: n}}` or `{:error, :not_linked | :cloudflare_not_configured}`.
-  """
-  def sync_zone_to_cloudflare(%DnsZone{cloudflare_zone_id: cf_zone_id} = zone)
-      when is_binary(cf_zone_id) do
+  defp do_sync_zone_to_cloudflare(%DnsZone{cloudflare_zone_id: cf_zone_id} = zone)
+       when is_binary(cf_zone_id) do
     with %{provider: "cloudflare", cloudflare_api_token: token}
          when is_binary(token) and token != "" <-
            Settings.dns_setting_for_zone(zone),
@@ -415,15 +429,10 @@ defmodule Hostctl.Hosting do
     end
   end
 
-  def sync_zone_to_cloudflare(_zone), do: {:error, :not_linked}
+  defp do_sync_zone_to_cloudflare(_zone), do: {:error, :not_linked}
 
-  @doc """
-  Lists the current DNS records from the linked Cloudflare zone.
-
-  Returns `{:ok, records}` or `{:error, :not_linked | :cloudflare_not_configured | reason}`.
-  """
-  def list_cloudflare_zone_records(%DnsZone{cloudflare_zone_id: cf_zone_id} = zone)
-      when is_binary(cf_zone_id) do
+  defp do_list_cloudflare_zone_records(%DnsZone{cloudflare_zone_id: cf_zone_id} = zone)
+       when is_binary(cf_zone_id) do
     with %{provider: "cloudflare", cloudflare_api_token: token}
          when is_binary(token) and token != "" <- Settings.dns_setting_for_zone(zone),
          {:ok, records} <- Cloudflare.list_records(token, cf_zone_id) do
@@ -435,7 +444,7 @@ defmodule Hostctl.Hosting do
     end
   end
 
-  def list_cloudflare_zone_records(_zone), do: {:error, :not_linked}
+  defp do_list_cloudflare_zone_records(_zone), do: {:error, :not_linked}
 
   @doc """
   Imports Cloudflare DNS records into the local zone.

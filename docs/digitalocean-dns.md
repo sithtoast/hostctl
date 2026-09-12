@@ -11,7 +11,7 @@ alongside Cloudflare and local/manual DNS. No provider selection changes public 
    verifies read access only, not write authorization or authoritative delegation.
 2. In a domain's DNS manager, its owner or an administrator chooses **Use panel
    default**, **Local / manual**, **Cloudflare**, or **DigitalOcean**. A domain can
-   supply its own DigitalOcean token or use the panel token. Domain owners cannot
+   supply its own Cloudflare or DigitalOcean token or use the matching panel token. Domain owners cannot
    view or change panel credentials. Users without a domain cannot access another
    owner's zone; provider operations recheck ownership in the context.
 3. Create the zone in DigitalOcean outside Hostctl, then choose **Link existing
@@ -26,11 +26,11 @@ alongside Cloudflare and local/manual DNS. No provider selection changes public 
 Linked zones remain pinned to their provider if the panel default changes. Existing
 Cloudflare links therefore continue working. Changing a domain provider or token
 clears its links and both providers' record IDs, without deleting remote data.
-Rotating/removing the panel DigitalOcean token unlinks only zones using that token;
+Rotating the panel Cloudflare or DigitalOcean token unlinks only zones using that token;
 domain-token zones keep their links. Relink and review/import before publishing.
 
 Blank token fields preserve saved credentials. The removal checkbox explicitly
-clears a DigitalOcean token. New credentials use `Hostctl.EncryptedField` at rest;
+clears the chosen domain token (or the panel DigitalOcean token). New credentials use `Hostctl.EncryptedField` at rest;
 struct inspection redacts them, password inputs never render saved values, Phoenix
 filters token parameters, and credential writes suppress SQL parameter logging.
 The encryption key is the endpoint's stable `secret_key_base`; preserve it across
@@ -89,7 +89,7 @@ DNS or delegation has been verified. **Pending sync** means no provider record I
 
 ## Verification
 
-- `ERL_FLAGS='+S 4' MIX_TEST_PARTITION=digitalocean mix precommit`: **323 passed**.
+- `ERL_FLAGS='+S 4' MIX_TEST_PARTITION=digitalocean mix precommit`: **331 passed**.
   Includes HTTP stubs, ownership/no-domain boundaries, encrypted token persistence,
   overrides/rotation, pagination, errors, multi-value/SRV/CAA reconciliation, CRUD,
   TTL edits, and panel/domain LiveView interactions. Existing Cloudflare and email
@@ -112,3 +112,39 @@ DNS or delegation has been verified. **Pending sync** means no provider record I
 - [DigitalOcean Domain Records API](https://docs.digitalocean.com/reference/api/reference/domain-records/): request fields, bearer auth, scopes, record CRUD, pagination.
 - [DigitalOcean Domains API](https://docs.digitalocean.com/reference/api/reference/domains/): exact domain lookup and read-only token check.
 - [DigitalOcean DNS limits](https://docs.digitalocean.com/products/networking/dns/details/limits/): TTL and CAA limitations.
+
+## Cloudflare customer tokens (September 12 follow-up)
+
+Domain owners, including reseller-owned domains, can save an encrypted Cloudflare
+API token under **Domain DNS provider**. Set the provider override to Cloudflare to
+use it independently of the panel default. Blank inputs retain the saved token;
+**Remove Cloudflare domain token and use panel credentials** clears it and unlinks
+the zone. Existing domain ownership and admin route boundaries remain unchanged;
+this feature does not grant a reseller access to unrelated customer domains.
+
+Use a scoped bearer API token with Zone Read and DNS Edit for the intended domain,
+not a legacy global API key. **Test saved Cloudflare access** performs exact-domain
+lookup and record listing without linking or writing; it does not prove write
+permissions. Link, sync, import, record CRUD, Email Delivery preview/publication,
+and Cloudflare DNS-01 certificate provisioning all resolve the domain token before
+falling back to the panel token. Email Delivery's administrative access rules are
+unchanged. The installer panel-hostname flow is still separate.
+
+Credential changes retire record IDs and zone links without changing remote DNS.
+Cloudflare link/list/sync reload the stored zone, preventing an old open page from
+reusing a link after token rotation. Unlink clears Cloudflare record IDs. Imports
+refresh the remote set rather than reusing a cached set from an older credential.
+Rotating a panel Cloudflare token leaves domains using their own tokens linked.
+
+Validation: full precommit **331 passed**, asset build passed, and browser checks at
+**http://localhost:4422/domains/2/dns** verified a saved/masked domain Cloudflare token,
+read-access check, linking and remote A/MX listing while the panel default remained
+DigitalOcean. All DNS API calls were stubbed. An offline Certbot executable verified
+that the domain token reaches DNS-01 and the temporary credentials file is removed;
+no certificate was requested. Tests also cover blank preservation, explicit removal,
+rotation, stale links, ownership restrictions, DNS CRUD and Email Delivery token
+selection. Port 4421 was untouched; no real DNS changes, push or deployment.
+
+Cloudflare references checked September 12, 2026:
+[API token templates](https://developers.cloudflare.com/fundamentals/api/reference/template/)
+and [permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).

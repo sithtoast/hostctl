@@ -155,6 +155,22 @@ defmodule Hostctl.Settings do
             )
           end
 
+          if Map.has_key?(cs.changes, :cloudflare_api_token) do
+            zones =
+              from z in Hostctl.Hosting.DnsZone,
+                where: is_nil(z.cloudflare_api_token) and not is_nil(z.cloudflare_zone_id),
+                select: z.id
+
+            Repo.update_all(
+              from(r in Hostctl.Hosting.DnsRecord, where: r.dns_zone_id in subquery(zones)),
+              set: [cloudflare_record_id: nil]
+            )
+
+            Repo.update_all(from(z in Hostctl.Hosting.DnsZone, where: z.id in subquery(zones)),
+              set: [cloudflare_zone_id: nil]
+            )
+          end
+
           saved
 
         {:error, cs} ->
@@ -183,6 +199,7 @@ defmodule Hostctl.Settings do
     %{
       setting
       | provider: provider,
+        cloudflare_api_token: zone.cloudflare_api_token || setting.cloudflare_api_token,
         digitalocean_api_token: zone.digitalocean_api_token || setting.digitalocean_api_token
     }
   end

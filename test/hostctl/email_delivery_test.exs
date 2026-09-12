@@ -148,6 +148,26 @@ defmodule Hostctl.EmailDeliveryTest do
     assert length(Agent.get(TestProvider, & &1.writes)) == count
   end
 
+  test "email preview and publication both use the domain Cloudflare token", %{
+    scope: scope,
+    setting: setting
+  } do
+    configure(scope, setting)
+    zone = Repo.get_by!(DnsZone, domain_id: setting.domain_id)
+
+    {:ok, _} =
+      Hostctl.DNS.Zones.save_provider(scope, zone.id, %{
+        provider: "cloudflare",
+        cloudflare_api_token: "customer-token"
+      })
+
+    {:ok, plan} = EmailDelivery.preview(scope, setting.domain_id)
+    assert {:ok, _} = EmailDelivery.publish(scope, plan)
+    tokens = Agent.get(TestProvider, & &1.tokens)
+    assert length(tokens) >= 8
+    assert Enum.uniq(tokens) == ["customer-token"]
+  end
+
   test "publication reports partial failure and does not falsely verify", %{
     scope: scope,
     setting: setting

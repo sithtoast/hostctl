@@ -18,7 +18,12 @@ defmodule Hostctl.DNS.Zones do
   def save_provider(scope, zone_id, attrs) do
     zone = get!(scope, zone_id)
     cs = DnsZone.provider_changeset(zone, attrs)
-    changed? = Enum.any?([:provider, :digitalocean_api_token], &Map.has_key?(cs.changes, &1))
+
+    changed? =
+      Enum.any?(
+        [:provider, :cloudflare_api_token, :digitalocean_api_token],
+        &Map.has_key?(cs.changes, &1)
+      )
 
     if cs.valid? and changed? do
       Repo.transaction(fn ->
@@ -34,6 +39,34 @@ defmodule Hostctl.DNS.Zones do
     else
       Repo.update(cs, log: false)
     end
+  end
+
+  def check_cloudflare(scope, zone_id) do
+    zone = get!(scope, zone_id)
+    setting = Settings.dns_setting_for_zone(zone)
+
+    with true <- setting.provider == "cloudflare" and is_binary(setting.cloudflare_api_token),
+         domain <- Repo.preload(zone, :domain).domain,
+         {:ok, id} <- Hostctl.DNS.Cloudflare.find_zone(setting.cloudflare_api_token, domain.name),
+         {:ok, _} <- Hostctl.DNS.Cloudflare.list_records(setting.cloudflare_api_token, id) do
+      {:ok, :readable}
+    else
+      _ ->
+        {:error,
+         "Could not read this Cloudflare zone. Check the saved domain or panel token and zone permissions."}
+    end
+  end
+
+  def unlink_cloudflare(scope, zone_id) do
+    zone = get!(scope, zone_id)
+
+    Repo.transaction(fn ->
+      Repo.update_all(from(r in DnsRecord, where: r.dns_zone_id == ^zone.id),
+        set: [cloudflare_record_id: nil]
+      )
+
+      zone |> Ecto.Changeset.change(cloudflare_zone_id: nil) |> Repo.update!()
+    end)
   end
 
   def link(scope, zone_id) do
