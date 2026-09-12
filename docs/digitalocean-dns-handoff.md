@@ -97,3 +97,19 @@ Validation: **331 passed** via mix precommit; assets built; browser checks on
 check, linking and remote A/MX listing against stubs. Offline Certbot credential
 selection/cleanup passed without requesting a certificate. Port 4421 remains
 untouched. No push, deployment, real DNS or nameserver changes.
+
+### Changelog and version preparation
+
+The user considers the DNS feature complete and requested a changelog plus less
+manual version/build maintenance. Source version is now **0.14.0**, with the DNS
+feature recorded in `CHANGELOG.md`. `mix hostctl.version.bump patch|minor|major`
+now updates the source version and moves Unreleased changelog notes together.
+The existing GitHub workflow already assigns build numbers and creates draft
+prereleases on main pushes; it is unchanged. See [releases.md](releases.md).
+
+Validation: required `mix precommit` **336 passed**, including all three bump
+types, changelog/history preservation, invalid-input protection and repeat-bump
+rejection. The development command compiled automatically and returned its usage
+error without arguments, leaving version files untouched. Existing startup
+SQL-sandbox diagnostics remain. No push or publication occurred; both previews
+were left running, and their running application versions were not restarted.
