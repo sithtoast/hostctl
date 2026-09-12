@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Apply a pinned statistics bundle staged beside this launcher on Solid.
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Run with sudo.' >&2; exit 1; }
+[[ $# -eq 0 ]] || { echo 'This launcher takes no arguments.' >&2; exit 1; }
+payload=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+expected=$(cat "$payload/revision")
+bundle_sha=$(cat "$payload/source.sha256")
+[[ "$expected" =~ ^[a-f0-9]{40}$ && "$bundle_sha" =~ ^[a-f0-9]{64}$ ]] || exit 1
+exec 9>/run/lock/hostctl-followup.lock
+flock -n 9 || { echo 'Another installation is running.' >&2; exit 1; }
+[[ $(hostname) == hostctl-dev ]] || { echo 'Unexpected VM hostname.' >&2; exit 1; }
+[[ -d /opt/hostctl && ! -L /opt/hostctl && -f /etc/hostctl/env ]] || exit 1
+installed=$(cat /etc/hostctl/commit)
+case "$installed" in
+  68eb2c4a98c5bb3ae39814819528f26c8d9773ed) ;;
+  "$expected") echo 'This update is already installed. Open a domain and select Traffic statistics.'; exit 0 ;;
+  *) echo "Installed revision changed ($installed); review this pinned update before applying." >&2; exit 1 ;;
+esac
+systemctl is-active --quiet hostctl
+for tool in git mix curl sha256sum runuser; do command -v "$tool" >/dev/null; done
+install -d -m 0750 /var/backups/hostctl
+backup=$(mktemp -d /var/backups/hostctl/statistics-XXXXXXXX)
+chmod 0700 "$backup"
+work=$(mktemp -d /usr/local/src/hostctl-statistics-XXXXXXXX)
+install -m 0600 "$payload/source.bundle" "$work/source.bundle"
+actual=$(sha256sum "$work/source.bundle")
+[[ ${actual%% *} == "$bundle_sha" ]] || { echo 'Bundle checksum mismatch.' >&2; exit 1; }
+git clone --quiet --branch codex/domain-stats-import-progress "$work/source.bundle" "$work/source"
+[[ $(git -C "$work/source" rev-parse HEAD) == "$expected" ]] || exit 1
+cd "$work/source"
+printf '%s\n' "$expected" > priv/COMMIT
+cp -a /etc/hostctl/commit "$backup/commit"
+printf '%s\n' "$work/source" > "$backup/candidate-source"
+stop_attempted=false
+release_saved=false
+recover() {
+  code=$?
+  trap - ERR
+  set +e
+  if [[ $release_saved == true ]]; then
+    systemctl stop hostctl
+    [[ ! -d /opt/hostctl ]] || mv /opt/hostctl "$backup/failed-release"
+    if mv "$backup/release" /opt/hostctl; then
+      cp -a "$backup/commit" /etc/hostctl/commit
+      systemctl start hostctl
+      echo 'Verification failed; previous release restored. Additive statistics column and reports are retained.' >&2
+    else
+      echo "Automatic restoration failed. Previous release: $backup/release" >&2
+    fi
+  elif [[ $stop_attempted == true ]]; then
+    systemctl start hostctl
+  fi
+  echo "Stopped with error $code. Build: $work/source; backup/check logs: $backup" >&2
+  exit "$code"
+}
+trap recover ERR
+
+echo 'Building the pinned update while the current panel remains running…'
+MIX_ENV=prod mix deps.get --only prod
+MIX_ENV=prod mix hex.audit
+MIX_ENV=prod mix assets.setup
+MIX_ENV=prod mix compile --warnings-as-errors
+MIX_ENV=prod mix assets.deploy
+MIX_ENV=prod mix release --overwrite
+[[ -x _build/prod/rel/hostctl/bin/statistics ]]
+candidate=$(mktemp -d /opt/hostctl-statistics-candidate-XXXXXXXX)
+cp -a _build/prod/rel/hostctl/. "$candidate/"
+chown -R hostctl:hostctl "$candidate"
+
+# Install the OS analytics package and its private storage before switching releases.
+apt-get install -y --no-install-recommends goaccess python3
+install -d -m 0700 -o hostctl -g hostctl /var/lib/hostctl/statistics
+# Read installed credentials privately; never print or trace this environment.
+set -a
+source /etc/hostctl/env
+set +a
+
+echo 'Build passed. Restarting the Hostctl panel and applying the additive statistics migration now.'
+stop_attempted=true
+systemctl stop hostctl
+mv /opt/hostctl "$backup/release"
+release_saved=true
+mv "$candidate" /opt/hostctl
+runuser -u hostctl -- /opt/hostctl/bin/hostctl eval 'Hostctl.Release.migrate()' > "$backup/migration.log" 2>&1
+install -m 0644 priv/COMMIT /etc/hostctl/commit
+systemctl start hostctl
+ready=false
+for attempt in {1..30}; do
+  if /opt/hostctl/bin/hostctl rpc ':ok' > "$backup/startup-check.log" 2>&1; then ready=true; break; fi
+  sleep 1
+done
+[[ $ready == true ]]
+/opt/hostctl/bin/hostctl rpc '
+commit = Application.app_dir(:hostctl, "priv/COMMIT") |> File.read!() |> String.trim()
+IO.puts("Running commit: #{commit}")
+true = Hostctl.Statistics.available?()
+true = is_pid(Process.whereis(Hostctl.Statistics.Collector))
+# Scoped read-only checks; the normal collector will generate the first reports.
+ids = Hostctl.Statistics.enabled_ids()
+IO.puts("PASS: GoAccess available; automatic collection enabled for #{length(ids)} domains.")
+{:ok, _} = Hostctl.Settings.save_feature_setting("goaccess", %{status: "installed", enabled: true, status_message: nil})
+' > "$backup/verification.log" 2>&1
+# Verify the running stamp independently; do not confuse the unchanged source checkout with the release.
+running=$(/opt/hostctl/bin/hostctl rpc 'IO.write(Application.app_dir(:hostctl, "priv/COMMIT") |> File.read!() |> String.trim())')
+[[ "$running" == "$expected" ]]
+curl --fail --silent --output /dev/null --max-time 15 \
+  -H 'Host: solid.toastedlabs.com' "http://127.0.0.1:${PORT:-4000}/users/log-in"
+systemctl is-active --quiet hostctl nginx vsftpd php8.5-fpm
+trap - ERR
+cat "$backup/verification.log"
+printf '\nInstalled %s. Backup: %s\n' "$expected" "$backup"
+printf 'Built source: %s/source (original /usr/local/src/hostctl is unchanged).\n' "$work"
+echo 'Open a domain → Traffic statistics. The first scheduled collection starts about one minute after restart.'
+echo 'You can also use Collect now. Automatic collection can be turned off per domain.'
+echo 'Avoid the normal updater until published source includes this local update.'

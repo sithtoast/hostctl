@@ -31,6 +31,22 @@ defmodule HostctlWeb.DomainLive.Statistics do
      |> start_async(:collect, fn -> Statistics.refresh(scope, id) end)}
   end
 
+  def handle_event("set_collection", %{"enabled" => value}, socket)
+      when value in ["true", "false"] do
+    case Statistics.set_enabled(
+           socket.assigns.current_scope,
+           socket.assigns.snapshot.domain.id,
+           value == "true"
+         ) do
+      {:ok, _domain} ->
+        {:noreply,
+         socket |> assign(:error, nil) |> load_snapshot(socket.assigns.snapshot.domain.id)}
+
+      {:error, _changeset} ->
+        {:noreply, assign(socket, :error, "Could not update collection. Please try again.")}
+    end
+  end
+
   def handle_async(:collect, {:ok, {:ok, _}}, socket) do
     {:noreply, socket |> assign(:busy, false) |> load_snapshot(socket.assigns.snapshot.domain.id)}
   end
@@ -103,14 +119,43 @@ defmodule HostctlWeb.DomainLive.Statistics do
           <button
             id="refresh-statistics"
             phx-click="refresh"
-            disabled={@busy or not @snapshot.available?}
+            disabled={@busy or not @snapshot.available? or not @snapshot.domain.statistics_enabled}
             class="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
           >
             {cond do
               @busy -> "Collecting…"
               @snapshot.live -> "Refresh traffic"
-              true -> "Start collecting"
+              true -> "Collect now"
             end}
+          </button>
+        </div>
+        <div
+          id="statistics-collection"
+          class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 p-4 dark:border-gray-800"
+        >
+          <div>
+            <p class="text-sm font-medium">
+              {if @snapshot.domain.statistics_enabled,
+                do: "Automatic collection is on",
+                else: "Automatic collection is off"}
+            </p>
+            <p class="mt-1 text-xs text-gray-500">
+              {if @snapshot.domain.statistics_enabled,
+                do:
+                  "Traffic is collected hourly once GoAccess is installed. New domains are included automatically.",
+                else: "Existing reports are retained. An in-progress collection may finish."}
+            </p>
+          </div>
+          <button
+            id="toggle-statistics"
+            phx-click="set_collection"
+            phx-value-enabled={to_string(not @snapshot.domain.statistics_enabled)}
+            disabled={@busy}
+            class="rounded-lg border border-gray-300 px-3 py-2 text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:border-gray-700 dark:hover:bg-gray-800"
+          >
+            {if @snapshot.domain.statistics_enabled,
+              do: "Turn off collection",
+              else: "Enable collection"}
           </button>
         </div>
         <div
@@ -171,7 +216,9 @@ defmodule HostctlWeb.DomainLive.Statistics do
               Updated {DateTime.from_unix!(@data["updated_at"])
               |> Calendar.strftime("%b %d, %Y at %H:%M UTC")}
             </span>
-            <span :if={@kind == "live"}>Refreshes hourly after collection is enabled.</span>
+            <span :if={@kind == "live" and @snapshot.domain.statistics_enabled}>
+              Refreshes hourly.
+            </span>
             <span :if={@kind == "history"}>Imported history is kept separate from new traffic.</span>
           </div>
           <p :if={@data["warning"]} class="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
@@ -216,7 +263,11 @@ defmodule HostctlWeb.DomainLive.Statistics do
             <p class="mt-4 font-medium">
               {if @kind == "history",
                 do: "No Plesk history imported yet",
-                else: "Start collecting this domain’s traffic"}
+                else:
+                  if(@snapshot.domain.statistics_enabled,
+                    do: "Waiting for the first traffic report",
+                    else: "Collection is turned off"
+                  )}
             </p>
             <p class="mt-2 text-sm text-gray-500">
               {if @kind == "history",

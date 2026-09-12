@@ -6,7 +6,7 @@ See [Domain statistics](domain-statistics.md) for operation, limits and VM accep
 
 ## Completed implementation and checks
 
-- Added private GoAccess reports with opt-in hourly collection, domain/subdomain
+- Added private GoAccess reports with default-on hourly collection and a persisted per-domain opt-out, domain/subdomain
   inputs, persistent state, atomic publication and bounded collection resources.
 - Added Plesk SSH statistics inventory/import plus an extracted-history shell
   command. Preserved AWStats HTML/data is separate from rebuilt GoAccess history
@@ -40,6 +40,29 @@ See [Domain statistics](domain-statistics.md) for operation, limits and VM accep
 
 The investigation below records the original findings and design inputs; its
 references to missing behavior describe the pre-change baseline.
+
+## Default-on follow-up and Solid staging
+
+The user changed collection to opt-out. The additive
+`20260912132357_add_statistics_enabled_to_domains` migration enables existing
+and new domains by default. The collector now queries enabled domains from the
+repository, including domains without a first report. Owners/admins can turn
+collection off or back on from the stats page. Opt-out retains reports; an
+already-running collection may finish. New installations include GoAccess.
+
+`mix precommit`: **301 passed**. Regressions cover a new domain with no report,
+persistent opt-out/re-enable, scope enforcement, manual refresh refusing disabled
+domains, and the LiveView controls retaining reports. Minified assets build passed.
+
+Read-only SSH confirmed the installed release stamp is `68eb2c4` (the original
+`/usr/local/src/hostctl` checkout still reports `338aa16`). Hostctl, Nginx, vsftpd
+and PHP 8.5 remain active. The new `scripts/vm-statistics-apply` launcher accepts a
+locally staged source bundle plus revision/checksum files, builds/audits before
+restarting, installs GoAccess, runs migrations, and verifies the running commit
+and collector. It retains the previous release for automatic error recovery;
+the additive column remains if the release is restored. No hosting import or
+public DNS writes are performed. Applying requires the operator's interactive
+sudo. The normal updater must wait for these local commits to be published.
 
 ## User requests and decisions
 

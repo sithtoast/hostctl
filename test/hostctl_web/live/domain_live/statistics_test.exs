@@ -71,6 +71,22 @@ defmodule HostctlWeb.DomainLive.StatisticsTest do
     assert historical_csp =~ "script-src 'none'"
   end
 
+  test "owner can opt out and re-enable collection without losing reports", %{
+    conn: conn,
+    domain: domain
+  } do
+    {:ok, view, _} = live(conn, ~p"/domains/#{domain.id}/statistics")
+    assert has_element?(view, "#toggle-statistics[phx-value-enabled='false']")
+    view |> element("#toggle-statistics") |> render_click()
+    assert has_element?(view, "#statistics-collection", "Automatic collection is off")
+    assert has_element?(view, "#refresh-statistics[disabled]")
+    assert has_element?(view, "#statistics-report")
+    refute Hostctl.Repo.reload!(domain).statistics_enabled
+    view |> element("#toggle-statistics") |> render_click()
+    assert Hostctl.Repo.reload!(domain).statistics_enabled
+    refute has_element?(view, "#refresh-statistics[disabled]")
+  end
+
   test "report endpoints enforce login and domain ownership", %{domain: domain} do
     anonymous = get(build_conn(), ~p"/domains/#{domain.id}/statistics/report/live")
     assert redirected_to(anonymous) == "/users/log-in"

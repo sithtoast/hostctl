@@ -208,7 +208,7 @@ defmodule Hostctl.FeatureSetup do
   to avoid false-positives (e.g. MariaDB registers a `mysql.service` alias).
   """
   def reconcile_installed_features do
-    for feature <- @features, feature.services != [] do
+    for feature <- @features, feature.services != [] or feature.key == "goaccess" do
       setting = Settings.get_feature_setting(feature.key)
 
       conflicts = Map.get(feature, :conflicts, [])
@@ -241,6 +241,10 @@ defmodule Hostctl.FeatureSetup do
     else
       _ -> false
     end
+  end
+
+  defp feature_configured?(%{key: "goaccess", packages: packages}) do
+    packages_installed?(packages) and File.dir?(Hostctl.Statistics.root())
   end
 
   defp feature_configured?(_), do: true

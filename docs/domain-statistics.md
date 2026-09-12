@@ -1,9 +1,14 @@
 # Domain traffic statistics
 
 Hostctl uses GoAccess for private, per-domain reports. Open a domain and choose
-**Traffic statistics**, then **Start collecting**. Administrators can install
-**Domain Statistics** from Administration → Features. The first successful
-collection enables hourly updates; **Refresh traffic** collects immediately.
+**Traffic statistics**. Collection is on by default for existing and new domains.
+New installations include GoAccess. On an older installation, administrators can
+install **Domain Statistics** from Administration → Features; the staged Solid
+launcher installs it automatically. The collector runs one minute
+after service startup and then hourly; **Collect now** / **Refresh traffic** collects
+immediately. **Turn off collection** saves a per-domain opt-out. Existing reports
+are retained and an already-running collection may finish. **Enable collection**
+resumes future hourly collection.
 The domain and its configured local/S3 subdomains are included.
 
 Reports show requested pages, downloads, referrers, HTTP errors, traffic and
@@ -13,6 +18,10 @@ Countries require a service-readable GeoIP MMDB file configured with
 `HOSTCTL_GEOIP_DATABASE` in `/etc/hostctl/env`, plus accurate client-IP logging.
 Hostctl does not download a GeoIP database or change trusted-proxy settings.
 Query strings are omitted from newly generated requested-URL statistics.
+
+The additive `add_statistics_enabled_to_domains` migration defaults existing rows
+and newly created domains to enabled. No previous report or first manual collection
+is required for a domain to enter the hourly schedule.
 
 ## Collection and retention
 

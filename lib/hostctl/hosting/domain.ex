@@ -28,6 +28,7 @@ defmodule Hostctl.Hosting.Domain do
     field :bandwidth_used_mb, :integer, default: 0
     field :apply_dns_template, :boolean, default: true
     field :autoindex, :boolean, default: false
+    field :statistics_enabled, :boolean, default: true
     field :cr_date, :date
 
     belongs_to :user, User

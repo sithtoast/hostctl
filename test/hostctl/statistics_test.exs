@@ -53,6 +53,24 @@ defmodule Hostctl.StatisticsTest do
     assert {:error, :not_found} = Statistics.read_report(scope, domain.id, "live")
   end
 
+  test "existing and new domains collect without a report, with a persistent owner opt-out", %{
+    scope: scope,
+    domain: domain
+  } do
+    assert domain.statistics_enabled
+    assert domain.id in Statistics.enabled_ids()
+    assert Statistics.snapshot(scope, domain.id).live == nil
+    {:ok, _} = Statistics.set_enabled(scope, domain.id, false)
+    refute domain.id in Statistics.enabled_ids()
+    assert {:error, _} = Statistics.refresh(scope, domain.id)
+    refute Statistics.snapshot(scope, domain.id).domain.statistics_enabled
+    other = user_scope_fixture()
+    assert_raise Ecto.NoResultsError, fn -> Statistics.set_enabled(other, domain.id, true) end
+    admin = Hostctl.Accounts.Scope.for_user(admin_user_fixture())
+    {:ok, _} = Statistics.set_enabled(admin, domain.id, true)
+    assert domain.id in Statistics.enabled_ids()
+  end
+
   test "collection uses only persisted domain and subdomain log names", %{
     scope: scope,
     domain: domain,
