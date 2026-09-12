@@ -40,6 +40,13 @@
   `main` in this repository, not `master`) and continuing these issues in another task.
 - No GitHub push has occurred in this task. Use the locally prepared bundle for
   the fresh trial unless a push is explicitly authorized.
+- The operator ran the `affd986` follow-up launcher; it failed before the release
+  swap because `assets.deploy` preceded Hostctl compilation, leaving the generated
+  colocated-hook import missing. The installed services remained active when
+  rechecked. [Build/security follow-up](security-build-follow-up.md) records the
+  fixed ordering, dependency advisory updates, Markdown replacement and portable
+  native-binary requirement for Solid's CPU. Local `mix precommit`: 291 passed;
+  `mix hex.audit`: no retired or advisory packages. Deployment remains pending.
 
 ## Historical local VM notes
 

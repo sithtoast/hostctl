@@ -6,6 +6,9 @@
 
 import Config
 
+# Use portable Markdown binaries for VMs whose CPU model omits AVX/FMA.
+config :mdex_native, :use_legacy_artifacts, true
+
 config :hostctl, :scopes,
   user: [
     default: true,

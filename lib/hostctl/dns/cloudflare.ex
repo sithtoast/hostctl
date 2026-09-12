@@ -85,7 +85,9 @@ defmodule Hostctl.DNS.Cloudflare do
            request(
              api_token,
              :patch,
-             "/zones/#{cloudflare_zone_id}/dns_records/#{cloudflare_record_id}", json: body) do
+             "/zones/#{cloudflare_zone_id}/dns_records/#{cloudflare_record_id}",
+             json: body
+           ) do
       :ok
     end
   end

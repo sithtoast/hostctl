@@ -107,8 +107,8 @@ installer rerun, account enrollment or ownership repair is needed for this fix.
    git rev-parse HEAD > priv/COMMIT
    MIX_ENV=prod mix deps.get --only prod
    MIX_ENV=prod mix assets.setup
-   MIX_ENV=prod mix assets.deploy
    MIX_ENV=prod mix compile --warnings-as-errors
+   MIX_ENV=prod mix assets.deploy
    MIX_ENV=prod mix release --overwrite
    ```
 

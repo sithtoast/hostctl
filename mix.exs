@@ -41,14 +41,14 @@ defmodule Hostctl.MixProject do
   defp deps do
     [
       {:bcrypt_elixir, "~> 3.0"},
-      {:phoenix, "~> 1.8.4"},
+      {:phoenix, "~> 1.8.13"},
       {:phoenix_ecto, "~> 4.5"},
-      {:ecto_sql, "~> 3.13"},
-      {:postgrex, ">= 0.0.0"},
-      {:myxql, "~> 0.7"},
+      {:ecto_sql, "~> 3.14"},
+      {:postgrex, "~> 0.22.4"},
+      {:myxql, "~> 0.9"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
-      {:phoenix_live_view, "~> 1.1.0"},
+      {:phoenix_live_view, "~> 1.1.33"},
       {:lazy_html, ">= 0.1.0", only: :test},
       {:phoenix_live_dashboard, "~> 0.8.3"},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
@@ -60,15 +60,15 @@ defmodule Hostctl.MixProject do
        app: false,
        compile: false,
        depth: 1},
-      {:swoosh, "~> 1.16"},
-      {:req, "~> 0.5"},
+      {:swoosh, "~> 1.28"},
+      {:req, "~> 0.7.4"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"},
-      {:earmark, "~> 1.4"}
+      {:bandit, "~> 1.12"},
+      {:mdex, "~> 0.13.5"}
     ]
   end
 
@@ -87,6 +87,7 @@ defmodule Hostctl.MixProject do
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["compile", "tailwind hostctl", "esbuild hostctl"],
       "assets.deploy": [
+        "compile",
         "tailwind hostctl --minify",
         "esbuild hostctl --minify",
         "phx.digest"

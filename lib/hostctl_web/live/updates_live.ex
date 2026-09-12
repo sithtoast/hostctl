@@ -638,9 +638,7 @@ defmodule HostctlWeb.UpdatesLive do
   end
 
   defp render_markdown(text) when is_binary(text) do
-    text
-    |> Earmark.as_html!(%Earmark.Options{pure_links: true})
-    |> Phoenix.HTML.raw()
+    HostctlWeb.Markdown.render(text)
   end
 
   defp update_commands_html do
