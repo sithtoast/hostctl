@@ -259,7 +259,7 @@ defmodule HostctlWeb.DomainLive.Show do
         %{id: 2, text: "Preparing SSL provisioning task..."}
       ]
 
-      if covers_wildcard_subdomains and !Settings.cloudflare_enabled?() do
+      if covers_wildcard_subdomains and !Settings.cloudflare_enabled_for_domain?(domain) do
         Logger.warning(
           "[SSLTRACE2] request_ssl blocked domain_id=#{domain.id} reason=wildcard_without_cloudflare"
         )
@@ -273,7 +273,7 @@ defmodule HostctlWeb.DomainLive.Show do
              %{
                id: 0,
                text:
-                 "ERROR: Wildcard SSL requires Cloudflare DNS challenge setup first. Configure DNS Provider in panel settings, then retry."
+                 "ERROR: Wildcard SSL currently requires Cloudflare DNS-01 for this domain. DigitalOcean DNS-01 is not supported. Review the domain provider and panel credentials."
              }
            ],
            reset: true

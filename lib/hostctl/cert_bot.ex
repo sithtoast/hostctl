@@ -48,7 +48,7 @@ defmodule Hostctl.CertBot do
   """
   def provision(%Domain{} = domain, %SslCertificate{cert_type: "lets_encrypt"} = cert) do
     if enabled?() do
-      setting = Settings.get_dns_provider_setting()
+      setting = Settings.dns_setting_for_domain(domain)
       do_provision(domain, cert, setting)
     else
       Logger.info("[CertBot] Certbot disabled – skipping provisioning for #{domain.name}")
@@ -90,7 +90,7 @@ defmodule Hostctl.CertBot do
          _setting
        ) do
     message =
-      "Wildcard certificates require DNS-01 validation through the configured DNS provider"
+      "Wildcard certificates currently require Cloudflare DNS-01; DigitalOcean DNS-01 is not supported"
 
     broadcast_log(domain.id, message)
     {:error, :wildcard_requires_dns_challenge, message}

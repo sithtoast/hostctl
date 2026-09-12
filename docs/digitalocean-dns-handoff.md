@@ -65,3 +65,20 @@ for UI acceptance. Run `mix precommit`, update the handoff, and commit locally.
 Do not print tokens, change real DNS, enable SSH, push or deploy without the user's
 request for that action. Ask only for material product choices that cannot be
 resolved from existing behavior; keep progressing on independent work.
+
+## Implementation completed in separate worktree
+
+September 12, 2026: branch `codex/digitalocean-dns`, worktree
+`/Users/wmh/.codex/worktrees/3f39/hostctl`. See [digitalocean-dns.md](digitalocean-dns.md)
+for behavior, credential/link lifecycle, API references and explicit support limits.
+Panel defaults/credentials and ownership-checked domain selection/token overrides
+are implemented. Linked zone record CRUD, refresh/import and conservative sync are
+covered by API/context/LiveView tests. Cloudflare/manual DNS remain available.
+
+Final precommit: **323 passed**; asset build passed; isolated port **4422** browser
+preview verified panel token checks and domain linking/refresh/import with synthetic
+A/MX/TXT/SRV records. DNS calls in that preview are stubbed; writes are rejected.
+Port 4421 was not interrupted. No real DNS/nameserver changes, push or deployment.
+Solid's staged-versus-verified state above is unchanged. DigitalOcean wildcard
+DNS-01, automatic panel-hostname DNS and Email Delivery automatic apply remain
+explicitly unsupported; normal HTTP-01 and manual email plans remain available.

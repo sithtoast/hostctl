@@ -4,6 +4,7 @@ defmodule HostctlWeb.DnsLive.Index do
   alias Hostctl.Hosting
   alias Hostctl.Hosting.DnsRecord
   alias Hostctl.Settings
+  alias Hostctl.DNS.Zones
 
   def mount(%{"domain_id" => domain_id}, _session, socket) do
     scope = socket.assigns.current_scope
@@ -30,7 +31,7 @@ defmodule HostctlWeb.DnsLive.Index do
           Hosting.get_dns_zone_with_records!(domain)
       end
 
-    dns_setting = Settings.get_dns_provider_setting()
+    dns_setting = Settings.dns_setting_for_zone(zone)
 
     {:ok,
      socket
@@ -38,7 +39,18 @@ defmodule HostctlWeb.DnsLive.Index do
      |> assign(:active_tab, :domains)
      |> assign(:domain, domain)
      |> assign(:zone, zone)
-     |> assign(:dns_setting, dns_setting)
+     |> assign(:dns_setting, %{
+       dns_setting
+       | cloudflare_api_token: nil,
+         digitalocean_api_token: nil
+     })
+     |> assign(:cloudflare_available, cloudflare_enabled?(dns_setting))
+     |> assign(
+       :provider_form,
+       to_form(Hostctl.Hosting.DnsZone.provider_changeset(zone, %{}), as: :zone_provider)
+     )
+     |> assign(:digitalocean_loaded, false)
+     |> stream(:digitalocean_records, [])
      |> assign(:cloudflare_records, [])
      |> assign(:cloudflare_records_loaded, false)
      |> assign(:editing_record_id, nil)
@@ -143,13 +155,18 @@ defmodule HostctlWeb.DnsLive.Index do
     record = Enum.find(zone.dns_records, &(to_string(&1.id) == id))
 
     if record do
-      {:ok, _} = Hosting.delete_dns_record(record)
-      zone = Hosting.get_dns_zone_with_records!(socket.assigns.domain)
+      case Hosting.delete_dns_record(record) do
+        {:ok, _} ->
+          {:noreply, reload_provider(socket)}
 
-      {:noreply,
-       socket
-       |> assign(:zone, zone)
-       |> stream_delete(:dns_records, record)}
+        {:error, reason} ->
+          {:noreply,
+           put_flash(
+             socket,
+             :error,
+             if(is_binary(reason), do: reason, else: "Could not delete DNS record")
+           )}
+      end
     else
       {:noreply, socket}
     end
@@ -280,6 +297,103 @@ defmodule HostctlWeb.DnsLive.Index do
     end
   end
 
+  def handle_event("save_provider", %{"zone_provider" => attrs}, socket) do
+    case Zones.save_provider(socket.assigns.current_scope, socket.assigns.zone.id, attrs) do
+      {:ok, _} ->
+        {:noreply,
+         reload_provider(socket)
+         |> put_flash(
+           :info,
+           "Provider preference saved. Link the zone separately; DNS and nameservers were not changed."
+         )}
+
+      {:error, cs} ->
+        {:noreply, assign(socket, :provider_form, to_form(cs, as: :zone_provider))}
+    end
+  end
+
+  def handle_event(event, _, socket)
+      when event in [
+             "link_digitalocean",
+             "unlink_digitalocean",
+             "refresh_digitalocean",
+             "import_digitalocean",
+             "sync_digitalocean"
+           ] do
+    scope = socket.assigns.current_scope
+    id = socket.assigns.zone.id
+
+    result =
+      case event do
+        "link_digitalocean" -> Zones.link(scope, id)
+        "unlink_digitalocean" -> Zones.unlink(scope, id)
+        "refresh_digitalocean" -> Zones.list(scope, id)
+        "import_digitalocean" -> Zones.import_records(scope, id)
+        "sync_digitalocean" -> Zones.sync(scope, id)
+      end
+
+    case {event, result} do
+      {"refresh_digitalocean", {:ok, records}} ->
+        {:noreply,
+         socket
+         |> assign(:digitalocean_loaded, true)
+         |> stream(:digitalocean_records, Enum.map(records, &%{id: &1["id"], record: &1}),
+           reset: true
+         )}
+
+      {"sync_digitalocean", {:ok, counts}} ->
+        kind = if counts.failed == 0, do: :info, else: :error
+
+        {:noreply,
+         reload_provider(socket)
+         |> put_flash(
+           kind,
+           "DigitalOcean: #{counts.synced} synced, #{counts.failed} failed. Review failed records and token permissions before retrying."
+         )}
+
+      {"import_digitalocean", {:ok, counts}} ->
+        {:noreply,
+         reload_provider(socket)
+         |> put_flash(
+           :info,
+           "DigitalOcean: #{counts.imported} imported, #{counts.updated} updated, #{counts.skipped} skipped."
+         )}
+
+      {_, {:ok, _}} ->
+        {:noreply,
+         reload_provider(socket)
+         |> put_flash(:info, "DigitalOcean link updated. No remote records changed.")}
+
+      {_, {:error, reason}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           if(is_binary(reason),
+             do: reason,
+             else: "DigitalOcean operation failed; review record fields."
+           )
+         )}
+    end
+  end
+
+  defp reload_provider(socket) do
+    zone = Hosting.get_dns_zone_with_records!(socket.assigns.domain)
+    setting = Settings.dns_setting_for_zone(zone)
+
+    socket
+    |> assign(:zone, zone)
+    |> assign(:dns_setting, %{setting | cloudflare_api_token: nil, digitalocean_api_token: nil})
+    |> assign(:cloudflare_available, cloudflare_enabled?(setting))
+    |> assign(
+      :provider_form,
+      to_form(Hostctl.Hosting.DnsZone.provider_changeset(zone, %{}), as: :zone_provider)
+    )
+    |> assign(:digitalocean_loaded, false)
+    |> stream(:digitalocean_records, [], reset: true)
+    |> stream(:dns_records, zone.dns_records, reset: true)
+  end
+
   # --------------------------------------------------------------------------
   # Helpers
   # --------------------------------------------------------------------------
@@ -324,7 +438,7 @@ defmodule HostctlWeb.DnsLive.Index do
             <p class="mt-0.5 text-sm text-gray-500 dark:text-gray-400">{@domain.name}</p>
           </div>
           <%!-- Provider badge --%>
-          <%= if cloudflare_enabled?(@dns_setting) do %>
+          <%= if @cloudflare_available do %>
             <div class="flex items-center gap-2">
               <%= if @zone.cloudflare_zone_id do %>
                 <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-100 dark:bg-orange-900/20 text-orange-700 dark:text-orange-400 text-xs font-semibold">
@@ -359,13 +473,16 @@ defmodule HostctlWeb.DnsLive.Index do
             </div>
           <% else %>
             <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 text-xs font-medium">
-              <.icon name="hero-server" class="w-3.5 h-3.5" /> Local DNS
+              <.icon name="hero-server" class="w-3.5 h-3.5" /> {if @dns_setting.provider ==
+                                                                     "digitalocean",
+                                                                   do: "DigitalOcean",
+                                                                   else: "Local DNS"}
             </span>
           <% end %>
         </div>
 
         <%!-- Cloudflare info banner (zone not yet linked) --%>
-        <%= if cloudflare_enabled?(@dns_setting) && is_nil(@zone.cloudflare_zone_id) do %>
+        <%= if @cloudflare_available && is_nil(@zone.cloudflare_zone_id) do %>
           <div class="flex items-start gap-3 px-4 py-3 rounded-xl bg-orange-50 dark:bg-orange-900/10 border border-orange-200 dark:border-orange-800">
             <.icon name="hero-information-circle" class="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
             <div class="text-sm text-orange-700 dark:text-orange-300">
@@ -375,6 +492,135 @@ defmodule HostctlWeb.DnsLive.Index do
             </div>
           </div>
         <% end %>
+
+        <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6 space-y-4">
+          <h2 class="font-semibold text-gray-900 dark:text-white">Domain DNS provider</h2>
+          <.form
+            for={@provider_form}
+            id="domain-dns-provider-form"
+            phx-submit="save_provider"
+            class="space-y-4"
+          >
+            <.input
+              field={@provider_form[:provider]}
+              type="select"
+              label="Provider override"
+              options={[
+                {"Use panel default", "inherit"},
+                {"Local / manual", "local"},
+                {"Cloudflare", "cloudflare"},
+                {"DigitalOcean", "digitalocean"}
+              ]}
+            />
+            <.input
+              field={@provider_form[:digitalocean_api_token]}
+              value=""
+              type="password"
+              label="DigitalOcean token for this domain (optional)"
+              placeholder="Leave blank to retain the saved token"
+              autocomplete="new-password"
+            />
+            <p class="text-xs text-gray-500">
+              {if @zone.digitalocean_api_token,
+                do: "Domain token saved.",
+                else: "Uses the panel token when DigitalOcean is selected."} Tokens are never displayed. Changing the provider or domain token unlinks this zone without changing DNS or nameservers.
+            </p>
+            <.input
+              field={@provider_form[:clear_digitalocean_token]}
+              type="checkbox"
+              label="Remove domain token and use panel credentials"
+            />
+            <button
+              id="save-domain-provider-btn"
+              class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 transition-colors"
+            >
+              Save provider preference
+            </button>
+          </.form>
+        </div>
+        <div
+          :if={@dns_setting.provider == "digitalocean"}
+          id="digitalocean-zone-panel"
+          class="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20 p-6 space-y-4"
+        >
+          <h2 class="font-semibold text-gray-900 dark:text-white">DigitalOcean DNS</h2>
+          <p class="text-sm text-gray-500">
+            Create the domain in DigitalOcean first, then link it here. Linking only checks the existing zone. Once linked, record additions, edits and deletions sync automatically. Sync all publishes missing local values; import reads remote values into Hostctl.
+          </p>
+          <p class="text-xs text-gray-500">
+            Authoritative nameserver changes are disabled. DigitalOcean wildcard DNS-01 is not supported; regular certificates use HTTP-01. Email Delivery remains a manual DNS plan for this provider.
+          </p>
+          <div class="flex flex-wrap gap-3">
+            <button
+              :if={is_nil(@zone.digitalocean_zone_name)}
+              id="link-digitalocean-btn"
+              phx-click="link_digitalocean"
+              class="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 transition-colors"
+            >
+              Link existing zone
+            </button>
+            <%= if @zone.digitalocean_zone_name do %>
+              <button
+                id="refresh-digitalocean-btn"
+                phx-click="refresh_digitalocean"
+                class="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 transition-colors"
+              >
+                Refresh remote records
+              </button>
+              <button
+                id="import-digitalocean-btn"
+                phx-click="import_digitalocean"
+                class="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 transition-colors"
+              >
+                Import remote records
+              </button>
+              <button
+                id="sync-digitalocean-btn"
+                phx-click="sync_digitalocean"
+                data-confirm="Publish local records to DigitalOcean? Existing exact values are preserved; linked changed values are updated."
+                class="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 transition-colors"
+              >
+                Sync all to DigitalOcean
+              </button>
+              <button
+                id="unlink-digitalocean-btn"
+                phx-click="unlink_digitalocean"
+                class="text-sm text-gray-500 hover:text-red-500 transition-colors"
+              >
+                Unlink
+              </button>
+            <% end %>
+          </div>
+          <div :if={@digitalocean_loaded} class="overflow-x-auto">
+            <table class="w-full text-sm text-left">
+              <thead>
+                <tr>
+                  <th class="p-2">Type</th>
+                  <th class="p-2">Name</th>
+                  <th class="p-2">Value</th>
+                  <th class="p-2">Priority</th>
+                  <th class="p-2">TTL</th>
+                </tr>
+              </thead>
+              <tbody id="digitalocean-remote-records" phx-update="stream">
+                <tr id="dns-empty-1" class="hidden only:table-row">
+                  <td colspan="5" class="p-3">No remote records.</td>
+                </tr>
+                <tr
+                  :for={{dom_id, item} <- @streams.digitalocean_records}
+                  id={dom_id}
+                  class="border-t border-blue-100 dark:border-blue-900"
+                >
+                  <td class="p-2">{item.record["type"]}</td>
+                  <td class="p-2">{item.record["name"]}</td>
+                  <td class="p-2 break-all">{item.record["content"]}</td>
+                  <td class="p-2">{item.record["priority"]}</td>
+                  <td class="p-2">{item.record["ttl"]}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
 
         <%!-- Add record form --%>
         <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
@@ -445,7 +691,7 @@ defmodule HostctlWeb.DnsLive.Index do
                 <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-20">
                   Priority
                 </th>
-                <%= if cloudflare_enabled?(@dns_setting) && @zone.cloudflare_zone_id do %>
+                <%= if (@cloudflare_available && @zone.cloudflare_zone_id) || @zone.digitalocean_zone_name do %>
                   <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-24">
                     Sync
                   </th>
@@ -458,7 +704,7 @@ defmodule HostctlWeb.DnsLive.Index do
               phx-update="stream"
               class="divide-y divide-gray-100 dark:divide-gray-800"
             >
-              <tr class="hidden only:table-row">
+              <tr id="dns-empty-2" class="hidden only:table-row">
                 <td colspan="7" class="px-4 py-12 text-center text-sm text-gray-400">
                   No DNS records yet. Add your first record above.
                 </td>
@@ -540,19 +786,17 @@ defmodule HostctlWeb.DnsLive.Index do
                   </td>
                   <td class="px-4 py-3 text-sm text-gray-500">{record.ttl}</td>
                   <td class="px-4 py-3 text-sm text-gray-500">{record.priority || "—"}</td>
-                  <%= if cloudflare_enabled?(@dns_setting) && @zone.cloudflare_zone_id do %>
+                  <%= if (@cloudflare_available && @zone.cloudflare_zone_id) || @zone.digitalocean_zone_name do %>
                     <td class="px-4 py-3">
-                      <%= if record.cloudflare_record_id do %>
+                      <%= if record.digitalocean_record_id || record.cloudflare_record_id do %>
                         <span
-                          title={"CF: #{record.cloudflare_record_id}"}
-                          class="inline-flex items-center gap-1 text-xs text-orange-600 dark:text-orange-400 font-medium"
+                          class="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"
+                          title={"Provider record: #{record.digitalocean_record_id || record.cloudflare_record_id}"}
                         >
-                          <.icon name="hero-check-circle" class="w-3.5 h-3.5" /> Synced
+                          <.icon name="hero-check-circle" class="w-3.5 h-3.5" /> Linked
                         </span>
                       <% else %>
-                        <span class="inline-flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500">
-                          <.icon name="hero-minus-circle" class="w-3.5 h-3.5" /> Local
-                        </span>
+                        <span class="text-xs text-gray-400">Pending sync</span>
                       <% end %>
                     </td>
                   <% end %>
@@ -582,7 +826,7 @@ defmodule HostctlWeb.DnsLive.Index do
         </div>
 
         <%!-- Cloudflare footer (zone is linked) --%>
-        <%= if cloudflare_enabled?(@dns_setting) && @zone.cloudflare_zone_id do %>
+        <%= if @cloudflare_available && @zone.cloudflare_zone_id do %>
           <div class="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-orange-50 dark:bg-orange-900/10 border border-orange-200 dark:border-orange-800 text-xs text-orange-700 dark:text-orange-400">
             <div class="flex items-center gap-3">
               <.icon name="hero-cloud" class="w-4 h-4 shrink-0" />

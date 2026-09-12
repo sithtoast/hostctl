@@ -109,7 +109,8 @@ defmodule HostctlWeb.PanelLive.Settings do
   @impl true
   def handle_event("save_dns", %{"dns_provider" => params}, socket) do
     case Settings.save_dns_provider_setting(params) do
-      {:ok, updated} ->
+      {:ok, _updated} ->
+        updated = Settings.get_dns_provider_setting()
         dns_form = to_form(Settings.change_dns_provider_setting(updated), as: :dns_provider)
 
         {:noreply,
@@ -139,6 +140,23 @@ defmodule HostctlWeb.PanelLive.Settings do
 
         _ ->
           {:error, "No API token configured"}
+      end
+
+    {:noreply, assign(socket, :dns_test_status, status)}
+  end
+
+  @impl true
+  def handle_event("test_digitalocean", _, socket) do
+    status =
+      case socket.assigns.dns_setting.digitalocean_api_token do
+        token when is_binary(token) and token != "" ->
+          case Hostctl.DNS.DigitalOcean.verify_token(token) do
+            {:ok, :readable} -> :ok
+            {:error, reason} -> {:error, reason}
+          end
+
+        _ ->
+          {:error, "Save a DigitalOcean token first"}
       end
 
     {:noreply, assign(socket, :dns_test_status, status)}
@@ -318,7 +336,10 @@ defmodule HostctlWeb.PanelLive.Settings do
           </div>
 
           <div id="ip-settings" phx-update="stream">
-            <div class="hidden only:flex items-center justify-center py-12 text-sm text-gray-500 dark:text-gray-400">
+            <div
+              id="ip-settings-empty"
+              class="hidden only:flex items-center justify-center py-12 text-sm text-gray-500 dark:text-gray-400"
+            >
               No network interfaces detected.
             </div>
             <div
@@ -480,7 +501,7 @@ defmodule HostctlWeb.PanelLive.Settings do
               <div>
                 <h2 class="text-base font-semibold text-gray-900 dark:text-white">DNS Provider</h2>
                 <p class="text-xs text-gray-500 dark:text-gray-400">
-                  Choose how DNS records are managed — locally or via Cloudflare.
+                  Choose the panel default and credentials for domain DNS management.
                 </p>
               </div>
             </div>
@@ -494,72 +515,69 @@ defmodule HostctlWeb.PanelLive.Settings do
               phx-submit="save_dns"
               class="space-y-6"
             >
-              <%!-- Provider selection cards --%>
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <label class={[
-                  "relative flex items-start gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all",
-                  if(@dns_form[:provider].value == "local" || is_nil(@dns_form[:provider].value),
-                    do:
-                      "border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 dark:border-indigo-500",
-                    else:
-                      "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
-                  )
-                ]}>
-                  <input
-                    type="radio"
-                    name="dns_provider[provider]"
-                    value="local"
-                    checked={
-                      @dns_form[:provider].value == "local" ||
-                        is_nil(@dns_form[:provider].value)
-                    }
-                    class="mt-0.5 text-indigo-600"
+              <.input
+                field={@dns_form[:provider]}
+                type="select"
+                label="Default DNS provider"
+                options={[
+                  {"Local / manual", "local"},
+                  {"Cloudflare", "cloudflare"},
+                  {"DigitalOcean", "digitalocean"}
+                ]}
+              />
+              <p class="text-sm text-gray-500">
+                Applies to unlinked domains using the panel default. Existing links stay with their provider. Saving does not change DNS records or nameservers.
+              </p>
+              <%= if @dns_form[:provider].value == "digitalocean" do %>
+                <div
+                  id="digitalocean-panel-settings"
+                  class="space-y-4 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20 p-4"
+                >
+                  <.input
+                    field={@dns_form[:digitalocean_api_token]}
+                    type="password"
+                    value=""
+                    label="DigitalOcean API token"
+                    autocomplete="new-password"
+                    placeholder="Leave blank to keep the saved token; rotation unlinks domains using it"
                   />
-                  <div>
-                    <div class="flex items-center gap-2">
-                      <.icon name="hero-server" class="w-4 h-4 text-gray-600 dark:text-gray-400" />
-                      <span class="text-sm font-semibold text-gray-900 dark:text-white">
-                        Local DNS
-                      </span>
-                    </div>
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                      Records are stored in the database only. Use this for manual zone file exports or bind integration.
-                    </p>
-                  </div>
-                </label>
-
-                <label class={[
-                  "relative flex items-start gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all",
-                  if(@dns_form[:provider].value == "cloudflare",
-                    do:
-                      "border-orange-500 bg-orange-50/50 dark:bg-orange-950/20 dark:border-orange-500",
-                    else:
-                      "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
-                  )
-                ]}>
-                  <input
-                    type="radio"
-                    name="dns_provider[provider]"
-                    value="cloudflare"
-                    checked={@dns_form[:provider].value == "cloudflare"}
-                    class="mt-0.5 text-orange-500"
+                  <p class="text-xs text-gray-500">
+                    {if @dns_setting.digitalocean_api_token,
+                      do: "Token saved. ",
+                      else: "No token saved. "}Create a token with domain:read, domain:create, domain:update and domain:delete scopes. The connection test checks read access only.
+                  </p>
+                  <.input
+                    field={@dns_form[:clear_digitalocean_token]}
+                    type="checkbox"
+                    label="Remove saved DigitalOcean token"
                   />
-                  <div>
-                    <div class="flex items-center gap-2">
-                      <.icon
-                        name="hero-cloud"
-                        class="w-4 h-4 text-orange-500 dark:text-orange-400"
-                      />
-                      <span class="text-sm font-semibold text-gray-900 dark:text-white">
-                        Cloudflare
-                      </span>
-                    </div>
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                      Automatically sync DNS records to Cloudflare when records are created, updated, or deleted.
-                    </p>
-                  </div>
-                </label>
-              </div>
+                  <p class="text-xs text-gray-500">
+                    DigitalOcean does not proxy traffic. Domain certificates use HTTP-01; wildcard DNS-01 and automatic panel-hostname DNS are not supported.
+                  </p>
+                  <button
+                    id="test-digitalocean-btn"
+                    type="button"
+                    phx-click="test_digitalocean"
+                    class="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors"
+                  >
+                    Test saved token
+                  </button>
+                  <p
+                    :if={@dns_test_status == :ok}
+                    id="digitalocean-token-success"
+                    class="text-sm text-emerald-600"
+                  >
+                    Domain read access verified. Write permissions have not been tested.
+                  </p>
+                  <p
+                    :if={is_tuple(@dns_test_status)}
+                    id="digitalocean-token-error"
+                    class="text-sm text-red-600"
+                  >
+                    {elem(@dns_test_status, 1)}
+                  </p>
+                </div>
+              <% end %>
 
               <%!-- Cloudflare config (shown when cloudflare selected) --%>
               <%= if @dns_form[:provider].value == "cloudflare" do %>
@@ -567,6 +585,7 @@ defmodule HostctlWeb.PanelLive.Settings do
                   <div>
                     <.input
                       field={@dns_form[:cloudflare_api_token]}
+                      value=""
                       type="password"
                       label="Cloudflare API Token"
                       placeholder="Paste your API token here"

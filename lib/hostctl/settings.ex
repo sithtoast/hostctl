@@ -133,22 +133,72 @@ defmodule Hostctl.Settings do
   Upserts the DNS provider setting. Only one row is maintained globally.
   """
   def save_dns_provider_setting(attrs) do
-    case get_dns_provider_setting() do
-      %DnsProviderSetting{id: nil} = new ->
-        new
-        |> DnsProviderSetting.changeset(attrs)
-        |> Repo.insert()
+    setting = get_dns_provider_setting()
+    cs = DnsProviderSetting.changeset(setting, attrs)
 
-      existing ->
-        existing
-        |> DnsProviderSetting.changeset(attrs)
-        |> Repo.update()
-    end
+    Repo.transaction(fn ->
+      case Repo.insert_or_update(cs, log: false) do
+        {:ok, saved} ->
+          if Map.has_key?(cs.changes, :digitalocean_api_token) do
+            zones =
+              from z in Hostctl.Hosting.DnsZone,
+                where: is_nil(z.digitalocean_api_token) and not is_nil(z.digitalocean_zone_name),
+                select: z.id
+
+            Repo.update_all(
+              from(r in Hostctl.Hosting.DnsRecord, where: r.dns_zone_id in subquery(zones)),
+              set: [digitalocean_record_id: nil]
+            )
+
+            Repo.update_all(from(z in Hostctl.Hosting.DnsZone, where: z.id in subquery(zones)),
+              set: [digitalocean_zone_name: nil]
+            )
+          end
+
+          saved
+
+        {:error, cs} ->
+          Repo.rollback(cs)
+      end
+    end)
   end
 
   @doc "Returns a changeset for the DNS provider setting."
   def change_dns_provider_setting(%DnsProviderSetting{} = setting, attrs \\ %{}) do
     DnsProviderSetting.changeset(setting, attrs)
+  end
+
+  @doc "Effective domain provider. Linked zones stay pinned when the panel default changes."
+  def dns_setting_for_zone(zone) do
+    setting = get_dns_provider_setting()
+
+    provider =
+      cond do
+        zone.provider != "inherit" -> zone.provider
+        is_binary(zone.cloudflare_zone_id) -> "cloudflare"
+        is_binary(zone.digitalocean_zone_name) -> "digitalocean"
+        true -> setting.provider
+      end
+
+    %{
+      setting
+      | provider: provider,
+        digitalocean_api_token: zone.digitalocean_api_token || setting.digitalocean_api_token
+    }
+  end
+
+  def dns_setting_for_domain(domain) do
+    case Hostctl.Hosting.get_dns_zone_for_domain(domain) do
+      nil -> get_dns_provider_setting()
+      zone -> dns_setting_for_zone(zone)
+    end
+  end
+
+  def cloudflare_enabled_for_domain?(domain) do
+    setting = dns_setting_for_domain(domain)
+
+    setting.provider == "cloudflare" and is_binary(setting.cloudflare_api_token) and
+      setting.cloudflare_api_token != ""
   end
 
   @doc """

@@ -9,10 +9,34 @@ defmodule Hostctl.Hosting.DnsZone do
     field :status, :string, default: "active"
     field :cloudflare_zone_id, :string
 
+    field :provider, :string, default: "inherit"
+    field :digitalocean_api_token, Hostctl.EncryptedField, redact: true
+    field :digitalocean_zone_name, :string
+    field :clear_digitalocean_token, :boolean, virtual: true, default: false
+
     belongs_to :domain, Domain
     has_many :dns_records, DnsRecord
 
     timestamps(type: :utc_datetime)
+  end
+
+  def provider_changeset(zone, attrs) do
+    zone
+    |> cast(attrs, [:provider, :digitalocean_api_token, :clear_digitalocean_token])
+    |> validate_required([:provider])
+    |> validate_inclusion(:provider, ~w(inherit local cloudflare digitalocean))
+    |> preserve_token()
+  end
+
+  defp preserve_token(cs) do
+    cs =
+      if get_change(cs, :digitalocean_api_token) in [nil, ""],
+        do: delete_change(cs, :digitalocean_api_token),
+        else: cs
+
+    if get_field(cs, :clear_digitalocean_token),
+      do: put_change(cs, :digitalocean_api_token, nil),
+      else: cs
   end
 
   def changeset(dns_zone, attrs) do

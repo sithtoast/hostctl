@@ -103,6 +103,13 @@ defmodule Hostctl.DNS.Record do
     end
   end
 
-  # TXT and CAA values are case-sensitive; never normalize arbitrary content.
+  defp data_key(%{"type" => "CAA", "content" => content}) do
+    case Regex.run(~r/^(\d+)\s+(\S+)\s+(.+)$/, content) do
+      [_, flags, tag, value] -> {String.to_integer(flags), tag, String.trim(value, "\"")}
+      _ -> content
+    end
+  end
+
+  # TXT values are case-sensitive; never normalize arbitrary content.
   defp data_key(record), do: record["content"]
 end

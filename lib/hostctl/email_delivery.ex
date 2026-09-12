@@ -233,7 +233,7 @@ defmodule Hostctl.EmailDelivery do
   end
 
   defp snapshot(setting, mode) do
-    case Settings.get_dns_provider_setting() do
+    case Settings.dns_setting_for_domain(setting.domain) do
       %{provider: "cloudflare", cloudflare_api_token: token}
       when is_binary(token) and token != "" ->
         with {:ok, zone} <- cloudflare().find_zone(token, setting.domain.name),
