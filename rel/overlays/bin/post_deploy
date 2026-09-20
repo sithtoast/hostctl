@@ -7,6 +7,16 @@ set -euo pipefail
 APP_NAME="${APP_NAME:-hostctl}"
 ENV_FILE="${ENV_FILE:-/etc/$APP_NAME/env}"
 
+RELEASE_ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
+read -r HOSTCTL_ERTS_VERSION HOSTCTL_RELEASE_VERSION < "$RELEASE_ROOT/releases/start_erl.data" \
+  || [[ -n "${HOSTCTL_RELEASE_VERSION:-}" ]]
+[[ "$HOSTCTL_RELEASE_VERSION" =~ ^[A-Za-z0-9_.+-]+$ ]] \
+  || { echo 'Invalid Hostctl release version.' >&2; exit 1; }
+PORTAINER_INSTALLER="$RELEASE_ROOT/lib/hostctl-$HOSTCTL_RELEASE_VERSION/priv/deploy/install-portainer-broker"
+[[ -f "$PORTAINER_INSTALLER" ]] \
+  || { echo 'Portainer broker installer missing from this release.' >&2; exit 1; }
+bash "$PORTAINER_INSTALLER"
+
 # ----- Adminer auto-login wrapper -------------------------------------------
 ADMINER_DIR="/var/www/adminer"
 if [[ -f "$ADMINER_DIR/adminer.php" && -f "$ENV_FILE" ]]; then

@@ -121,6 +121,20 @@ defmodule HostctlWeb.PanelLive.Features do
         </div>
 
         <%!-- Feature cards --%>
+        <.link
+          id="features-portainer"
+          navigate={~p"/panel/portainer"}
+          class="flex items-center gap-4 rounded-xl border border-gray-200 bg-white p-5 transition hover:border-indigo-300 hover:shadow-sm dark:border-gray-800 dark:bg-gray-900"
+        >
+          <.icon name="hero-cube-transparent" class="size-8 text-indigo-500" />
+          <div>
+            <h2 class="font-semibold text-gray-900 dark:text-white">Portainer Agent</h2>
+            <p class="mt-1 text-sm text-gray-500">
+              Connect this Docker host to an existing Portainer server.
+            </p>
+          </div>
+          <.icon name="hero-arrow-right" class="ml-auto size-5 text-gray-400" />
+        </.link>
         <div id="feature-catalog" class="grid gap-4 xl:grid-cols-2">
           <div
             :for={feature <- @features}

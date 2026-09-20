@@ -88,6 +88,7 @@ defmodule HostctlWeb.Router do
       live "/panel/resources", PanelLive.Resources, :index
       live "/panel/settings", PanelLive.Settings, :index
       live "/panel/features", PanelLive.Features, :index
+      live "/panel/portainer", PanelLive.Portainer, :index
       live "/panel/docker", PanelLive.Docker, :index
       live "/panel/smarthost", PanelLive.Smarthost, :index
       live "/panel/databases", PanelLive.Databases, :index

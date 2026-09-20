@@ -1124,6 +1124,8 @@ fi
 # 3g. Systemd service ----------------------------------------------------------
 step "Configuring systemd service"
 
+bash "$SOURCE_DIR/priv/deploy/install-portainer-broker"
+
 cat > "$SERVICE_FILE" <<SVCEOF
 [Unit]
 Description=Hostctl Phoenix Server

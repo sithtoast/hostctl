@@ -6,6 +6,16 @@ describe source changes; publication and build numbers are tracked by GitHub rel
 
 ## Unreleased
 
+## 0.16.0
+
+### Added
+
+- Admin-only Portainer Standard Agent installation, status, retry and removal in
+  Features, with exact server-version matching, a selected IPv4 listen address
+  and optional agent secret.
+- A dedicated local Portainer service with a three-operation allowlist, verified
+  peer credentials, root-owned container reservations and no additional sudo grant.
+
 ## 0.15.0
 
 ### Added

@@ -1,0 +1,36 @@
+[Unit]
+Description=Hostctl Portainer Agent installer
+After=local-fs.target docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/lib/hostctl-portainer/broker.py
+WorkingDirectory=/usr/lib/hostctl-portainer
+RuntimeDirectory=hostctl-portainer
+RuntimeDirectoryMode=0750
+StateDirectory=hostctl-portainer
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+AmbientCapabilities=
+RestrictRealtime=true
+LockPersonality=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hostctl-portainer
+
+[Install]
+WantedBy=multi-user.target

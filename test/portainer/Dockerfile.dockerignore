@@ -1,0 +1,9 @@
+**
+!priv
+!priv/portainer
+!priv/portainer/*.py
+!priv/deploy
+!priv/deploy/hostctl-portainer.service
+!test
+!test/portainer
+!test/portainer/*.py
