@@ -46,8 +46,12 @@ defmodule Hostctl.WebServer do
     if enabled?() do
       domain = Repo.get!(Domain, domain.id)
 
-      with {:ok, runtime} <- Hostctl.Isolation.Runtime.prepare_domain(domain) do
-        do_sync_domain(domain, runtime)
+      if domain.web_enabled do
+        with {:ok, runtime} <- Hostctl.Isolation.Runtime.prepare_domain(domain) do
+          do_sync_domain(domain, runtime)
+        end
+      else
+        :ok
       end
     else
       :ok

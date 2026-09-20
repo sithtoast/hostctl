@@ -22,7 +22,7 @@ defmodule HostctlWeb.EmailLive.Index do
      |> assign(:page_title, "Email Accounts")
      |> assign(:active_tab, :email)
      |> assign(:is_admin?, is_admin)
-     |> assign(:domains, domains)
+     |> assign(:domains, Enum.filter(domains, & &1.mail_enabled))
      |> assign(:selected_domain_id, nil)
      |> assign(:query, "")
      |> assign(:accounts_empty?, true)
@@ -178,7 +178,9 @@ defmodule HostctlWeb.EmailLive.Index do
               name="hero-envelope"
               class="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto mb-3"
             />
-            <p class="text-sm font-medium text-gray-900 dark:text-white">No domains yet</p>
+            <p class="text-sm font-medium text-gray-900 dark:text-white">
+              No domains with mail hosting
+            </p>
             <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
               Add a domain first to create email accounts.
             </p>

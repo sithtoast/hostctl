@@ -23,7 +23,7 @@ defmodule Hostctl.EmailDelivery do
   end
 
   def list_domains(%Scope{user: %{role: "admin"}}),
-    do: Repo.all(from d in Domain, order_by: d.name)
+    do: Repo.all(from d in Domain, where: d.mail_enabled == true, order_by: d.name)
 
   def get_setting(%Scope{user: %{role: "admin"}}, domain_id) do
     domain = Repo.get!(Domain, domain_id)
@@ -54,7 +54,8 @@ defmodule Hostctl.EmailDelivery do
     setting = get_setting(scope, domain_id)
     {mode, relay} = route(scope, setting)
 
-    with {:ok, source, records} <- snapshot(setting, mode) do
+    with :ok <- require_mail_hosting(setting.domain),
+         {:ok, source, records} <- snapshot(setting, mode) do
       rows = Plan.build(setting, mode, records) |> Enum.map(&check_spf/1)
 
       {:ok,
@@ -182,7 +183,8 @@ defmodule Hostctl.EmailDelivery do
   def prepare_key(%Scope{user: %{role: "admin"}} = scope, domain_id) do
     setting = get_setting(scope, domain_id)
 
-    with {:direct, _} <- route(scope, setting),
+    with :ok <- require_mail_hosting(setting.domain),
+         {:direct, _} <- route(scope, setting),
          %{healthy?: true, pending?: false} <- SpamProtection.status(scope),
          {:ok, key} <- system().prepare_key(setting.domain.name, setting.selector) do
       setting
@@ -201,7 +203,8 @@ defmodule Hostctl.EmailDelivery do
   def enable_signing(%Scope{user: %{role: "admin"}} = scope, domain_id) do
     setting = get_setting(scope, domain_id)
 
-    with {:direct, _} <- route(scope, setting),
+    with :ok <- require_mail_hosting(setting.domain),
+         {:direct, _} <- route(scope, setting),
          true <- is_binary(setting.public_key) && is_binary(setting.selector),
          {:ok, [value]} <-
            dns().lookup("#{setting.selector}._domainkey.#{setting.domain.name}", "TXT"),
@@ -228,9 +231,16 @@ defmodule Hostctl.EmailDelivery do
 
   def signing_domains(%Scope{user: %{role: "admin"}}) do
     Repo.all(
-      from s in Setting, where: s.signing_enabled == true, order_by: s.domain_id, preload: :domain
+      from s in Setting,
+        join: d in assoc(s, :domain),
+        where: s.signing_enabled == true and d.mail_enabled == true,
+        order_by: s.domain_id,
+        preload: :domain
     )
   end
+
+  defp require_mail_hosting(%Domain{mail_enabled: true}), do: :ok
+  defp require_mail_hosting(_), do: {:error, "Mail hosting is not enabled for this domain"}
 
   defp snapshot(setting, mode) do
     case Settings.dns_setting_for_domain(setting.domain) do

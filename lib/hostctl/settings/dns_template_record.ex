@@ -29,13 +29,49 @@ defmodule Hostctl.Settings.DnsTemplateRecord do
     field :ttl, :integer, default: 3600
     field :priority, :integer
     field :description, :string
+    field :service, :string, default: "auto"
 
     timestamps(type: :utc_datetime)
   end
 
+  @doc "Classifies template services; explicit choices handle custom record names."
+  def service(%__MODULE__{service: service}) when service in ~w(web mail shared), do: service
+
+  def service(%__MODULE__{} = record) do
+    name = record.name |> String.downcase() |> String.trim_trailing(".")
+    value = record.value |> String.trim() |> String.trim_leading("\"") |> String.downcase()
+    labels = String.split(name, ".")
+
+    cond do
+      record.type == "MX" ->
+        "mail"
+
+      record.type == "TXT" and
+          String.starts_with?(value, ["v=spf1", "v=dmarc1", "v=dkim1", "v=tlsrptv1", "v=stsv1"]) ->
+        "mail"
+
+      Enum.any?(labels, &(&1 in ~w(_domainkey _dmarc _mta-sts))) ->
+        "mail"
+
+      hd(labels) in ~w(mail webmail smtp imap pop pop3 autodiscover autoconfig mta-sts _smtp _smtps _submission _submissions _imap _imaps _pop3 _pop3s _autodiscover) ->
+        "mail"
+
+      name in ["@", "{{domain}}"] and record.type in ~w(A AAAA CNAME) ->
+        "web"
+
+      hd(labels) in ~w(www ftp ipv4 ipv6) ->
+        "web"
+
+      true ->
+        "shared"
+    end
+  end
+
   def changeset(record, attrs) do
     record
-    |> cast(attrs, [:type, :name, :value, :ttl, :priority, :description])
+    |> cast(attrs, [:type, :name, :value, :ttl, :priority, :description, :service])
+    |> validate_required([:service])
+    |> validate_inclusion(:service, ~w(auto web mail shared))
     |> validate_required([:type, :name, :value])
     |> validate_inclusion(:type, DnsRecord.valid_types(),
       message: "must be a valid DNS record type"

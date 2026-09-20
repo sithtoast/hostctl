@@ -290,6 +290,38 @@ defmodule HostctlWeb.DomainLive.Index do
               phx-submit="save"
               class="space-y-4"
             >
+              <fieldset
+                id="domain-hosting-services"
+                class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-3"
+              >
+                <legend class="px-1 text-sm font-semibold text-gray-900 dark:text-white">
+                  Host with Hostctl
+                </legend>
+                <div class="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <.input field={@form[:web_enabled]} type="checkbox" label="Web hosting" />
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      Serve the website here and add web records from the DNS template.
+                    </p>
+                  </div>
+                  <div>
+                    <.input field={@form[:mail_enabled]} type="checkbox" label="Mail hosting" />
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      Create local mailboxes and add mail records. Uncheck if mail is hosted elsewhere.
+                    </p>
+                  </div>
+                </div>
+                <div class="border-t border-gray-200 dark:border-gray-700 pt-3">
+                  <.input
+                    field={@form[:apply_dns_template]}
+                    type="checkbox"
+                    label="Add default DNS records for selected services"
+                  />
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Linking or syncing a DNS provider can publish these records. You can manage external-provider records manually.
+                  </p>
+                </div>
+              </fieldset>
               <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <.input
                   field={@form[:name]}
@@ -301,6 +333,7 @@ defmodule HostctlWeb.DomainLive.Index do
                   field={@form[:php_version]}
                   type="select"
                   label="PHP Version"
+                  disabled={!Phoenix.HTML.Form.normalize_value("checkbox", @form[:web_enabled].value)}
                   options={[
                     {"PHP 8.5", "8.5"},
                     {"PHP 8.4", "8.4"},
@@ -316,6 +349,7 @@ defmodule HostctlWeb.DomainLive.Index do
                 field={@form[:document_root]}
                 type="text"
                 label="Document Root"
+                disabled={!Phoenix.HTML.Form.normalize_value("checkbox", @form[:web_enabled].value)}
                 placeholder="/var/www/example.com/public"
               />
               <div class="flex items-center gap-3 pt-2">

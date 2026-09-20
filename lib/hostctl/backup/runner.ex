@@ -867,6 +867,8 @@ defmodule Hostctl.Backup.Runner do
         name: domain.name,
         document_root: domain.document_root,
         php_version: domain.php_version,
+        web_enabled: domain.web_enabled,
+        mail_enabled: domain.mail_enabled,
         status: domain.status,
         ssl_enabled: domain.ssl_enabled,
         allow_http_with_ssl: domain.allow_http_with_ssl

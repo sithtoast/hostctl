@@ -1,6 +1,7 @@
 # Hostctl
 
-See the [changelog](CHANGELOG.md) and [version/release workflow](docs/releases.md).
+See the [changelog](CHANGELOG.md), [version/release workflow](docs/releases.md),
+and [domain hosting services](docs/domain-services.md).
 
 For fast iteration against real Linux hosting services, see
 [the VM development guide](docs/vm-development.md).

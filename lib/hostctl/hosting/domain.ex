@@ -27,6 +27,8 @@ defmodule Hostctl.Hosting.Domain do
     field :disk_usage_mb, :integer, default: 0
     field :bandwidth_used_mb, :integer, default: 0
     field :apply_dns_template, :boolean, default: true
+    field :web_enabled, :boolean, default: true
+    field :mail_enabled, :boolean, default: true
     field :autoindex, :boolean, default: false
     field :statistics_enabled, :boolean, default: true
     field :cr_date, :date
@@ -65,10 +67,13 @@ defmodule Hostctl.Hosting.Domain do
       :ssl_enabled,
       :allow_http_with_ssl,
       :apply_dns_template,
+      :web_enabled,
+      :mail_enabled,
       :autoindex,
       :cr_date
     ])
-    |> validate_required([:name])
+    |> validate_required([:name, :web_enabled, :mail_enabled])
+    |> validate_service_selection()
     |> validate_format(:name, ~r/^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?(\.[a-z]{2,})+$/i,
       message: "must be a valid domain name"
     )
@@ -76,6 +81,17 @@ defmodule Hostctl.Hosting.Domain do
     |> validate_inclusion(:php_version, @valid_php_versions)
     |> unique_constraint(:name)
     |> maybe_set_document_root()
+  end
+
+  # Service changes on existing domains require a separate resource migration.
+  defp validate_service_selection(%{data: %{id: nil}} = changeset), do: changeset
+
+  defp validate_service_selection(changeset) do
+    Enum.reduce([:web_enabled, :mail_enabled], changeset, fn field, changeset ->
+      if changed?(changeset, field),
+        do: add_error(changeset, field, "is selected when adding a domain"),
+        else: changeset
+    end)
   end
 
   defp maybe_set_document_root(changeset) do

@@ -46,6 +46,9 @@ defmodule Hostctl.CertBot do
   Returns `{:ok, expires_at, full_log}` on success or `{:error, reason, full_log}`
   on failure.
   """
+  def provision(%Domain{web_enabled: false}, _cert),
+    do: {:error, :web_hosting_disabled, "Web hosting is not enabled for this domain"}
+
   def provision(%Domain{} = domain, %SslCertificate{cert_type: "lets_encrypt"} = cert) do
     if enabled?() do
       setting = Settings.dns_setting_for_domain(domain)

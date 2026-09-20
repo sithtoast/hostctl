@@ -652,11 +652,11 @@ defmodule HostctlWeb.PanelLive.Settings do
                   DNS Record Templates
                 </h2>
                 <p class="text-xs text-gray-500 dark:text-gray-400">
-                  These records are automatically added to every new domain. Use <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{domain}}"}</code>, <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ip}}"}</code>, <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ipv6}}"}</code>,
+                  These records are added when the new domain uses the template and hosts the selected service. Use <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{domain}}"}</code>, <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ip}}"}</code>, <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">{"{{ipv6}}"}</code>,
                   <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">
                     {"{{hostname}}"}
                   </code>
-                  as placeholders.
+                  as placeholders. Automatic recognizes standard web and mail records; select a service explicitly for custom records. Always include applies regardless of the domain’s hosting choices.
                 </p>
               </div>
               <button
@@ -709,7 +709,18 @@ defmodule HostctlWeb.PanelLive.Settings do
                 label="Priority"
                 placeholder="MX/SRV"
               />
-              <div class="sm:col-span-5">
+              <.input
+                field={@template_form[:service]}
+                type="select"
+                label="Service"
+                options={[
+                  {"Automatic", "auto"},
+                  {"Web hosting", "web"},
+                  {"Mail hosting", "mail"},
+                  {"Always include", "shared"}
+                ]}
+              />
+              <div class="sm:col-span-4">
                 <.input
                   field={@template_form[:description]}
                   type="text"
@@ -791,7 +802,18 @@ defmodule HostctlWeb.PanelLive.Settings do
                           type="number"
                           label="Priority"
                         />
-                        <div class="sm:col-span-5">
+                        <.input
+                          field={@edit_template_form[:service]}
+                          type="select"
+                          label="Service"
+                          options={[
+                            {"Automatic", "auto"},
+                            {"Web hosting", "web"},
+                            {"Mail hosting", "mail"},
+                            {"Always include", "shared"}
+                          ]}
+                        />
+                        <div class="sm:col-span-4">
                           <.input
                             field={@edit_template_form[:description]}
                             type="text"
@@ -848,6 +870,9 @@ defmodule HostctlWeb.PanelLive.Settings do
                     <td class="px-4 py-3 text-sm text-gray-500">{record.ttl}</td>
                     <td class="px-4 py-3 text-sm text-gray-500 truncate max-w-xs">
                       {record.description || "—"}
+                      <span class="block text-xs text-gray-400">
+                        Service: {Hostctl.Settings.DnsTemplateRecord.service(record)}
+                      </span>
                     </td>
                     <td class="px-4 py-3 text-right">
                       <div class="flex items-center justify-end gap-3">

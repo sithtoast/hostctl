@@ -29,7 +29,7 @@ defmodule Hostctl.Statistics do
   def refresh(scope, id) do
     domain = domain!(scope, id)
 
-    if domain.statistics_enabled do
+    if domain.web_enabled && domain.statistics_enabled do
       collect_domain(domain)
     else
       {:error, "Automatic collection is disabled for this domain. Enable it to collect traffic."}
@@ -66,7 +66,12 @@ defmodule Hostctl.Statistics do
   end
 
   def enabled_ids do
-    Repo.all(from d in Hosting.Domain, where: d.statistics_enabled, select: d.id, order_by: d.id)
+    Repo.all(
+      from d in Hosting.Domain,
+        where: d.statistics_enabled and d.web_enabled,
+        select: d.id,
+        order_by: d.id
+    )
   end
 
   def read_report(scope, id, kind, archive_id \\ nil)

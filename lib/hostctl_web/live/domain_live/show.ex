@@ -880,7 +880,7 @@ defmodule HostctlWeb.DomainLive.Show do
                 {@domain.status}
               </span>
             </div>
-            <p class="mt-0.5 text-sm text-gray-500 dark:text-gray-400">
+            <p :if={@domain.web_enabled} class="mt-0.5 text-sm text-gray-500 dark:text-gray-400">
               PHP {@domain.php_version} &middot; {if @domain.document_root,
                 do: @domain.document_root,
                 else: "Default root"}
@@ -899,13 +899,19 @@ defmodule HostctlWeb.DomainLive.Show do
           ]
 
           tabs =
-            if Settings.feature_enabled?("email") do
+            if @domain.mail_enabled && Settings.feature_enabled?("email") do
               tabs ++ [{"Smarthost", :smarthost, "hero-envelope-open"}]
             else
               tabs
             end
 
-          tabs = tabs ++ [{"S3 Storage", :s3, "hero-cloud-arrow-up"}] %>
+          tabs = tabs ++ [{"S3 Storage", :s3, "hero-cloud-arrow-up"}]
+
+          tabs =
+            if @domain.web_enabled,
+              do: tabs,
+              else:
+                Enum.reject(tabs, fn {_, section, _} -> section in [:subdomains, :ssl, :s3, :cron] end) %>
           <%= for {label, section, icon} <- tabs do %>
             <button
               phx-click="set_section"
@@ -925,6 +931,7 @@ defmodule HostctlWeb.DomainLive.Show do
             </button>
           <% end %>
           <.link
+            :if={@domain.mail_enabled}
             id="domain-email-link"
             navigate={~p"/email?#{%{domain_id: @domain.id}}"}
             class="px-3 py-1.5 text-sm text-indigo-600 dark:text-indigo-400"
@@ -1004,11 +1011,20 @@ defmodule HostctlWeb.DomainLive.Show do
               <div class="ui-panel-heading">
                 <div>
                   <h2>Domain services</h2>
-                  <p>Manage resources for this website</p>
+                  <p id="domain-hosting-summary">
+                    Web hosting: {if @domain.web_enabled, do: "Hostctl", else: "Not hosted here"} · Mail hosting: {if @domain.mail_enabled,
+                      do: "Hostctl",
+                      else: "Not hosted here"}
+                  </p>
                 </div>
               </div>
               <div class="ui-service-grid">
-                <button phx-click="set_section" phx-value-section="subdomains" class="ui-service">
+                <button
+                  :if={@domain.web_enabled}
+                  phx-click="set_section"
+                  phx-value-section="subdomains"
+                  class="ui-service"
+                >
                   <.icon name="hero-link" class="size-5" />
                   <span>
                     Subdomains<small>{length(@subdomain_names)} configured</small>
@@ -1023,6 +1039,7 @@ defmodule HostctlWeb.DomainLive.Show do
                   <span aria-hidden="true">→</span>
                 </button>
                 <.link
+                  :if={@domain.web_enabled}
                   id="domain-statistics-link"
                   navigate={~p"/domains/#{@domain.id}/statistics"}
                   class="ui-service"
@@ -1031,7 +1048,11 @@ defmodule HostctlWeb.DomainLive.Show do
                   <span>Traffic statistics<small>Visitors, pages &amp; Plesk history</small></span>
                   <span aria-hidden="true">→</span>
                 </.link>
-                <.link navigate={~p"/email?#{%{domain_id: @domain.id}}"} class="ui-service">
+                <.link
+                  :if={@domain.mail_enabled}
+                  navigate={~p"/email?#{%{domain_id: @domain.id}}"}
+                  class="ui-service"
+                >
                   <.icon name="hero-envelope" class="size-5" />
                   <span>
                     Email accounts<small>Mailboxes & webmail</small>
@@ -1152,7 +1173,7 @@ defmodule HostctlWeb.DomainLive.Show do
         <% end %>
 
         <%!-- Subdomains --%>
-        <%= if @active_section == :subdomains do %>
+        <%= if @domain.web_enabled && @active_section == :subdomains do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
               <h3 class="text-base font-semibold text-gray-900 dark:text-white">Subdomains</h3>
@@ -1285,7 +1306,7 @@ defmodule HostctlWeb.DomainLive.Show do
         <% end %>
 
         <%!-- SSL --%>
-        <%= if @active_section == :ssl do %>
+        <%= if @domain.web_enabled && @active_section == :ssl do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
             <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-4">
               SSL Certificate
@@ -1637,7 +1658,7 @@ defmodule HostctlWeb.DomainLive.Show do
         <% end %>
 
         <%!-- Cron Jobs --%>
-        <%= if @active_section == :cron do %>
+        <%= if @domain.web_enabled && @active_section == :cron do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
               <h3 class="text-base font-semibold text-gray-900 dark:text-white">Cron Jobs</h3>
@@ -1707,7 +1728,7 @@ defmodule HostctlWeb.DomainLive.Show do
         <% end %>
 
         <%!-- Smarthost --%>
-        <%= if @active_section == :smarthost do %>
+        <%= if @domain.mail_enabled && @active_section == :smarthost do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
             <div class="px-6 py-5 border-b border-gray-200 dark:border-gray-800">
               <h3 class="text-base font-semibold text-gray-900 dark:text-white">Domain Smarthost</h3>
@@ -1893,7 +1914,7 @@ defmodule HostctlWeb.DomainLive.Show do
         <% end %>
 
         <%!-- S3 Storage --%>
-        <%= if @active_section == :s3 do %>
+        <%= if @domain.web_enabled && @active_section == :s3 do %>
           <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
               <div>

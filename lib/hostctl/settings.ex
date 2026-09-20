@@ -287,11 +287,18 @@ defmodule Hostctl.Settings do
 
   Returns a list of attribute maps ready to pass to `Hosting.create_dns_record/2`.
   """
-  def resolve_dns_template(domain_name) do
+  def resolve_dns_template(domain_name, services \\ []) do
     {ipv4, ipv6} = primary_server_ips()
     hostname = server_hostname()
 
     list_dns_template_records()
+    |> Enum.filter(fn record ->
+      case DnsTemplateRecord.service(record) do
+        "web" -> Keyword.get(services, :web, true)
+        "mail" -> Keyword.get(services, :mail, true)
+        "shared" -> true
+      end
+    end)
     |> Enum.map(fn record ->
       %{
         type: record.type,

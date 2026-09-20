@@ -6,6 +6,23 @@ describe source changes; publication and build numbers are tracked by GitHub rel
 
 ## Unreleased
 
+## 0.15.0
+
+### Added
+
+- Web and mail hosting choices when adding a domain, with optional DNS template
+  application. Web-only domains skip Hostctl mail records and local mailbox setup;
+  mail-only domains skip web provisioning and web DNS defaults.
+- Service labels on DNS templates, including automatic classification of standard
+  records and explicit labels for custom templates.
+
+### Changed
+
+- Domain service links, mailbox creation, mail configuration exports, Email Delivery
+  publication and traffic collection respect the selected hosting services.
+- Existing domains keep their enabled services. Provider synchronization preserves
+  external mail records; manually managed DNS remains available for external services.
+
 ## 0.14.0
 
 ### Added

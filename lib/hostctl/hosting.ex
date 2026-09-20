@@ -89,7 +89,7 @@ defmodule Hostctl.Hosting do
           |> Repo.insert()
 
         if domain.apply_dns_template do
-          apply_dns_template(zone, domain.name)
+          apply_dns_template(zone, domain)
         end
 
         sync_result(WebServer.sync_domain(domain), {:ok, domain})
@@ -286,8 +286,11 @@ defmodule Hostctl.Hosting do
   end
 
   defp do_create_subdomain(domain, attrs, opts) do
+    domain = Repo.get!(Domain, domain.id)
+
     %Subdomain{domain_id: domain.id}
     |> Subdomain.changeset(attrs)
+    |> require_hosting_service(domain.web_enabled, :name, "Web hosting")
     |> Repo.insert()
     |> case do
       {:ok, subdomain} = result ->
@@ -669,8 +672,8 @@ defmodule Hostctl.Hosting do
       record.cloudflare_record_id == changes.cloudflare_record_id
   end
 
-  defp apply_dns_template(%DnsZone{} = zone, domain_name) do
-    Settings.resolve_dns_template(domain_name)
+  defp apply_dns_template(%DnsZone{} = zone, %Domain{} = domain) do
+    Settings.resolve_dns_template(domain.name, web: domain.web_enabled, mail: domain.mail_enabled)
     |> Enum.each(fn attrs ->
       %DnsRecord{dns_zone_id: zone.id}
       |> DnsRecord.changeset(attrs)
@@ -726,6 +729,7 @@ defmodule Hostctl.Hosting do
       from ea in EmailAccount,
         join: d in Domain,
         on: ea.domain_id == d.id,
+        where: d.mail_enabled == true,
         select: {ea.username, d.name, ea.hashed_password}
     )
   end
@@ -741,9 +745,12 @@ defmodule Hostctl.Hosting do
   end
 
   def create_email_account(%Domain{} = domain, attrs) do
+    domain = Repo.get!(Domain, domain.id)
+
     result =
       %EmailAccount{domain_id: domain.id}
       |> EmailAccount.changeset(attrs)
+      |> require_hosting_service(domain.mail_enabled, :username, "Mail hosting")
       |> Repo.insert()
 
     if match?({:ok, _}, result) do
@@ -753,6 +760,11 @@ defmodule Hostctl.Hosting do
 
     result
   end
+
+  defp require_hosting_service(changeset, true, _field, _service), do: changeset
+
+  defp require_hosting_service(changeset, false, field, service),
+    do: Ecto.Changeset.add_error(changeset, field, "#{service} is not enabled for this domain")
 
   def update_email_account(%EmailAccount{} = account, attrs) do
     result =
@@ -1578,9 +1590,12 @@ defmodule Hostctl.Hosting do
   end
 
   def create_s3_backend(%Domain{} = domain, attrs) do
+    domain = Repo.get!(Domain, domain.id)
+
     result =
       %DomainS3Backend{domain_id: domain.id}
       |> DomainS3Backend.changeset(attrs)
+      |> require_hosting_service(domain.web_enabled, :bucket, "Web hosting")
       |> validate_isolated_mount(domain)
       |> Repo.insert()
 
