@@ -220,7 +220,7 @@ defmodule Hostctl.Hosting do
       from p in DomainProxy,
         join: d in assoc(p, :domain),
         join: u in assoc(d, :user),
-        order_by: [asc: d.name, asc: p.path],
+        order_by: [asc: d.name, asc: p.subdomain, asc: p.path],
         preload: [domain: {d, user: u}]
     )
   end
@@ -229,7 +229,7 @@ defmodule Hostctl.Hosting do
     Repo.all(
       from p in DomainProxy,
         where: p.domain_id == ^domain.id,
-        order_by: [asc: p.path]
+        order_by: [asc: p.subdomain, asc: p.path]
     )
   end
 
@@ -238,37 +238,136 @@ defmodule Hostctl.Hosting do
     |> Repo.preload(domain: [:user])
   end
 
-  def create_domain_proxy(attrs) do
-    %DomainProxy{}
-    |> DomainProxy.changeset(attrs)
-    |> Repo.insert()
-    |> case do
-      {:ok, proxy} ->
-        domain = Repo.get!(Domain, proxy.domain_id)
-        WebServer.sync_domain(domain)
-        {:ok, Repo.preload(proxy, domain: [:user])}
+  def create_domain_proxy(%Scope{user: %{role: "admin"}}, attrs) do
+    changeset = change_domain_proxy(%DomainProxy{}, attrs)
+    domain_id = Ecto.Changeset.get_field(changeset, :domain_id)
 
-      error ->
-        error
+    result =
+      Repo.transaction(fn ->
+        domain =
+          domain_id && Repo.one(from d in Domain, where: d.id == ^domain_id, lock: "FOR UPDATE")
+
+        changeset = validate_proxy_target(changeset, domain)
+
+        case Repo.insert(changeset) do
+          {:ok, proxy} -> proxy
+          {:error, changeset} -> Repo.rollback(changeset)
+        end
+      end)
+
+    case result do
+      {:ok, proxy} -> proxy_sync_result(proxy)
+      error -> error
     end
   end
 
-  def delete_domain_proxy(%DomainProxy{} = proxy) do
-    domain = Repo.get!(Domain, proxy.domain_id)
+  def create_domain_proxy(_scope, attrs) do
+    {:error,
+     change_domain_proxy(%DomainProxy{}, attrs)
+     |> Ecto.Changeset.add_error(:base, "Only administrators can manage Docker proxies")}
+  end
 
-    Repo.delete(proxy)
-    |> case do
-      {:ok, deleted} ->
-        WebServer.sync_domain(domain)
-        {:ok, Repo.preload(deleted, domain: [:user])}
+  def delete_domain_proxy(%Scope{user: %{role: "admin"}}, %DomainProxy{} = proxy) do
+    case Repo.delete(proxy) do
+      {:ok, deleted} -> proxy_sync_result(deleted)
+      error -> error
+    end
+  end
 
-      error ->
-        error
+  def delete_domain_proxy(_scope, %DomainProxy{} = proxy),
+    do:
+      {:error, Ecto.Changeset.change(proxy) |> Ecto.Changeset.add_error(:base, "Not authorized")}
+
+  def retry_domain_proxy(%Scope{user: %{role: "admin"}}, %DomainProxy{} = proxy),
+    do: WebServer.sync_domain(Repo.get!(Domain, proxy.domain_id))
+
+  def set_domain_proxy_websocket(%Scope{user: %{role: "admin"}}, %DomainProxy{id: id}, enabled)
+      when is_boolean(enabled) do
+    case Repo.get!(DomainProxy, id)
+         |> DomainProxy.changeset(%{websocket_enabled: enabled})
+         |> Repo.update() do
+      {:ok, proxy} -> proxy_sync_result(proxy)
+      error -> error
+    end
+  end
+
+  def set_domain_proxy_websocket(_scope, %DomainProxy{} = proxy, _enabled),
+    do:
+      {:error, Ecto.Changeset.change(proxy) |> Ecto.Changeset.add_error(:base, "Not authorized")}
+
+  defp proxy_sync_result(proxy) do
+    proxy = Repo.preload(proxy, domain: [:user])
+
+    case WebServer.sync_domain(proxy.domain) do
+      :ok -> {:ok, proxy}
+      {:error, _} -> {:ok, proxy, :sync_failed}
     end
   end
 
   def change_domain_proxy(%DomainProxy{} = proxy, attrs \\ %{}) do
-    DomainProxy.changeset(proxy, attrs)
+    domain_id = Map.get(attrs, "domain_id", Map.get(attrs, :domain_id, proxy.domain_id))
+
+    {domain_id, valid_id?} =
+      case Ecto.Type.cast(:id, domain_id) do
+        {:ok, id} -> {id, true}
+        _ -> {nil, false}
+      end
+
+    changeset = %{proxy | domain_id: domain_id} |> DomainProxy.changeset(attrs)
+
+    if valid_id?,
+      do: changeset,
+      else: Ecto.Changeset.add_error(changeset, :domain_id, "is invalid")
+  end
+
+  defp validate_proxy_target(%Ecto.Changeset{valid?: false} = changeset, _domain), do: changeset
+
+  defp validate_proxy_target(changeset, nil),
+    do: Ecto.Changeset.add_error(changeset, :domain_id, "does not exist")
+
+  defp validate_proxy_target(changeset, domain) do
+    subdomain = Ecto.Changeset.get_field(changeset, :subdomain)
+    path = Ecto.Changeset.get_field(changeset, :path)
+    hostname = if subdomain in [nil, ""], do: domain.name, else: "#{subdomain}.#{domain.name}"
+
+    suspended? =
+      subdomain not in [nil, ""] and
+        Repo.exists?(
+          from s in Subdomain,
+            where: s.domain_id == ^domain.id and s.name == ^subdomain and s.status != "active"
+        )
+
+    separate_domain? =
+      Repo.exists?(from d in Domain, where: d.name == ^hostname and d.id != ^domain.id)
+
+    s3_conflict? =
+      Repo.exists?(
+        from b in DomainS3Backend,
+          where:
+            b.domain_id == ^domain.id and b.enabled == true and b.subdomain == ^subdomain and
+              (b.url_path == "" or b.url_path == ^path)
+      )
+
+    cond do
+      not domain.web_enabled or domain.status != "active" ->
+        Ecto.Changeset.add_error(changeset, :domain_id, "requires active web hosting")
+
+      suspended? ->
+        Ecto.Changeset.add_error(changeset, :subdomain, "is suspended")
+
+      separate_domain? ->
+        Ecto.Changeset.add_error(
+          changeset,
+          :subdomain,
+          "already exists as a separate domain; select that domain instead"
+        )
+
+      s3_conflict? ->
+        Ecto.Changeset.add_error(changeset, :path, "conflicts with an enabled S3 mapping")
+
+      true ->
+        changeset
+    end
   end
 
   # ---------------------------------------------------------------------------

@@ -79,6 +79,14 @@ defmodule Hostctl.WebServer.Nginx do
       |> Enum.filter(&(&1.subdomain != ""))
       |> Enum.group_by(& &1.subdomain)
 
+    enabled_proxies = Enum.filter(proxies, & &1.enabled)
+    main_proxies = Enum.filter(enabled_proxies, &(&1.subdomain in [nil, ""]))
+
+    subdomain_proxy_map =
+      enabled_proxies
+      |> Enum.reject(&(&1.subdomain in [nil, ""]))
+      |> Enum.group_by(& &1.subdomain)
+
     main =
       if whole_domain_backend do
         s3_vhost_block(
@@ -100,7 +108,7 @@ defmodule Hostctl.WebServer.Nginx do
           ssl_cert,
           domain.name,
           allow_http_with_ssl,
-          proxies,
+          main_proxies,
           domain_path_backends,
           domain.autoindex
         )
@@ -108,10 +116,14 @@ defmodule Hostctl.WebServer.Nginx do
 
     # Subdomains that have DB records.
     active_subs = Enum.filter(subdomains, &(&1.status == "active"))
-    active_sub_names = Enum.map(active_subs, & &1.name)
+    all_sub_names = Enum.map(subdomains, & &1.name)
 
-    # Subdomain names that only exist as S3 backend entries (no DB Subdomain record).
-    extra_sub_names = Map.keys(subdomain_backend_map) -- active_sub_names
+    # Suspended subdomains must never reappear through an implicit proxy vhost.
+    extra_sub_names =
+      (Map.keys(subdomain_backend_map) ++ Map.keys(subdomain_proxy_map))
+      |> Enum.uniq()
+      |> Enum.reject(&(&1 in all_sub_names))
+      |> Enum.sort()
 
     active_sub_blocks =
       Enum.map(active_subs, fn sub ->
@@ -140,14 +152,14 @@ defmodule Hostctl.WebServer.Nginx do
             ssl_cert,
             domain.name,
             allow_http_with_ssl,
-            [],
+            Map.get(subdomain_proxy_map, sub.name, []),
             path_backends_for_sub,
             sub.autoindex
           )
         end
       end)
 
-    # S3-only vhosts for subdomains that have no DB Subdomain record.
+    # Proxy/S3 vhosts also work without a filesystem Subdomain record.
     extra_sub_blocks =
       Enum.map(extra_sub_names, fn sub_name ->
         backends_for_sub = Map.get(subdomain_backend_map, sub_name, [])
@@ -178,7 +190,7 @@ defmodule Hostctl.WebServer.Nginx do
             ssl_cert,
             domain.name,
             allow_http_with_ssl,
-            [],
+            Map.get(subdomain_proxy_map, sub_name, []),
             path_backends_for_sub,
             false
           )
@@ -434,15 +446,21 @@ defmodule Hostctl.WebServer.Nginx do
   end
 
   defp proxy_directives(proxy) do
+    upgrade_headers =
+      if proxy.websocket_enabled do
+        ~s(proxy_set_header Upgrade $http_upgrade;\n            proxy_set_header Connection "upgrade";)
+      else
+        ~s(proxy_set_header Upgrade "";\n            proxy_set_header Connection "";)
+      end
+
     """
-            proxy_pass http://127.0.0.1:#{proxy.upstream_port}/;
+            proxy_pass #{proxy.upstream_scheme}://127.0.0.1:#{proxy.upstream_port}/;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "upgrade";
+            #{upgrade_headers}
             proxy_buffering off;
             proxy_connect_timeout 60s;
             proxy_read_timeout 86400s;

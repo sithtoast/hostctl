@@ -6,6 +6,16 @@ describe source changes; publication and build numbers are tracked by GitHub rel
 
 ## Unreleased
 
+## 0.17.0
+
+- Proxy Docker containers to subdomains directly from Docker → Proxies, with
+  independent hostname/path mappings and HTTP or HTTPS local upstreams.
+- Add WebSocket support switches to new and saved mappings, preserving existing
+  enabled behavior. Keep manually selected host ports during form edits.
+- Report Nginx apply failures without claiming success; retain saved mappings for
+  retry and reject suspended targets, hostname collisions and conflicting S3 routes.
+- Update Mint to 1.10.1 to fix its HTTP response parser advisory.
+
 ## 0.16.0
 
 ### Added

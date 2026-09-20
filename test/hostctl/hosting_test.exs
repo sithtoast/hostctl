@@ -127,7 +127,7 @@ defmodule Hostctl.HostingTest do
                })
 
       assert {:ok, proxy} =
-               Hosting.create_domain_proxy(%{
+               Hosting.create_domain_proxy(user_scope_fixture(admin_user_fixture()), %{
                  domain_id: domain.id,
                  path: "/app/",
                  container_name: "web-app",
@@ -150,7 +150,9 @@ defmodule Hostctl.HostingTest do
 
       attrs = %{domain_id: domain.id, path: "/", container_name: "mastodon", upstream_port: 3000}
 
-      assert {:ok, proxy} = Hosting.create_domain_proxy(attrs)
+      assert {:ok, proxy} =
+               Hosting.create_domain_proxy(user_scope_fixture(admin_user_fixture()), attrs)
+
       assert proxy.path == "/"
 
       assert Enum.any?(
@@ -158,7 +160,12 @@ defmodule Hostctl.HostingTest do
                &(&1.id == proxy.id && &1.path == "/")
              )
 
-      assert {:error, changeset} = Hosting.create_domain_proxy(%{attrs | path: "//"})
+      assert {:error, changeset} =
+               Hosting.create_domain_proxy(user_scope_fixture(admin_user_fixture()), %{
+                 attrs
+                 | path: "//"
+               })
+
       assert %{path: ["has already been taken"]} = errors_on(changeset)
     end
 
@@ -172,7 +179,7 @@ defmodule Hostctl.HostingTest do
                })
 
       assert {:ok, _proxy} =
-               Hosting.create_domain_proxy(%{
+               Hosting.create_domain_proxy(user_scope_fixture(admin_user_fixture()), %{
                  domain_id: domain.id,
                  path: "/api",
                  container_name: "api-1",
@@ -181,7 +188,7 @@ defmodule Hostctl.HostingTest do
                })
 
       assert {:error, changeset} =
-               Hosting.create_domain_proxy(%{
+               Hosting.create_domain_proxy(user_scope_fixture(admin_user_fixture()), %{
                  domain_id: domain.id,
                  path: "/api",
                  container_name: "api-2",

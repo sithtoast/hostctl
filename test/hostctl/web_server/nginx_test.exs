@@ -159,4 +159,65 @@ defmodule Hostctl.WebServer.NginxTest do
     assert config =~ "server_name blog.example.com;"
     assert length(Regex.scan(~r/listen 443 ssl http2;/, config)) == 1
   end
+
+  test "Docker subdomains have independent upstreams and do not change the apex" do
+    config =
+      Nginx.generate_config(%Domain{name: "example.com"}, [], nil, [
+        %DomainProxy{subdomain: "app", path: "/", upstream_port: 9443, upstream_scheme: "https"},
+        %DomainProxy{subdomain: "api", path: "/v1", upstream_port: 3000, websocket_enabled: false}
+      ])
+
+    [main, api, app] = String.split(config, ~r/# (?:api|app)\.example.com — managed by hostctl/)
+    refute main =~ "proxy_pass"
+    assert app =~ "server_name app.example.com;"
+    assert app =~ "proxy_pass https://127.0.0.1:9443/;"
+    assert app =~ "proxy_set_header Upgrade $http_upgrade;"
+    assert api =~ "server_name api.example.com;"
+    assert api =~ "location ^~ /v1/"
+    assert api =~ ~s(proxy_set_header Upgrade "";)
+    assert api =~ ~s(proxy_set_header Connection "";)
+    refute api =~ "$http_upgrade"
+  end
+
+  test "existing filesystem subdomain gets its own proxy while suspended and disabled targets stay absent" do
+    config =
+      Nginx.generate_config(
+        %Domain{name: "example.com"},
+        [
+          %Subdomain{name: "app", status: "active"},
+          %Subdomain{name: "held", status: "suspended"}
+        ],
+        nil,
+        [
+          %DomainProxy{subdomain: "app", path: "/", upstream_port: 3000},
+          %DomainProxy{subdomain: "held", path: "/", upstream_port: 4000},
+          %DomainProxy{subdomain: "off", path: "/", upstream_port: 5000, enabled: false}
+        ]
+      )
+
+    assert length(Regex.scan(~r/server_name app.example.com;/, config)) == 1
+    assert config =~ "127.0.0.1:3000"
+    refute config =~ "held.example.com;"
+    refute config =~ "off.example.com;"
+  end
+
+  for wildcard <- [true, false] do
+    test "Docker subdomain TLS respects wildcard coverage #{wildcard}" do
+      config =
+        Nginx.generate_config(
+          %Domain{name: "example.com", ssl_enabled: true},
+          [],
+          %SslCertificate{
+            status: "active",
+            cert_type: "custom",
+            covers_wildcard_subdomains: unquote(wildcard)
+          },
+          [%DomainProxy{subdomain: "app", path: "/", upstream_port: 3000}]
+        )
+
+      [_main, sub] = String.split(config, "# app.example.com — managed by hostctl", parts: 2)
+      assert sub =~ "listen 443 ssl http2;" == unquote(wildcard)
+      assert sub =~ "return 301 https://$host$request_uri;" == unquote(wildcard)
+    end
+  end
 end

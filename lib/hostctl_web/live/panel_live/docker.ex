@@ -7,7 +7,10 @@ defmodule HostctlWeb.PanelLive.Docker do
 
   @impl true
   def mount(_params, _session, socket) do
-    domains = Hosting.list_all_domains_with_users()
+    domains =
+      Hosting.list_all_domains_with_users()
+      |> Enum.filter(&(&1.web_enabled and &1.status == "active"))
+
     proxies = Hosting.list_domain_proxies_for_admin()
 
     socket =
@@ -719,8 +722,11 @@ defmodule HostctlWeb.PanelLive.Docker do
   end
 
   @impl true
-  def handle_event("validate_proxy", %{"domain_proxy" => params}, socket) do
-    params = maybe_autofill_port(params, socket.assigns.all_containers_list)
+  def handle_event("validate_proxy", %{"domain_proxy" => params} = event, socket) do
+    params =
+      if event["_target"] == ["domain_proxy", "container_name"],
+        do: maybe_autofill_port(params, socket.assigns.all_containers_list),
+        else: params
 
     form =
       %DomainProxy{}
@@ -732,23 +738,24 @@ defmodule HostctlWeb.PanelLive.Docker do
 
   @impl true
   def handle_event("create_proxy", %{"domain_proxy" => params}, socket) do
-    case Hosting.create_domain_proxy(params) do
+    case Hosting.create_domain_proxy(socket.assigns.current_scope, params) do
       {:ok, proxy} ->
         {:noreply,
-         socket
-         |> assign(:proxies_empty?, false)
-         |> assign(
-           :proxy_form,
-           to_form(
-             Hosting.change_domain_proxy(
-               %DomainProxy{},
-               default_proxy_params(socket.assigns.domains, socket.assigns.containers)
-             ),
-             as: :domain_proxy
-           )
-         )
-         |> stream_insert(:proxies, proxy)
-         |> put_flash(:info, "Proxy mapping created and Nginx reloaded.")}
+         proxy_created(
+           socket,
+           proxy,
+           :info,
+           "Proxy mapping saved and Nginx reloaded. Point the hostname's DNS at this server."
+         )}
+
+      {:ok, proxy, :sync_failed} ->
+        {:noreply,
+         proxy_created(
+           socket,
+           proxy,
+           :error,
+           "Mapping saved, but Nginx could not apply it. Check the web server and use Retry apply."
+         )}
 
       {:error, changeset} ->
         {:noreply, assign(socket, :proxy_form, to_form(changeset, as: :domain_proxy))}
@@ -758,15 +765,110 @@ defmodule HostctlWeb.PanelLive.Docker do
   @impl true
   def handle_event("delete_proxy", %{"id" => id}, socket) do
     proxy = Hosting.get_domain_proxy_for_admin!(id)
-    {:ok, _deleted} = Hosting.delete_domain_proxy(proxy)
+    result = Hosting.delete_domain_proxy(socket.assigns.current_scope, proxy)
 
-    remaining = Hosting.list_domain_proxies_for_admin()
+    case result do
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not remove the proxy mapping.")}
 
-    {:noreply,
-     socket
-     |> assign(:proxies_empty?, remaining == [])
-     |> stream_delete(:proxies, proxy)
-     |> put_flash(:info, "Proxy mapping removed and Nginx reloaded.")}
+      _ ->
+        remaining = Hosting.list_domain_proxies_for_admin()
+        failed? = match?({:ok, _, :sync_failed}, result)
+
+        {:noreply,
+         socket
+         |> assign(:proxies_empty?, remaining == [])
+         |> stream_delete(:proxies, proxy)
+         |> put_flash(
+           if(failed?, do: :error, else: :info),
+           if(failed?,
+             do:
+               "Mapping removed, but Nginx reload failed. Use Reapply mappings after fixing the web server.",
+             else: "Proxy mapping removed and Nginx reloaded."
+           )
+         )}
+    end
+  end
+
+  def handle_event("reapply_proxies", _params, socket) do
+    results =
+      Enum.map(socket.assigns.domains, fn domain ->
+        Hosting.retry_domain_proxy(socket.assigns.current_scope, %DomainProxy{
+          domain_id: domain.id
+        })
+      end)
+
+    if Enum.all?(results, &(&1 == :ok)),
+      do: {:noreply, put_flash(socket, :info, "Nginx mappings applied.")},
+      else:
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Some mappings could not be applied. Check the web server configuration."
+         )}
+  end
+
+  def handle_event("toggle_proxy_websocket", %{"id" => id}, socket) do
+    proxy = Hosting.get_domain_proxy_for_admin!(id)
+
+    case Hosting.set_domain_proxy_websocket(
+           socket.assigns.current_scope,
+           proxy,
+           not proxy.websocket_enabled
+         ) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> stream_insert(:proxies, updated)
+         |> put_flash(:info, "WebSocket setting applied.")}
+
+      {:ok, updated, :sync_failed} ->
+        {:noreply,
+         socket
+         |> stream_insert(:proxies, updated)
+         |> put_flash(
+           :error,
+           "Setting saved, but Nginx reload failed. Use Retry apply after checking the web server."
+         )}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update WebSocket support.")}
+    end
+  end
+
+  def handle_event("retry_proxy", %{"id" => id}, socket) do
+    proxy = Hosting.get_domain_proxy_for_admin!(id)
+
+    case Hosting.retry_domain_proxy(socket.assigns.current_scope, proxy) do
+      :ok ->
+        {:noreply, put_flash(socket, :info, "Nginx mappings applied.")}
+
+      {:error, _} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Nginx could not apply the mappings. Check the web server configuration."
+         )}
+    end
+  end
+
+  defp proxy_created(socket, proxy, kind, message) do
+    socket
+    |> assign(:proxies_empty?, false)
+    |> assign(
+      :proxy_form,
+      to_form(
+        Hosting.change_domain_proxy(
+          %DomainProxy{},
+          default_proxy_params(socket.assigns.domains, socket.assigns.containers)
+        ),
+        as: :domain_proxy
+      )
+    )
+    |> stream_insert(:proxies, proxy)
+    |> put_flash(kind, message)
   end
 
   defp filter_container_stream(socket) do
@@ -797,7 +899,7 @@ defmodule HostctlWeb.PanelLive.Docker do
           <div>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Docker</h1>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Manage containers and proxy them to whole domains or specific paths.
+              Manage containers and proxy them to domains, subdomains, or specific paths.
             </p>
           </div>
           <button
@@ -1498,12 +1600,35 @@ defmodule HostctlWeb.PanelLive.Docker do
               phx-submit="create_proxy"
               class="grid grid-cols-1 md:grid-cols-2 gap-4"
             >
+              <p
+                :for={{:base, {message, _}} <- @proxy_form.errors}
+                class="md:col-span-2 text-sm text-red-600"
+              >
+                {message}
+              </p>
               <.input
                 field={@proxy_form[:domain_id]}
                 type="select"
                 label="Domain"
                 options={domain_options(@domains)}
               />
+
+              <div>
+                <.input
+                  field={@proxy_form[:subdomain]}
+                  type="text"
+                  label="Subdomain (optional)"
+                  placeholder="app"
+                  aria-describedby="docker-proxy-subdomain-help"
+                />
+                <p
+                  id="docker-proxy-subdomain-help"
+                  class="mt-2 text-sm text-gray-500 dark:text-gray-400"
+                >
+                  Enter app for app.your-domain.com, or leave blank for the domain itself.
+                  Point its DNS at this server. HTTPS needs an active wildcard certificate on the parent domain.
+                </p>
+              </div>
 
               <.input
                 field={@proxy_form[:container_name]}
@@ -1516,13 +1641,13 @@ defmodule HostctlWeb.PanelLive.Docker do
                 <.input
                   field={@proxy_form[:path]}
                   type="text"
-                  label="Domain Path"
+                  label="URL Path"
                   placeholder="/ or /app"
                   aria-describedby="docker-proxy-path-help"
                 />
                 <p id="docker-proxy-path-help" class="mt-2 text-sm text-gray-500 dark:text-gray-400">
-                  Use / to serve the whole domain, or a path such as /app to serve only that path.
-                  Whole-domain S3 backends take precedence over Docker proxies.
+                  Use / to serve the whole hostname, or /app to strip that prefix and forward to the container.
+                  Conflicting S3 mappings must be removed first.
                 </p>
               </div>
 
@@ -1535,6 +1660,35 @@ defmodule HostctlWeb.PanelLive.Docker do
                 placeholder="3000"
               />
 
+              <div>
+                <.input
+                  field={@proxy_form[:upstream_scheme]}
+                  type="select"
+                  label="Container protocol"
+                  options={[{"HTTP", "http"}, {"HTTPS (local container)", "https"}]}
+                />
+                <p
+                  id="docker-proxy-upstream-help"
+                  class="mt-2 text-sm text-gray-500 dark:text-gray-400"
+                >
+                  Use the host port reachable at 127.0.0.1, not the container's internal port.
+                  HTTPS supports self-signed container certificates on this local connection.
+                </p>
+              </div>
+
+              <div>
+                <.input
+                  field={@proxy_form[:websocket_enabled]}
+                  type="checkbox"
+                  label="WebSocket support"
+                />
+                <p
+                  id="docker-proxy-websocket-help"
+                  class="mt-2 text-sm text-gray-500 dark:text-gray-400"
+                >
+                  Allow connection upgrades for apps with live updates, consoles, or streaming.
+                </p>
+              </div>
               <.input field={@proxy_form[:enabled]} type="checkbox" label="Enabled" />
 
               <div class="md:col-span-2">
@@ -1554,6 +1708,13 @@ defmodule HostctlWeb.PanelLive.Docker do
               <h2 class="text-base font-semibold text-gray-900 dark:text-white">
                 Active Mappings
               </h2>
+              <button
+                id="docker-reapply-proxies"
+                phx-click="reapply_proxies"
+                class="mt-2 text-sm font-medium text-indigo-600 hover:text-indigo-500 transition-colors"
+              >
+                Reapply mappings
+              </button>
             </div>
 
             <%= if @proxies_empty? do %>
@@ -1569,7 +1730,7 @@ defmodule HostctlWeb.PanelLive.Docker do
               <div
                 :for={{id, proxy} <- @streams.proxies}
                 id={id}
-                class="flex items-center gap-4 px-6 py-4 border-b border-gray-100 dark:border-gray-800 last:border-b-0"
+                class="grid grid-cols-[auto_minmax(0,1fr)] md:flex items-center gap-4 px-6 py-4 border-b border-gray-100 dark:border-gray-800 last:border-b-0"
               >
                 <div class="flex items-center justify-center w-9 h-9 rounded-lg bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 shrink-0">
                   <.icon name="hero-link" class="w-4 h-4" />
@@ -1577,16 +1738,16 @@ defmodule HostctlWeb.PanelLive.Docker do
 
                 <div class="flex-1 min-w-0">
                   <p class="text-sm font-medium text-gray-900 dark:text-white truncate">
-                    {proxy.domain.name}{proxy.path}
+                    {DomainProxy.hostname(proxy)}{proxy.path}
                   </p>
                   <p class="text-xs text-gray-500 dark:text-gray-400 truncate">
-                    {proxy.container_name} -> 127.0.0.1:{proxy.upstream_port}
+                    {proxy.container_name} → {proxy.upstream_scheme}://127.0.0.1:{proxy.upstream_port}
                     <span class="text-gray-400 dark:text-gray-600">&nbsp;&bull;&nbsp;</span>
                     {proxy.domain.user.email}
                   </p>
                 </div>
 
-                <div class="flex items-center gap-3 shrink-0">
+                <div class="col-span-2 flex flex-wrap items-center gap-3 md:shrink-0">
                   <span class={[
                     "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
                     if(proxy.enabled,
@@ -1597,6 +1758,26 @@ defmodule HostctlWeb.PanelLive.Docker do
                     {if proxy.enabled, do: "Enabled", else: "Disabled"}
                   </span>
 
+                  <button
+                    id={"toggle-proxy-websocket-#{proxy.id}"}
+                    type="button"
+                    phx-click="toggle_proxy_websocket"
+                    phx-value-id={proxy.id}
+                    role="switch"
+                    aria-checked={to_string(proxy.websocket_enabled)}
+                    aria-label={"WebSocket support for #{DomainProxy.hostname(proxy)}#{proxy.path}"}
+                    class="rounded-md border border-gray-200 dark:border-gray-700 px-3 py-1.5 text-xs font-medium hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                  >
+                    WebSockets: {if proxy.websocket_enabled, do: "On", else: "Off"}
+                  </button>
+                  <button
+                    id={"retry-domain-proxy-#{proxy.id}"}
+                    phx-click="retry_proxy"
+                    phx-value-id={proxy.id}
+                    class="text-xs font-medium text-indigo-600 hover:text-indigo-500 transition-colors"
+                  >
+                    Retry apply
+                  </button>
                   <button
                     id={"delete-domain-proxy-#{proxy.id}"}
                     phx-click="delete_proxy"
@@ -2266,7 +2447,10 @@ defmodule HostctlWeb.PanelLive.Docker do
 
     %{
       "domain_id" => domain_id,
-      "path" => "/app",
+      "path" => "/",
+      "subdomain" => "",
+      "upstream_scheme" => "http",
+      "websocket_enabled" => true,
       "container_name" => if(container, do: container.name, else: ""),
       "upstream_port" => port,
       "enabled" => true
